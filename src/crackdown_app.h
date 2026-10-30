@@ -39,6 +39,7 @@
 #include "guest_image.h"
 #include "guest_fault_log.h"
 #include "hang_watchdog.h"
+#include "benchmark.h"
 #include "internal_render_scale.h"
 #include "language_setting.h"
 #include "launcher.h"
@@ -274,6 +275,7 @@ class CrackdownApp : public rex::ReXApp {
       // user 0 instead of the default one-pad-per-user slots.
       if (auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system())) {
         input->SetDeviceAssignment(std::make_unique<rex::input::SharedAssignment>());
+        crackdown::benchmark::Install(input, runtime()->virtual_membase(), LogsDir(user_data_root()));
       }
     }
     if (window()) {

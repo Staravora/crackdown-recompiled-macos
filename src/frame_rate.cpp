@@ -15,6 +15,7 @@
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
 
+#include "benchmark.h"
 #include "guest_hooks.h"
 #include "guest_layout.h"
 #include "platform.h"
@@ -151,5 +152,6 @@ REX_HOOK_RAW(__imp__VdSwap) {
   rex::ppc::HostToGuestFunction<rex::kernel::xboxkrnl::VdSwap_entry>(ctx, base);
   if (!t_repeat_present) {
     crackdown::CountGuestFrame();
+    crackdown::benchmark::OnGuestFrame();
   }
 }
