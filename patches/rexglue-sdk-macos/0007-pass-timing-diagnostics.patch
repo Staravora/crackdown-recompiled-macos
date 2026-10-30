@@ -1,0 +1,367 @@
+diff --git a/src/graphics/vulkan/deferred_command_buffer.cpp b/src/graphics/vulkan/deferred_command_buffer.cpp
+--- a/src/graphics/vulkan/deferred_command_buffer.cpp
++++ b/src/graphics/vulkan/deferred_command_buffer.cpp
+@@ -9,10 +9,12 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <algorithm>
+ #include <cstddef>
+ #include <chrono>
+ #include <cstdint>
+ #include <cstring>
++#include <vector>
+ 
+ #include <rex/assert.h>
+ #include <rex/dbg.h>
+@@ -23,12 +25,54 @@
+ #include <rex/math.h>
+ #include <rex/logging.h>
+ 
++REXCVAR_DEFINE_BOOL(vulkan_log_pass_timings, false, "GPU/Vulkan",
++                    "Every few seconds, measure the GPU time of each render pass in one "
++                    "submission and log the slowest ones (diagnostic)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_BOOL(vulkan_trim_render_areas, false, "GPU/Vulkan",
+                     "Bound attachment load/store areas to the scissors used by recorded draws")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ 
+ namespace rex::graphics::vulkan {
+ 
++namespace {
++
++// Diagnostic GPU timing of render passes, sampled in one submission at a time.
++// Only the command processor thread executes deferred command buffers.
++struct TimedPass {
++  uint32_t query;
++  VkRect2D area;
++  uint32_t color_count;
++  bool depth;
++  uint32_t loads;
++  uint32_t draws;
++  uint64_t vertices;
++  uint32_t pipelines;
++  uint64_t first_view;
++  uint64_t last_pipeline;
++  uint64_t draw_pipeline;
++  uint32_t dispatches_after;
++  uint32_t copies_after;
++  uint32_t barriers_after;
++};
++
++struct PassTimer {
++  static constexpr uint32_t kQueryCount = 4096;
++  PFN_vkCmdWriteTimestamp write_timestamp = nullptr;
++  PFN_vkGetQueryPoolResults get_results = nullptr;
++  VkQueryPool pool = VK_NULL_HANDLE;
++  double period_ns = 1.0;
++  bool unavailable = false;
++  bool pending = false;
++  uint32_t queries_used = 0;
++  std::vector<TimedPass> passes;
++  std::chrono::steady_clock::time_point next_sample;
++};
++PassTimer g_pass_timer;
++
++}  // namespace
++
+ DeferredCommandBuffer::DeferredCommandBuffer(const VulkanCommandProcessor& command_processor,
+                                              size_t initial_size)
+     : command_processor_(command_processor) {
+@@ -129,6 +173,81 @@
+ 
+   const ui::vulkan::VulkanDevice::Functions& dfn =
+       command_processor_.GetVulkanDevice()->functions();
++
++  PassTimer& timer = g_pass_timer;
++  bool time_passes = false;
++  TimedPass* timed_pass = nullptr;
++  TimedPass* previous_timed_pass = nullptr;
++  uint64_t current_graphics_pipeline = 0;
++  if (REXCVAR_GET(vulkan_log_pass_timings) && !timer.unavailable) {
++    const ui::vulkan::VulkanDevice* vulkan_device = command_processor_.GetVulkanDevice();
++    const VkDevice device = vulkan_device->device();
++    if (timer.pool == VK_NULL_HANDLE) {
++      const auto& ifn = vulkan_device->vulkan_instance()->functions();
++      timer.write_timestamp = reinterpret_cast<PFN_vkCmdWriteTimestamp>(
++          ifn.vkGetDeviceProcAddr(device, "vkCmdWriteTimestamp"));
++      timer.get_results = reinterpret_cast<PFN_vkGetQueryPoolResults>(
++          ifn.vkGetDeviceProcAddr(device, "vkGetQueryPoolResults"));
++      VkPhysicalDeviceProperties physical_device_properties;
++      ifn.vkGetPhysicalDeviceProperties(vulkan_device->physical_device(),
++                                        &physical_device_properties);
++      timer.period_ns = physical_device_properties.limits.timestampPeriod;
++      VkQueryPoolCreateInfo pool_create_info = {};
++      pool_create_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
++      pool_create_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
++      pool_create_info.queryCount = PassTimer::kQueryCount;
++      if (!timer.write_timestamp || !timer.get_results ||
++          dfn.vkCreateQueryPool(device, &pool_create_info, nullptr, &timer.pool) != VK_SUCCESS) {
++        REXGPU_WARN("Render pass timing is unavailable");
++        timer.unavailable = true;
++      }
++    }
++    if (timer.pending) {
++      std::vector<uint64_t> timestamps(timer.queries_used);
++      if (timer.queries_used &&
++          timer.get_results(device, timer.pool, 0, timer.queries_used,
++                            sizeof(uint64_t) * timestamps.size(), timestamps.data(),
++                            sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
++        timer.pending = false;
++        std::vector<std::pair<double, const TimedPass*>> durations;
++        double total_ms = 0.0;
++        for (const TimedPass& pass : timer.passes) {
++          double ms = double(timestamps[pass.query + 1] - timestamps[pass.query]) *
++                      timer.period_ns / 1e6;
++          durations.emplace_back(ms, &pass);
++          total_ms += ms;
++        }
++        std::sort(durations.begin(), durations.end(),
++                  [](const auto& a, const auto& b) { return a.first > b.first; });
++        REXGPU_INFO("Pass timings: {} passes, {:.2f} ms in passes, {:.2f} ms submission span",
++                    durations.size(), total_ms,
++                    double(timestamps[timer.queries_used - 1] - timestamps[0]) * timer.period_ns /
++                        1e6);
++        for (size_t i = 0; i < std::min<size_t>(durations.size(), 12); ++i) {
++          const TimedPass& pass = *durations[i].second;
++          REXGPU_INFO(
++              "  #{} {:.2f} ms: {}x{} at {},{}; {} color{}, {} loaded; {} draws, {} vertices, "
++              "{} pipeline binds, draw pipeline {:x}; then {} dispatches, {} copies, {} barriers; "
++              "view {:x}",
++              pass.query / 2, durations[i].first, pass.area.extent.width, pass.area.extent.height,
++              pass.area.offset.x, pass.area.offset.y, pass.color_count,
++              pass.depth ? " + depth" : "", pass.loads, pass.draws, pass.vertices,
++              pass.pipelines, pass.draw_pipeline, pass.dispatches_after, pass.copies_after,
++              pass.barriers_after, pass.first_view);
++        }
++      }
++    }
++    auto now = std::chrono::steady_clock::now();
++    if (!timer.unavailable && !timer.pending && now >= timer.next_sample) {
++      time_passes = true;
++      timer.next_sample = now + std::chrono::seconds(3);
++      timer.passes.clear();
++      timer.passes.reserve(PassTimer::kQueryCount / 2);
++      timer.queries_used = 0;
++      dfn.vkCmdResetQueryPool(command_buffer, timer.pool, 0, PassTimer::kQueryCount);
++    }
++  }
++
+   const uintmax_t* stream = command_stream_.data();
+   size_t stream_remaining = command_stream_.size();
+   while (stream_remaining) {
+@@ -136,6 +255,83 @@
+     stream += kCommandHeaderSizeElements;
+     stream_remaining -= kCommandHeaderSizeElements;
+ 
++    if (time_passes) {
++      switch (header.command) {
++        case Command::kVkBeginRenderPass:
++        case Command::kVkBeginRendering:
++          if (timer.queries_used + 2 <= PassTimer::kQueryCount) {
++            previous_timed_pass = nullptr;
++            timed_pass = &timer.passes.emplace_back();
++            *timed_pass = {};
++            timed_pass->query = timer.queries_used++;
++            timer.write_timestamp(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timer.pool,
++                                  timed_pass->query);
++            if (header.command == Command::kVkBeginRendering) {
++              const auto& args = *reinterpret_cast<const ArgsVkBeginRendering*>(stream);
++              const auto* attachments = reinterpret_cast<const VkRenderingAttachmentInfo*>(
++                  reinterpret_cast<const uint8_t*>(stream) +
++                  rex::align(sizeof(ArgsVkBeginRendering), alignof(VkRenderingAttachmentInfo)));
++              timed_pass->area = args.render_area;
++              timed_pass->color_count = args.color_attachment_count;
++              timed_pass->depth = args.has_depth_attachment;
++              uint32_t count = args.color_attachment_count + uint32_t(args.has_depth_attachment);
++              for (uint32_t i = 0; i < count; ++i) {
++                if (attachments[i].imageView == VK_NULL_HANDLE) continue;
++                if (!timed_pass->first_view) {
++                  timed_pass->first_view = uint64_t(attachments[i].imageView);
++                }
++                timed_pass->loads += attachments[i].loadOp == VK_ATTACHMENT_LOAD_OP_LOAD;
++              }
++            } else {
++              timed_pass->area =
++                  reinterpret_cast<const ArgsVkBeginRenderPass*>(stream)->render_area;
++            }
++          }
++          break;
++        case Command::kVkDraw:
++          if (timed_pass) {
++            timed_pass->draw_pipeline = current_graphics_pipeline;
++            ++timed_pass->draws;
++            timed_pass->vertices += reinterpret_cast<const ArgsVkDraw*>(stream)->vertex_count;
++          }
++          break;
++        case Command::kVkDrawIndexed:
++          if (timed_pass) {
++            timed_pass->draw_pipeline = current_graphics_pipeline;
++            ++timed_pass->draws;
++            timed_pass->vertices +=
++                reinterpret_cast<const ArgsVkDrawIndexed*>(stream)->index_count;
++          }
++          break;
++        case Command::kVkBindPipeline: {
++          const auto& bind_args = *reinterpret_cast<const ArgsVkBindPipeline*>(stream);
++          if (bind_args.pipeline_bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
++            current_graphics_pipeline = uint64_t(bind_args.pipeline);
++          }
++        }
++          if (timed_pass) {
++            ++timed_pass->pipelines;
++            timed_pass->last_pipeline =
++                uint64_t(reinterpret_cast<const ArgsVkBindPipeline*>(stream)->pipeline);
++          }
++          break;
++        case Command::kVkDispatch:
++          if (previous_timed_pass) ++previous_timed_pass->dispatches_after;
++          break;
++        case Command::kVkCopyBuffer:
++        case Command::kVkCopyBufferToImage:
++        case Command::kVkCopyImage:
++        case Command::kHoistPoint:
++          if (previous_timed_pass) ++previous_timed_pass->copies_after;
++          break;
++        case Command::kVkPipelineBarrier:
++          if (previous_timed_pass) ++previous_timed_pass->barriers_after;
++          break;
++        default:
++          break;
++      }
++    }
++
+     switch (header.command) {
+       case Command::kVkBeginRenderPass: {
+         auto& args = *reinterpret_cast<const ArgsVkBeginRenderPass*>(stream);
+@@ -442,9 +638,25 @@
+         break;
+     }
+ 
++    if (timed_pass && (header.command == Command::kVkEndRendering ||
++                       header.command == Command::kVkEndRenderPass)) {
++      timer.write_timestamp(command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timer.pool,
++                            timer.queries_used++);
++      previous_timed_pass = timed_pass;
++      timed_pass = nullptr;
++    }
++
+     stream += header.arguments_size_elements;
+     stream_remaining -= header.arguments_size_elements;
+   }
++  if (timed_pass) {
++    // A pass left open at the end of the stream.
++    timer.passes.pop_back();
++    --timer.queries_used;
++  }
++  if (time_passes && timer.queries_used) {
++    timer.pending = true;
++  }
+ }
+ 
+ void DeferredCommandBuffer::CmdVkPipelineBarrier(
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -54,6 +54,8 @@
+     "Number of pipeline creation threads for Vulkan async pipeline creation (-1 for auto)")
+     .range(-1, 32)
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++REXCVAR_DECLARE(bool, vulkan_log_pass_timings);
+ 
+ REXCVAR_DEFINE_BOOL(vulkan_tessellation_wireframe, false, "GPU/Vulkan",
+                     "Render tessellation as wireframe")
+@@ -3498,6 +3500,14 @@
+         creation_arguments.tessellation_patch_control_points, description.render_pass_key.key,
+         uint32_t(use_dynamic_rendering));
+     return false;
++  }
++  if (REXCVAR_GET(vulkan_log_pass_timings)) {
++    REXGPU_INFO("Pipeline {:x}{}: VS {:016X}, PS {:016X}", uint64_t(pipeline),
++                creating_placeholder ? " (placeholder)" : "",
++                creation_arguments.vertex_shader->shader().ucode_data_hash(),
++                creation_arguments.pixel_shader
++                    ? creation_arguments.pixel_shader->shader().ucode_data_hash()
++                    : 0);
+   }
+   bool was_placeholder =
+       creation_arguments.pipeline->second.is_placeholder.load(std::memory_order_acquire);
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -37,6 +37,8 @@
+ #include <rex/math.h>
+ #include <rex/ui/vulkan/util.h>
+ 
++REXCVAR_DECLARE(bool, vulkan_log_pass_timings);
++
+ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
+                       "Vulkan render target implementation path")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+@@ -4574,6 +4576,16 @@
+         return nullptr;
+       }
+     }
++  }
++  if (REXCVAR_GET(vulkan_log_pass_timings)) {
++    REXGPU_INFO(
++        "Transfer pipeline {:x} {:x} {:x} {:x}: mode {}, {}x MSAA source format {} -> {}x MSAA "
++        "dest format {}, host depth source {}x",
++        uint64_t(pipelines[0]), uint64_t(pipelines[1]), uint64_t(pipelines[2]),
++        uint64_t(pipelines[3]), uint32_t(key.shader_key.mode),
++        1u << uint32_t(key.shader_key.source_msaa_samples), uint32_t(key.shader_key.source_resource_format),
++        1u << uint32_t(key.shader_key.dest_msaa_samples), uint32_t(key.shader_key.dest_resource_format),
++        1u << uint32_t(key.shader_key.host_depth_source_msaa_samples));
+   }
+   return transfer_pipelines_.emplace(key, pipelines).first->second.data();
+ }
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -70,6 +70,8 @@
+                     "Use VK_KHR_dynamic_rendering for Vulkan GPU emulation when supported by the "
+                     "device (falls back to render passes otherwise)")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DECLARE(bool, vulkan_log_pass_timings);
+ 
+ REXCVAR_DEFINE_BOOL(vulkan_hoist_shared_memory_uploads, false, "GPU/Vulkan",
+                     "Run shared memory uploads requested inside a render pass before that pass "
+@@ -82,6 +84,7 @@
+ 
+ #include <dlfcn.h>
+ #include <map>
++#include <set>
+ 
+ namespace {
+ 
+@@ -3675,6 +3678,13 @@
+   if (current_external_graphics_pipeline_ == pipeline) {
+     return;
+   }
++  if (REXCVAR_GET(vulkan_log_pass_timings)) {
++    static std::set<VkPipeline> logged_external_pipelines;
++    if (logged_external_pipelines.insert(pipeline).second) {
++      REXGPU_INFO("External graphics pipeline {:x} bound from {}", uint64_t(pipeline),
++                  DescribeCodeAddress(__builtin_return_address(0)));
++    }
++  }
+   deferred_command_buffer_.CmdVkBindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+   current_external_graphics_pipeline_ = pipeline;
+   current_guest_graphics_pipeline_ = VK_NULL_HANDLE;
+@@ -3684,6 +3694,13 @@
+ void VulkanCommandProcessor::BindExternalComputePipeline(VkPipeline pipeline) {
+   if (current_external_compute_pipeline_ == pipeline) {
+     return;
++  }
++  if (REXCVAR_GET(vulkan_log_pass_timings)) {
++    static std::set<VkPipeline> logged_external_pipelines;
++    if (logged_external_pipelines.insert(pipeline).second) {
++      REXGPU_INFO("External compute pipeline {:x} bound from {}", uint64_t(pipeline),
++                  DescribeCodeAddress(__builtin_return_address(0)));
++    }
+   }
+   deferred_command_buffer_.CmdVkBindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+   current_external_compute_pipeline_ = pipeline;

@@ -1,0 +1,53 @@
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -431,6 +431,10 @@
+         rex::path_to_utf8(pipeline_storage_file_path));
+     return;
+   }
++  // In "a+" mode the initial read position is implementation-defined: BSD
++  // libc (macOS) starts at the end, which made every run discard the storage.
++  rex::filesystem::Seek(pipeline_storage_file_, 0, SEEK_SET);
++
+   pipeline_storage_file_flush_needed_ = false;
+   // 'XEPS'.
+   const uint32_t pipeline_storage_magic = 0x53504558;
+@@ -442,11 +446,13 @@
+     uint32_t magic_api;
+     uint32_t version_swapped;
+   } pipeline_storage_file_header;
+-  if (fread(&pipeline_storage_file_header, sizeof(pipeline_storage_file_header), 1,
++  bool pipeline_storage_header_valid =
++      fread(&pipeline_storage_file_header, sizeof(pipeline_storage_file_header), 1,
+             pipeline_storage_file_) &&
+       pipeline_storage_file_header.magic == pipeline_storage_magic &&
+       pipeline_storage_file_header.magic_api == pipeline_storage_magic_api &&
+-      pipeline_storage_file_header.version_swapped == pipeline_storage_version_swapped) {
++      pipeline_storage_file_header.version_swapped == pipeline_storage_version_swapped;
++  if (pipeline_storage_header_valid) {
+     rex::filesystem::Seek(pipeline_storage_file_, 0, SEEK_END);
+     int64_t pipeline_storage_told_end = rex::filesystem::Tell(pipeline_storage_file_);
+     size_t pipeline_storage_told_count =
+@@ -516,6 +522,8 @@
+     pipeline_storage_file_ = nullptr;
+     return;
+   }
++  rex::filesystem::Seek(shader_storage_file_, 0, SEEK_SET);
++
+   ++shader_storage_index_;
+   shader_storage_file_flush_needed_ = false;
+   struct {
+@@ -589,6 +597,13 @@
+     }
+   }
+ 
++  REXGPU_INFO(
++      "VulkanPipelineCache: Storage has {} pipeline descriptions ({} bytes, header {}), {} "
++      "shaders loaded, {} shader translations needed",
++      pipeline_stored_descriptions.size(), rex::filesystem::Tell(pipeline_storage_file_),
++      pipeline_storage_header_valid ? "valid" : "rewritten", shaders_.size(),
++      shader_translations_needed.size());
++
+   // Create the pipelines.
+   std::vector<PipelineCreationArguments> pipeline_creations;
+   pipeline_creations.reserve(pipeline_stored_descriptions.size());

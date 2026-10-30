@@ -1,0 +1,136 @@
+diff --git a/include/rex/graphics/pipeline/shader/spirv_builder.h b/include/rex/graphics/pipeline/shader/spirv_builder.h
+--- a/include/rex/graphics/pipeline/shader/spirv_builder.h
++++ b/include/rex/graphics/pipeline/shader/spirv_builder.h
+@@ -28,6 +28,10 @@
+   SpirvBuilder(unsigned int spv_version, unsigned int user_number, spv::SpvBuildLogger* logger)
+       : spv::Builder(spv_version, user_number, logger) {}
+ 
++  // When set, the NoContraction helpers emit ordinary operations, letting the
++  // backend compiler reorder and fuse floating-point math.
++  bool allow_contraction = false;
++
+   // Make public rather than protected.
+   using spv::Builder::createSelectionMerge;
+ 
+diff --git a/src/graphics/pipeline/shader/spirv_builder.cpp b/src/graphics/pipeline/shader/spirv_builder.cpp
+--- a/src/graphics/pipeline/shader/spirv_builder.cpp
++++ b/src/graphics/pipeline/shader/spirv_builder.cpp
+@@ -42,14 +42,18 @@
+ spv::Id SpirvBuilder::createNoContractionUnaryOp(spv::Op op_code, spv::Id type_id,
+                                                  spv::Id operand) {
+   spv::Id result = createUnaryOp(op_code, type_id, operand);
+-  addDecoration(result, spv::DecorationNoContraction);
++  if (!allow_contraction) {
++    addDecoration(result, spv::DecorationNoContraction);
++  }
+   return result;
+ }
+ 
+ spv::Id SpirvBuilder::createNoContractionBinOp(spv::Op op_code, spv::Id type_id, spv::Id operand1,
+                                                spv::Id operand2) {
+   spv::Id result = createBinOp(op_code, type_id, operand1, operand2);
+-  addDecoration(result, spv::DecorationNoContraction);
++  if (!allow_contraction) {
++    addDecoration(result, spv::DecorationNoContraction);
++  }
+   return result;
+ }
+ 
+diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
+--- a/src/graphics/pipeline/shader/spirv_translator.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator.cpp
+@@ -30,6 +30,21 @@
+ // SPIRV-Cross treats the SampleRateShading capability as a request to run the
+ // whole fragment shader per sample on Metal, so declaring it only for the
+ // alpha to coverage sample mask output multiplies fragment work under MSAA.
++REXCVAR_DEFINE_BOOL(vulkan_contract_pixel_shader_math, false, "GPU/Vulkan",
++                    "Let the backend compiler fuse and reorder floating-point math in pixel "
++                    "shaders (fewer registers on Metal, possibly slightly different results)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++REXCVAR_DEFINE_BOOL(vulkan_contract_vertex_shader_math, false, "GPU/Vulkan",
++                    "Let the backend compiler fuse and reorder floating-point math in vertex "
++                    "shaders, keeping the position invariant across shaders instead")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++REXCVAR_DEFINE_BOOL(vulkan_plain_multiply, false, "GPU/Vulkan",
++                    "Translate multiplications as plain IEEE multiplications rather than "
++                    "emulating Xenos 0 * anything = 0 (experimental, may change visuals)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ REXCVAR_DEFINE_BOOL(vulkan_pixel_rate_alpha_to_coverage, false, "GPU/Vulkan",
+                     "Don't declare SampleRateShading for the alpha to coverage sample mask "
+                     "output (avoids per-sample shading on MoltenVK)")
+@@ -184,6 +199,9 @@
+   // TODO(Triang3l): Logger.
+   builder_ = std::make_unique<SpirvBuilder>(features_.spirv_version, (kSpirvMagicToolId << 16) | 1,
+                                             nullptr);
++  builder_->allow_contraction =
++      is_pixel_shader() ? REXCVAR_GET(vulkan_contract_pixel_shader_math)
++                        : REXCVAR_GET(vulkan_contract_vertex_shader_math);
+ 
+   builder_->addCapability(IsSpirvTessEvalShader() ? spv::CapabilityTessellation
+                                                   : spv::CapabilityShader);
+@@ -1759,6 +1777,12 @@
+   builder_->addMemberName(type_struct_per_vertex, kOutputPerVertexMemberPosition, "gl_Position");
+   builder_->addMemberDecoration(type_struct_per_vertex, kOutputPerVertexMemberPosition,
+                                 spv::DecorationBuiltIn, spv::BuiltInPosition);
++  if (builder_->allow_contraction) {
++    // Without NoContraction, the position must still be computed identically
++    // by different shaders so multipass rendering doesn't z-fight.
++    builder_->addMemberDecoration(type_struct_per_vertex, kOutputPerVertexMemberPosition,
++                                  spv::DecorationInvariant);
++  }
+   if (output_per_vertex_member_clip_distance_ != UINT32_MAX) {
+     builder_->addMemberName(type_struct_per_vertex, output_per_vertex_member_clip_distance_,
+                             "gl_ClipDistance");
+diff --git a/src/graphics/pipeline/shader/spirv_translator_alu.cpp b/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+--- a/src/graphics/pipeline/shader/spirv_translator_alu.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+@@ -17,14 +17,20 @@
+ #include <SPIRV/GLSL.std.450.h>
+ 
+ #include <rex/assert.h>
++#include <rex/cvar.h>
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
+ #include <rex/math.h>
++
++REXCVAR_DECLARE(bool, vulkan_plain_multiply);
+ 
+ namespace rex::graphics {
+ 
+ spv::Id SpirvShaderTranslator::ZeroIfAnyOperandIsZero(spv::Id value, spv::Id operand_0_abs,
+                                                       spv::Id operand_1_abs) {
+   EnsureBuildPointAvailable();
++  if (REXCVAR_GET(vulkan_plain_multiply)) {
++    return value;
++  }
+   int num_components = builder_->getNumComponents(value);
+   assert_true(builder_->getNumComponents(operand_0_abs) == num_components);
+   assert_true(builder_->getNumComponents(operand_1_abs) == num_components);
+diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+--- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+@@ -36,6 +36,11 @@
+                       "zeros (diagnostic)")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++REXCVAR_DEFINE_BOOL(vulkan_assume_unsigned_textures, false, "GPU/Vulkan",
++                    "Never sample the signed texture view (diagnostic - signed textures render "
++                    "incorrectly)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ REXCVAR_DEFINE_BOOL(vulkan_unconditional_texture_samples, false, "GPU/Vulkan",
+                     "Sample both the unsigned and the signed texture views outside branches and "
+                     "select the result, so the shader compiler can overlap texture fetches")
+@@ -1438,6 +1443,10 @@
+             }
+           }
+         }
++        if (REXCVAR_GET(vulkan_assume_unsigned_textures)) {
++          is_all_signed = builder_->makeBoolConstant(false);
++          is_any_signed = builder_->makeBoolConstant(false);
++        }
+         spv::Id is_any_unsigned =
+             builder_->createUnaryOp(spv::OpLogicalNot, type_bool_, is_all_signed);
+ 

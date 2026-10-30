@@ -1,0 +1,119 @@
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -70,6 +70,58 @@
+                     "Use VK_KHR_dynamic_rendering for Vulkan GPU emulation when supported by the "
+                     "device (falls back to render passes otherwise)")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_BOOL(vulkan_log_pass_breaks, false, "GPU/Vulkan",
++                    "Log why render passes end, every 60 frames (diagnostic)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++#include <dlfcn.h>
++#include <map>
++
++namespace {
++
++// Diagnostic only: render pass ends keyed by the code that caused them. Only the
++// command processor thread touches these.
++struct PassBreakStats {
++  uint64_t frames = 0;
++  uint64_t submissions = 0;
++  uint64_t framebuffer_switches = 0;
++  std::map<const void*, uint64_t> end_callers;
++  std::map<const void*, uint64_t> barrier_callers;
++};
++PassBreakStats g_pass_breaks;
++
++std::string DescribeCodeAddress(const void* address) {
++  Dl_info info;
++  if (dladdr(address, &info) && info.dli_fname) {
++    const char* name = std::strrchr(info.dli_fname, '/');
++    return fmt::format("{}+0x{:x}", name ? name + 1 : info.dli_fname,
++                       uintptr_t(address) - uintptr_t(info.dli_fbase));
++  }
++  return fmt::format("0x{:x}", uintptr_t(address));
++}
++
++void LogPassBreaks() {
++  PassBreakStats& stats = g_pass_breaks;
++  uint64_t ends = stats.framebuffer_switches;
++  for (const auto& [caller, count] : stats.end_callers) {
++    ends += count;
++  }
++  REXGPU_INFO("Pass breaks: {:.1f}/frame, {:.1f} submissions/frame, {:.1f} framebuffer switches/frame",
++              double(ends) / stats.frames, double(stats.submissions) / stats.frames,
++              double(stats.framebuffer_switches) / stats.frames);
++  for (const auto& [caller, count] : stats.end_callers) {
++    REXGPU_INFO("  EndRenderPass from {}: {:.1f}/frame", DescribeCodeAddress(caller),
++                double(count) / stats.frames);
++  }
++  for (const auto& [caller, count] : stats.barrier_callers) {
++    REXGPU_INFO("  SubmitBarriers from {}: {:.1f}/frame", DescribeCodeAddress(caller),
++                double(count) / stats.frames);
++  }
++  stats = {};
++}
++
++}  // namespace
+ 
+ namespace rex::graphics::vulkan {
+ 
+@@ -3056,6 +3108,10 @@
+ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
+   assert_true(submission_open_);
+   SplitPendingBarrier();
++  if (in_render_pass_ && (force_end_render_pass || !pending_barriers_.empty()) &&
++      REXCVAR_GET(vulkan_log_pass_breaks)) {
++    ++g_pass_breaks.barrier_callers[__builtin_return_address(0)];
++  }
+   if (pending_barriers_.empty()) {
+     if (force_end_render_pass) {
+       EndRenderPass();
+@@ -3109,6 +3165,9 @@
+   }
+ 
+   if (in_render_pass_) {
++    if (REXCVAR_GET(vulkan_log_pass_breaks)) {
++      ++g_pass_breaks.framebuffer_switches;
++    }
+     if (use_dynamic_rendering) {
+       deferred_command_buffer_.CmdVkEndRendering();
+     } else {
+@@ -3183,6 +3242,9 @@
+   }
+ 
+   if (in_render_pass_) {
++    if (REXCVAR_GET(vulkan_log_pass_breaks)) {
++      ++g_pass_breaks.framebuffer_switches;
++    }
+     if (use_dynamic_rendering) {
+       deferred_command_buffer_.CmdVkEndRendering();
+     } else {
+@@ -3259,6 +3321,9 @@
+   assert_true(submission_open_);
+   if (!in_render_pass_) {
+     return;
++  }
++  if (REXCVAR_GET(vulkan_log_pass_breaks)) {
++    ++g_pass_breaks.end_callers[__builtin_return_address(0)];
+   }
+   if (current_render_pass_ == VK_NULL_HANDLE) {
+     deferred_command_buffer_.CmdVkEndRendering();
+@@ -5372,6 +5437,15 @@
+ 
+   bool is_closing_frame = is_swap && frame_open_;
+ 
++  if (REXCVAR_GET(vulkan_log_pass_breaks)) {
++    if (submission_open_) {
++      ++g_pass_breaks.submissions;
++    }
++    if (is_closing_frame && ++g_pass_breaks.frames >= 60) {
++      LogPassBreaks();
++    }
++  }
++
+   if (is_closing_frame) {
+     texture_cache_->EndFrame();
+ 
