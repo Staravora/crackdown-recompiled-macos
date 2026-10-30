@@ -18,3 +18,5 @@
 | 2026-10-30 | Enable shader math contraction (pixel and vertex, invariant position) in the Mac app config. | Removes SPIRV-Cross optnone helper calls; menu 3x and gameplay ~2x faster with correct rendering in garage and city. | active |
 | 2026-10-30 | Use the offline MSL harness to evaluate shader code generation before game runs. | Seconds per experiment and no player time; in-game FPS can hide changes below occupancy cliffs. | active |
 | 2026-10-30 | Seek storage files to the start after "a+b" open. | BSD libc positions a+ streams at EOF, which silently wiped the shader cache every launch on macOS. | active |
+| 2026-10-30 | Use native os_sync waits for guest GPU polls on macOS (enabled in app config). | Spinning cost a P-core and starved audio; isolated retest showed no corruption, and the earlier black screen matches the pre-existing startup bug. | active |
+| 2026-10-30 | Keep MoltenVK synchronous queue submits. | Async submits caused water flicker; their gain was small. | active |

@@ -1,0 +1,110 @@
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -243,8 +243,11 @@
+ }
+ 
+ bool CommandProcessor::IsReadbackMemexportEnabled(bool legacy_backend_flag) const {
+-  if (legacy_readback_memexport_cvar_name_ &&
+-      rex::cvar::HasNonDefaultValue(legacy_readback_memexport_cvar_name_)) {
++  // Called for every draw - the cvar lookup by name is too slow to repeat.
++  static const bool legacy_readback_memexport_set =
++      legacy_readback_memexport_cvar_name_ &&
++      rex::cvar::HasNonDefaultValue(legacy_readback_memexport_cvar_name_);
++  if (legacy_readback_memexport_set) {
+     return legacy_backend_flag;
+   }
+   return REXCVAR_GET(readback_memexport);
+diff --git a/src/graphics/guest_wake.cpp b/src/graphics/guest_wake.cpp
+--- a/src/graphics/guest_wake.cpp
++++ b/src/graphics/guest_wake.cpp
+@@ -10,6 +10,8 @@
+ #include <linux/futex.h>
+ #include <sys/syscall.h>
+ #include <unistd.h>
++#elif REX_PLATFORM_MAC
++#include <os/os_sync_wait_on_address.h>
+ #endif
+ 
+ namespace rex::graphics {
+@@ -22,6 +24,10 @@
+ #elif REX_PLATFORM_LINUX
+   std::atomic_thread_fence(std::memory_order_seq_cst);
+   syscall(SYS_futex, host_address, FUTEX_WAKE_PRIVATE, INT_MAX, nullptr, nullptr, 0);
++#elif REX_PLATFORM_MAC
++  std::atomic_thread_fence(std::memory_order_seq_cst);
++  os_sync_wake_by_address_all(const_cast<void*>(host_address), sizeof(uint32_t),
++                              OS_SYNC_WAKE_BY_ADDRESS_NONE);
+ #else
+   (void)host_address;
+ #endif
+diff --git a/include/rex/ui/vulkan/device.h b/include/rex/ui/vulkan/device.h
+--- a/include/rex/ui/vulkan/device.h
++++ b/include/rex/ui/vulkan/device.h
+@@ -273,6 +273,11 @@
+   // UINT32_MAX if not supported or not enabled.
+   // May be the same as queue_family_graphics_compute().
+   uint32_t queue_family_sparse_binding() const { return queue_family_sparse_binding_; }
++  // Queue of queue_family_graphics_compute() for presentation, separate from
++  // GPU emulation work when the device was created with more than one queue.
++  uint32_t graphics_compute_presentation_queue_index() const {
++    return queue_families_[queue_family_graphics_compute_].queues.size() > 1 ? 1 : 0;
++  }
+ 
+   Queue::Acquisition AcquireQueue(const uint32_t queue_family_index,
+                                   const uint32_t queue_index) const {
+diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
+--- a/src/ui/vulkan/vulkan_device.cpp
++++ b/src/ui/vulkan/vulkan_device.cpp
+@@ -41,6 +41,11 @@
+                     "allow fallback to solid fill for line/point polygon modes)")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ 
++REXCVAR_DEFINE_BOOL(vulkan_separate_presentation_queue, false, "GPU/Vulkan",
++                    "Present on a second graphics queue so that waiting for a drawable doesn't "
++                    "stall GPU emulation work submitted to the first one")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ namespace rex {
+ namespace ui {
+ namespace vulkan {
+@@ -479,7 +484,11 @@
+   }
+ 
+   device->queue_families_[device->queue_family_graphics_compute_].queues.resize(std::max(
+-      size_t(1), device->queue_families_[device->queue_family_graphics_compute_].queues.size()));
++      size_t(REXCVAR_GET(vulkan_separate_presentation_queue) &&
++                     queue_families[device->queue_family_graphics_compute_].queueCount > 1
++                 ? 2
++                 : 1),
++      device->queue_families_[device->queue_family_graphics_compute_].queues.size()));
+   if (device->queue_family_sparse_binding_ != UINT32_MAX) {
+     device->queue_families_[device->queue_family_sparse_binding_].queues.resize(std::max(
+         size_t(1), device->queue_families_[device->queue_family_sparse_binding_].queues.size()));
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -2200,7 +2200,8 @@
+     VkResult submit_result;
+     {
+       const VulkanDevice::Queue::Acquisition queue_acquisition =
+-          vulkan_device_->AcquireQueue(vulkan_device_->queue_family_graphics_compute(), 0);
++          vulkan_device_->AcquireQueue(vulkan_device_->queue_family_graphics_compute(),
++                                       vulkan_device_->graphics_compute_presentation_queue_index());
+       submit_result =
+           dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence_acqusition.fence());
+       if (ui_fence_acquisition.fence() != VK_NULL_HANDLE && submit_result == VK_SUCCESS) {
+@@ -2241,8 +2242,11 @@
+   present_info.pResults = nullptr;
+   VkResult present_result;
+   {
+-    const VulkanDevice::Queue::Acquisition queue_acquisition =
+-        vulkan_device_->AcquireQueue(paint_context_.present_queue_family, 0);
++    const VulkanDevice::Queue::Acquisition queue_acquisition = vulkan_device_->AcquireQueue(
++        paint_context_.present_queue_family,
++        paint_context_.present_queue_family == vulkan_device_->queue_family_graphics_compute()
++            ? vulkan_device_->graphics_compute_presentation_queue_index()
++            : 0);
+     present_result = dfn.vkQueuePresentKHR(queue_acquisition.queue(), &present_info);
+   }
+   switch (present_result) {

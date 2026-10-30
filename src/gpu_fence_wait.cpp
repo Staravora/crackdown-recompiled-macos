@@ -22,8 +22,12 @@
 #include <linux/futex.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#elif defined(__APPLE__)
+#include <cerrno>
+#include <os/os_sync_wait_on_address.h>
 #endif
 
+#include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
 #include <rex/system/kernel_state.h>
@@ -32,7 +36,12 @@
 #include "guest_hooks.h"
 #include "guest_layout.h"
 
-#if defined(_WIN32) || defined(__linux__)
+#if defined(__APPLE__)
+REXCVAR_DEFINE_BOOL(crackdown_native_gpu_waits, false, "Crackdown",
+                    "Block GPU waits on the polled word instead of spinning (macOS)");
+#endif
+
+#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)
 
 namespace {
 
@@ -158,6 +167,22 @@ WaitOutcome WaitWhileEqual(const uint32_t* word, uint32_t undesired, uint32_t ti
     return WaitOutcome::kReturned;
   }
   return GetLastError() == ERROR_TIMEOUT ? WaitOutcome::kTimedOut : WaitOutcome::kFailed;
+#elif defined(__APPLE__)
+  if (os_sync_wait_on_address_with_timeout(const_cast<uint32_t*>(word), undesired,
+                                           sizeof(undesired), OS_SYNC_WAIT_ON_ADDRESS_NONE,
+                                           OS_CLOCK_MACH_ABSOLUTE_TIME,
+                                           uint64_t(timeout_ms) * 1000000) >= 0) {
+    return WaitOutcome::kReturned;
+  }
+  switch (errno) {
+    case EINTR:
+    case EFAULT:
+      return WaitOutcome::kReturned;
+    case ETIMEDOUT:
+      return WaitOutcome::kTimedOut;
+    default:
+      return WaitOutcome::kFailed;
+  }
 #else
   const timespec timeout = {0, long(timeout_ms) * 1000000L};
   if (syscall(SYS_futex, word, FUTEX_WAIT_PRIVATE, undesired, &timeout, nullptr, 0) == 0) {
@@ -206,6 +231,12 @@ void crackdown::hooks::GpuFence(PPCContext& ctx, uint8_t* base, GuestFunction or
 // Returns nonzero while the wait should go on. The first call for a wait only reads the word, so a block always
 // follows a check of the word by the guest.
 void crackdown::hooks::GpuPoll(PPCContext& ctx, uint8_t* base, GuestFunction original) {
+#if defined(__APPLE__)
+  if (!REXCVAR_GET(crackdown_native_gpu_waits)) {
+    original(ctx, base);
+    return;
+  }
+#endif
   const uint32_t object = ctx.r3.u32;
   const size_t site = SiteIndex(uint32_t(ctx.lr));
   original(ctx, base);
@@ -250,4 +281,4 @@ void crackdown::hooks::GpuPoll(PPCContext& ctx, uint8_t* base, GuestFunction ori
   original(ctx, base);
 }
 
-#endif  // _WIN32 || __linux__
+#endif  // _WIN32 || __linux__ || __APPLE__
