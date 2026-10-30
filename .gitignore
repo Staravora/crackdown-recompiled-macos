@@ -49,3 +49,19 @@ __pycache__/
 # Local AI agent instructions
 CLAUDE.md
 .claude/
+
+# Local credentials and Apple build artifacts
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.keystore
+*.jks
+*service-account*.json
+local.properties
+GoogleService-Info.plist
+google-services.json
+.DS_Store
+*.dylib
+*.dSYM/

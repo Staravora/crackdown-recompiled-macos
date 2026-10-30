@@ -239,4 +239,15 @@ void crackdown::hooks::GpuPoll(PPCContext& ctx, uint8_t* base, GuestFunction ori
   BlockUntilWordWritten(site, wait);
 }
 
+#else
+
+// Other hosts retain the original polling until a matching host wake implementation is validated.
+void crackdown::hooks::GpuFence(PPCContext& ctx, uint8_t* base, GuestFunction original) {
+  original(ctx, base);
+}
+
+void crackdown::hooks::GpuPoll(PPCContext& ctx, uint8_t* base, GuestFunction original) {
+  original(ctx, base);
+}
+
 #endif  // _WIN32 || __linux__

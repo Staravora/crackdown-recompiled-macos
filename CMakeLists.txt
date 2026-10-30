@@ -11,9 +11,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Where tools/codegen.ps1 and tools/package-linux.sh unpack the pinned SDK.
 if(WIN32)
-    set(CRACKDOWN_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/rexglue/win-amd64")
+    set(CRACKDOWN_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/rexglue/win-amd64" CACHE PATH "Patched ReXGlue SDK")
+elseif(APPLE)
+    set(CRACKDOWN_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/rexglue/mac-arm64" CACHE PATH "Patched ReXGlue SDK")
 else()
-    set(CRACKDOWN_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/rexglue/linux-amd64")
+    set(CRACKDOWN_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/rexglue/linux-amd64" CACHE PATH "Patched ReXGlue SDK")
 endif()
 list(APPEND CMAKE_PREFIX_PATH "${CRACKDOWN_SDK_DIR}")
 
@@ -327,7 +329,12 @@ endif()
 
 # Every build checks that tools/rexglue holds the runtime and GPU plugin built from the patches, and that the
 # copies next to the program are those; tools/build.ps1 and tools/build.sh rebuild them when they are not.
-if(WIN32)
+if(APPLE)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(CRACKDOWN_REXGLUE_CHECK "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/check-macos-sdk.py"
+        --sdk "${CRACKDOWN_SDK_DIR}")
+    set(CRACKDOWN_REXGLUE_STAGED --staged)
+elseif(WIN32)
     # Windows PowerShell has a fixed path, unlike a Store pwsh; the module path a parent pwsh sets breaks it.
     find_program(CRACKDOWN_WINDOWS_POWERSHELL NAMES powershell REQUIRED)
     set(CRACKDOWN_REXGLUE_CHECK "${CMAKE_COMMAND}" -E env --unset=PSModulePath

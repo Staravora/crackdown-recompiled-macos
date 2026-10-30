@@ -9,6 +9,7 @@
 #include <string>
 
 #include <rex/hook.h>
+#include <rex/logging.h>
 #include <rex/kernel/xboxkrnl/video.h>
 #include <rex/ppc.h>
 #include <rex/ui/window.h>
@@ -19,6 +20,8 @@
 #include "platform.h"
 #include "settings.h"
 #include "window_title.h"
+
+REXCVAR_DEFINE_BOOL(crackdown_log_frame_rate, false, "Crackdown", "Log measured game frame rate once per second");
 
 // The SDK's VdSwap body, exported by rexruntime.dll. The SDK has no header for it.
 namespace rex::kernel::xboxkrnl {
@@ -100,6 +103,9 @@ void CountGuestFrame() {
     return;
   }
   const double fps = g_sample_frames / elapsed;
+  if (REXCVAR_GET(crackdown_log_frame_rate)) {
+    REXLOG_INFO("Measured game frame rate: {:.2f} FPS ({:.2f} ms/frame)", fps, elapsed * 1000.0 / g_sample_frames);
+  }
   g_stats = {fps, elapsed * 1000.0 / g_sample_frames, g_total_frames};
   g_sample_start = now;
   g_sample_frames = 0;

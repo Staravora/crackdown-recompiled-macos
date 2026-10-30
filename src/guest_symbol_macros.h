@@ -14,7 +14,18 @@
   REX_EXTERN(name);            \
   REX_EXTERN(CRACKDOWN_GUEST_JOIN(__imp__, name))
 
+#if defined(__APPLE__)
+// Mach-O cannot provide overridable aliases. Keep the SDK's weak tail thunk,
+// applying the guest prefix to both entry points before declaring them.
+#define DEFINE_REX_FUNC(name)                                                     \
+  REX_EXTERN(CRACKDOWN_GUEST_JOIN(__imp__, name));                                  \
+  __attribute__((weak, noinline)) extern "C" REX_FUNC(name) {                       \
+    [[clang::musttail]] return CRACKDOWN_GUEST_JOIN(__imp__, name)(ctx, base);        \
+  }                                                                              \
+  REX_EXTERN(CRACKDOWN_GUEST_JOIN(__imp__, name))
+#else
 #define DEFINE_REX_FUNC(name)                                                     \
   __attribute__((alias("__imp__" CRACKDOWN_GUEST_STR(name))))                     \
   __attribute__((weak, noinline)) extern "C" REX_FUNC(name);                      \
   REX_EXTERN(CRACKDOWN_GUEST_JOIN(__imp__, name))
+#endif

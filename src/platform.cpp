@@ -17,6 +17,10 @@
 
 #include <spawn.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#include <mach-o/dyld.h>
+#endif
 
 #include <SDL3/SDL.h>
 #endif
@@ -217,6 +221,10 @@ struct FontFamily {
 };
 // The first family whose regular face exists wins.
 constexpr FontFamily kFontFamilies[] = {
+#if defined(__APPLE__)
+    {"/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+     "/System/Library/Fonts/Supplemental/Arial Bold.ttf"},
+#endif
     {"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-SemiBold.ttf",
      "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"},
     {"/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/noto/NotoSans-SemiBold.ttf",
@@ -260,13 +268,34 @@ std::filesystem::path PathFromUtf8(const std::string& utf8) {
 }
 
 std::filesystem::path PortFolder() {
-#if !defined(_WIN32)
+#if defined(__linux__)
   // An AppImage runs from a read-only mount that is gone once it exits.
   if (const char* appimage = std::getenv("APPIMAGE"); appimage && *appimage) {
     return std::filesystem::path(appimage).parent_path();
   }
 #endif
+#if defined(__APPLE__)
+  const auto executable = rex::filesystem::GetExecutableFolder();
+  if (executable.filename() == "MacOS" && executable.parent_path().filename() == "Contents" &&
+      executable.parent_path().parent_path().extension() == ".app") {
+    return executable.parent_path().parent_path().parent_path() / "Crackdown Data";
+  }
+#endif
   return rex::filesystem::GetExecutableFolder();
+}
+
+void ApplyGameWindowAspect(int width, int height) {
+#if defined(__APPLE__)
+  if (SDL_Window* window = LauncherWindow(); window && width > 0 && height > 0) {
+    const float aspect = float(width) / float(height);
+    if (!SDL_SetWindowAspectRatio(window, aspect, aspect)) {
+      REXLOG_WARN("Could not request the game window aspect: {}", SDL_GetError());
+    }
+  }
+#else
+  (void)width;
+  (void)height;
+#endif
 }
 
 std::filesystem::path NextLogFile(const std::filesystem::path& folder, std::string_view name) {
@@ -287,7 +316,7 @@ std::filesystem::path NextLogFile(const std::filesystem::path& folder, std::stri
 }
 
 const char* ArchitectureName() {
-#if defined(_M_ARM64)
+#if defined(_M_ARM64) || defined(__aarch64__)
   return "arm64";
 #elif defined(_M_X64) || defined(__x86_64__)
   return "x86-64";
@@ -967,16 +996,32 @@ void CheckWindowDisplay(void*, int) {}
 bool RelaunchSelf(std::wstring_view extra_args) {
   BeginSessionLogHandoff();
   std::vector<std::string> args;
+#if defined(__APPLE__)
+  const int count = *_NSGetArgc();
+  char** arguments = *_NSGetArgv();
+  for (int i = 0; i < count; ++i) {
+    args.emplace_back(arguments[i]);
+  }
+#else
   std::ifstream cmdline("/proc/self/cmdline", std::ios::binary);
   for (std::string arg; std::getline(cmdline, arg, '\0');) {
     args.push_back(arg);
   }
+#endif
   std::string extra;
   for (const wchar_t c : extra_args) {
     extra += char(c);  // ASCII flags
   }
   std::error_code ec;
+#if defined(__APPLE__)
+  uint32_t length = 0;
+  _NSGetExecutablePath(nullptr, &length);
+  std::vector<char> executable(length);
+  const std::string self = _NSGetExecutablePath(executable.data(), &length) == 0
+                               ? std::filesystem::weakly_canonical(executable.data(), ec).string() : "";
+#else
   const std::string self = std::filesystem::read_symlink("/proc/self/exe", ec).string();
+#endif
   std::optional<RelaunchCommand> command = MakeRelaunchCommand(std::move(args), std::getenv("APPIMAGE"), self, extra);
   if (!command) {
     REXLOG_ERROR("Relaunch failed: cannot read this process's command line");
@@ -989,7 +1034,12 @@ bool RelaunchSelf(std::wstring_view extra_args) {
   }
   argv.push_back(nullptr);
   pid_t pid = 0;
-  if (const int error = posix_spawn(&pid, command->executable.c_str(), nullptr, nullptr, argv.data(), environ);
+#if defined(__APPLE__)
+  char** environment = *_NSGetEnviron();
+#else
+  char** environment = environ;
+#endif
+  if (const int error = posix_spawn(&pid, command->executable.c_str(), nullptr, nullptr, argv.data(), environment);
       error != 0) {
     REXLOG_ERROR("Relaunch failed ({})", error);
     CancelSessionLogHandoff();

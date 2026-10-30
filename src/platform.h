@@ -46,6 +46,10 @@ void SetApplicationId();
 // Gives the window the application icon. Windows takes it from the executable's resources; on Linux SDL does not.
 void ApplyWindowIcon();
 
+// Request the selected game aspect once; tiling managers can still constrain the
+// outer window, in which case the presenter letterboxes the game picture.
+void ApplyGameWindowAspect(int width, int height);
+
 // Shows a message that needs no GPU. Windows uses a message box; Linux draws on an SDL surface because SDL's own
 // message box runs zenity first, which can stall before any window appears.
 void ShowFatalMessage(const std::string& text);

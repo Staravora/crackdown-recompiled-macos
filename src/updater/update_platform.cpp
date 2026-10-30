@@ -28,6 +28,10 @@
 #include <spawn.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#include <mach-o/dyld.h>
+#endif
 
 extern char** environ;
 #endif
@@ -225,6 +229,14 @@ bool ApplyAppImageUpdate(const std::filesystem::path&, const std::filesystem::pa
 
 std::vector<std::string> CurrentProcessArguments() {
   std::vector<std::string> result;
+#if defined(__APPLE__)
+  const int count = *_NSGetArgc();
+  char** arguments = *_NSGetArgv();
+  for (int i = 1; i < count; ++i) {
+    result.emplace_back(arguments[i]);
+  }
+  return result;
+#else
   FILE* file = std::fopen("/proc/self/cmdline", "rb");
   if (!file) {
     return result;
@@ -247,9 +259,20 @@ std::vector<std::string> CurrentProcessArguments() {
     }
   }
   return result;
+#endif
 }
 
 std::filesystem::path CurrentExecutablePath() {
+#if defined(__APPLE__)
+  uint32_t size = 0;
+  _NSGetExecutablePath(nullptr, &size);
+  std::vector<char> buffer(size);
+  if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+    return {};
+  }
+  std::error_code ec;
+  return std::filesystem::weakly_canonical(buffer.data(), ec);
+#else
   std::vector<char> buffer(1024);
   for (;;) {
     const ssize_t length = readlink("/proc/self/exe", buffer.data(), buffer.size());
@@ -261,6 +284,7 @@ std::filesystem::path CurrentExecutablePath() {
     }
     buffer.resize(buffer.size() * 2);
   }
+#endif
 }
 
 bool HasOriginalAppImage(std::filesystem::path& path) {

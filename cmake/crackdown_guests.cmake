@@ -51,6 +51,13 @@ function(crackdown_add_guest id prefix generated_dir bindings_source)
     include("${generated_dir}/sources.cmake")
     set(_generated ${GENERATED_SOURCES})
     set_source_files_properties(${_generated} PROPERTIES COMPILE_OPTIONS "${REXGLUE_RECOMP_OPTIONS}")
+    if(APPLE)
+        # This startup-only function is tens of thousands of virtual calls.
+        # AppleClang spends minutes optimizing it without improving gameplay.
+        set_source_files_properties("${generated_dir}/crackdown_register.cpp" PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+        set_property(SOURCE "${generated_dir}/crackdown_register.cpp" APPEND PROPERTY COMPILE_OPTIONS
+            -O0 -include "${CMAKE_CURRENT_SOURCE_DIR}/src/crackdown_guest_pch.h")
+    endif()
 
     set(_symbols_dir "${CMAKE_BINARY_DIR}/guest-symbols/${id}")
     crackdown_write_guest_symbols(${id} ${prefix} "${generated_dir}" "${_symbols_dir}")

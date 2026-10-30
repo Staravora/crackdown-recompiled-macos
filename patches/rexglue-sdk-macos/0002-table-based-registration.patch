@@ -1,0 +1,17 @@
+diff --git a/resources/templates/codegen/register_cpp.inja b/resources/templates/codegen/register_cpp.inja
+index 0be31c4..fb4e6e6 100644
+--- a/resources/templates/codegen/register_cpp.inja
++++ b/resources/templates/codegen/register_cpp.inja
+@@ -17,8 +17,10 @@ void ReXModule_Register(rex::runtime::IModuleRegistrar* registrar) {
+ {% else %}
+ void {{ project }}_RegisterFunctions(rex::runtime::IModuleRegistrar* registrar) {
+ {% endif %}
+-{% for fn in functions %}{% if not fn.below_code_base or fn.is_import %}  registrar->SetFunction({{ fn.address }}, {{ fn.name }});
+-{% endif %}{% endfor %}}
++  for (const PPCFuncMapping* mapping = PPCFuncMappings; mapping->guest; ++mapping) {
++    registrar->SetFunction(static_cast<uint32_t>(mapping->guest), mapping->host);
++  }
++}
+ 
+ {% if is_dll %}
+ // The runtime uses this baked layout for the dispatch table. It must match the

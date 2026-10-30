@@ -36,6 +36,9 @@ std::optional<std::filesystem::path> FindArialCompatibleFont() {
   if (const UINT length = GetWindowsDirectoryW(windows, MAX_PATH); length && length < MAX_PATH) {
     candidates.push_back(std::filesystem::path(windows) / "Fonts" / "arial.ttf");
   }
+#elif defined(__APPLE__)
+  candidates.emplace_back("/System/Library/Fonts/Supplemental/Arial.ttf");
+  candidates.emplace_back("/Library/Fonts/Arial.ttf");
 #else
   for (const char* path : {"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
                            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",

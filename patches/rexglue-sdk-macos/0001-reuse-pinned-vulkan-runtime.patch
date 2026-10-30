@@ -1,0 +1,30 @@
+diff --git a/thirdparty/CMakeLists.txt b/thirdparty/CMakeLists.txt
+index f102b56..f5bc272 100644
+--- a/thirdparty/CMakeLists.txt
++++ b/thirdparty/CMakeLists.txt
+@@ -202,6 +202,17 @@ if(REXGLUE_USE_VULKAN)
+     add_subdirectory(vulkan-memory-allocator)
+ 
+     if(APPLE)
++        set(REXGLUE_MAC_VULKAN_PREBUILT_ROOT "" CACHE PATH "Pinned SDK providing the unmodified Vulkan loader and MoltenVK")
++        if(REXGLUE_MAC_VULKAN_PREBUILT_ROOT)
++            add_library(rex_macos_vulkan_loader SHARED IMPORTED GLOBAL)
++            set_target_properties(rex_macos_vulkan_loader PROPERTIES IMPORTED_LOCATION
++                "${REXGLUE_MAC_VULKAN_PREBUILT_ROOT}/lib/libvulkan.1.dylib")
++            add_library(Vulkan::Loader ALIAS rex_macos_vulkan_loader)
++            add_library(rex_macos_moltenvk SHARED IMPORTED GLOBAL)
++            set_target_properties(rex_macos_moltenvk PROPERTIES IMPORTED_LOCATION
++                "${REXGLUE_MAC_VULKAN_PREBUILT_ROOT}/lib/libMoltenVK.dylib")
++            add_library(MoltenVK::MoltenVK ALIAS rex_macos_moltenvk)
++        else()
+         # Build the loader and MoltenVK revisions shipped by the pinned SDK.
+         # They remain runtime-loaded; no Vulkan implementation is linked into
+         # rexglue itself.
+@@ -216,6 +227,7 @@ if(REXGLUE_USE_VULKAN)
+         set(MVK_BUILD_SHADER_CONVERTER_TOOL OFF CACHE BOOL "" FORCE)
+         set(MVK_EXCLUDE_SPIRV_TOOLS ON CACHE BOOL "" FORCE)
+         add_subdirectory(moltenvk)
++        endif()
+     endif()
+ endif()
+ 

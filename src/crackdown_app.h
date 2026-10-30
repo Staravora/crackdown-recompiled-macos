@@ -213,6 +213,8 @@ class CrackdownApp : public rex::ReXApp {
   // With game files installed, the launcher opens after the runtime to read its achievement manager.
   void LaunchModule() override {
     if (!show_launcher_after_runtime_) {
+      const auto picture = crackdown::RenderPicture(crackdown::ParseAspectRatio(REXCVAR_GET(crackdown_aspect_ratio)));
+      crackdown::ApplyGameWindowAspect(picture.width, picture.height);
       ReXApp::LaunchModule();
       return;
     }
@@ -220,7 +222,11 @@ class CrackdownApp : public rex::ReXApp {
     REXLOG_INFO("Launcher shown after the runtime");
     launcher_open_ = true;
     SetCursorOverlayOpen(true);
-    crackdown::LauncherCallbacks callbacks = MakeLauncherCallbacks([this] { ReXApp::LaunchModule(); });
+    crackdown::LauncherCallbacks callbacks = MakeLauncherCallbacks([this] {
+      const auto picture = crackdown::RenderPicture(crackdown::ParseAspectRatio(REXCVAR_GET(crackdown_aspect_ratio)));
+      crackdown::ApplyGameWindowAspect(picture.width, picture.height);
+      ReXApp::LaunchModule();
+    });
     // Settings the runtime reads at startup take effect only in a new process.
     callbacks.window_changed = [this] { return game_settings_.WindowChanged() || game_settings_.RuntimeChanged(); };
     crackdown::ShowLauncher(imgui_drawer(),

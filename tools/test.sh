@@ -9,15 +9,17 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD="${CRACKDOWN_TEST_BUILD:-$ROOT/out/tests-linux}"
+case "$(uname -s)" in
+  Darwin) PLATFORM=macos; SDK_PLATFORM=mac-arm64; GENERATOR='Unix Makefiles'; CC=clang; CXX=clang++ ;;
+  Linux) PLATFORM=linux; SDK_PLATFORM=linux-amd64; GENERATOR=Ninja; CC=clang-20; CXX=clang++-20 ;;
+  *) echo "ERROR: use tools/test.ps1 on Windows" >&2; exit 1 ;;
+esac
+BUILD="${CRACKDOWN_TEST_BUILD:-$ROOT/out/tests-$PLATFORM}"
 
-[ "$(uname -s)" = Linux ] || { echo "ERROR: runs on Linux only (tools/test.ps1 is the Windows script)" >&2; exit 1; }
-
-SDK_ARGS=()
-[ -z "${CRACKDOWN_SDK_DIR:-}" ] || SDK_ARGS=("-DCRACKDOWN_SDK_DIR=$CRACKDOWN_SDK_DIR")
-cmake -S "$ROOT/tests" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 "${SDK_ARGS[@]}"
-cmake --build "$BUILD" --target crackdown_tests
+cmake -S "$ROOT/tests" -B "$BUILD" -G "$GENERATOR" -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  "-DCMAKE_C_COMPILER=$CC" "-DCMAKE_CXX_COMPILER=$CXX" \
+  "-DCRACKDOWN_SDK_DIR=${CRACKDOWN_SDK_DIR:-$ROOT/tools/rexglue/$SDK_PLATFORM}"
+cmake --build "$BUILD" --target crackdown_tests --parallel "${CRACKDOWN_BUILD_JOBS:-4}"
 if [ -n "${1:-}" ]; then
   ctest --test-dir "$BUILD" --output-on-failure -R "$1"
 else
