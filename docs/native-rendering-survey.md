@@ -54,6 +54,28 @@ A second city spot (second Los Muertos supply point, a rooftop) came to almost t
 
 **Verdict: go, with the plan changed.** Nothing found is a blocker. Phase 2 gains the buffer decoder, and the first thing to prove is how fast about 4,700 draws can be encoded on this machine.
 
+## Encoding test (2026-10-31)
+
+`tools/encode_bench.mm` records a census-shaped frame in Metal on this M1 Air, standalone: 4,700 draws, 24 passes, 391 pipelines, 200 textures, 4 KB of vertex and 1 KB of fragment constants copied per draw, paced at 30 FPS. Pipeline, texture, depth and scissor changes the census did not count are set high on purpose (50%, 60%, 15%, 10% of draws). "Load" is flat-out threads standing in for the game, on a 4 performance-core chip. Three interleaved rounds of 150 frames, CPU milliseconds per frame:
+
+| Case | Load 2, p50 | Load 3, p50 | Load 3, p95 | Load 3, max |
+| --- | --- | --- | --- | --- |
+| Bound textures, 1 thread | 6.30 | 7.81 | 10.58 | 11.41 |
+| Bindless, 1 thread | 4.32 | 6.54 | 9.26 | 11.04 |
+| Bindless, 2 threads | 3.68 | 5.01 | 6.96 | 7.91 |
+| Bindless, 3 threads | 3.30 | 5.67 | 6.86 | 9.31 |
+| Bindless, baked buffers replayed | 1.92 | 2.56 | 4.17 | 5.90 |
+
+The stress run uses the emulator's raw 6,207 draws with every state changing on every draw. Worst case there was bound textures on one thread under load 3: 17.27 ms p50, 20.26 ms max. Bindless on one thread under the same load took 12.62 ms p50, 14.74 ms max.
+
+**Result: Metal recording fits, comfortably, on one thread.** It costs about 1.4 microseconds per draw against the 7 microsecond budget, which leaves roughly four fifths of it for everything else a real layer does per draw. The risk named above is retired for recording itself. Threads help less than bindless does, so Phase 2 can start single-threaded with bindless textures.
+
+- **Not measured:** the layer's own work per draw: reading device state, decoding baked buffers, texture and pipeline lookups, dirty tracking and vertex handling. That is now the real budget to watch.
+- **GPU time says nothing here.** The shaders and textures are placeholders.
+- **Baked replay is a lead, not a result.** Indirect command buffers can't bind textures or samplers, so they need bindless. Replay also assumes those draws need nothing that changes per frame. Whether baked draws depend on registers set by the direct calls around them is unknown, and it would need checking before relying on it.
+- **Idle reads slower than load 2** (6.56 against 4.32 ms for bindless on one thread), probably because cores clock down between paced frames. The loaded figures are closer to the game, but that explanation is untested.
+- **Pipelines were already compiled**, as the plan assumes, and the frame comes from a standing-still census. The stress run covers a heavier frame.
+
 ## 1. How the game reaches the GPU
 
 ### The path today
@@ -387,7 +409,7 @@ For comparison, the Vulkan backend is 22,598 lines before the SPIR-V translator 
 | Uploads, EDRAM transfers, tile replays | gone or much reduced |
 | GPU 19.3 ms for a 6,207-draw frame | should fall; to be measured |
 
-No frame rate is promised here. The risk to watch is CPU encoding: 6,207 draws must be recorded in well under 33 ms on a 4 P-core machine alongside the game. Removing tile replays and batching state helps, and the census gives the true number.
+No frame rate is promised here. CPU encoding was the risk to watch, and the [encoding test](#encoding-test-2026-10-31) puts Metal recording at about 7 ms a frame on one thread alongside a simulated game load. What's left to prove is the layer's own per-draw work.
 
 ## Open questions
 

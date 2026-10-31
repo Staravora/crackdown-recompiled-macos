@@ -1,5 +1,12 @@
 # Session handoff
 
+## 2026-10-31 (afternoon) — Encoding test passed: Metal records a city frame in about 7 ms on one thread
+- **Test:** `tools/encode_bench.mm` records a census-shaped frame (4,700 draws, 24 passes, 391 pipelines) with deliberately high state churn, while threads stand in for the game. Results are in `docs/native-rendering-survey.md`, section "Encoding test". Apple's Metal validation passed on it.
+- **Result:** under 3 busy threads, one thread took 7.81 ms with bound textures and 6.54 ms bindless, at most 11.4 ms. That is about 1.4 microseconds per draw against the 7 microsecond budget. At 6,207 draws with all state changing every draw, the worst median was 17.27 ms.
+- **What it means:** Metal recording isn't the limit. Phase 2 can start single-threaded and bindless. Replaying baked buffers through indirect command buffers cut it to 2.56 ms, but it's unproven that those draws need nothing per-frame.
+- **Not measured:** the layer's own per-draw work, and anything about GPU time, since the shaders are placeholders.
+- **Next:** Phase 1 offline shader trial: build XenosRecomp with its Metal output and run the 384 shipped shaders through it.
+
 ## 2026-10-31 (afternoon) — Flat colour fixed: MoltenVK left the drawable at 1x1 (`0014`)
 - **Cause:** `MVKSwapchain::initCAMetalLayer` sets `drawableSize` to the new extent, then compares that extent with the size it just set, so the check always passes. With an `oldSwapchain` that still has a presentation in flight, `forceUnpresentedImageCompletion` then sets `drawableSize` to `{1,1}`. The new swapchain draws to one pixel, and the window stretches it. That is why the colour was the guest output's top-left pixel, and why the rate depended on timing: 1 in 6 at startup, nearly always when leaving fullscreen with frames in flight.
 - **Fix:** on macOS the presenter destroys the old swapchain first and creates the new one with no `oldSwapchain`. `destroy()` does the forcing while the real size is still to come. No MoltenVK rebuild needed.
