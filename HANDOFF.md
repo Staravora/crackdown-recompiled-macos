@@ -1,5 +1,13 @@
 # Session handoff
 
+## 2026-10-31 (afternoon) — Phase 1 done: 382 shaders compile, 106 of 108 match the emulator, pixel shaders cost about a quarter
+- **Result:** with `tools/shader-trial/xenosrecomp-crackdown.patch`, all 382 shipped shaders compile. `pixel_diff.swift` compares the 108 that ran in the benchmark against the emulator from identical inputs: 100 exact, 7 close, 1 off, or 106 exact and 2 close once mip selection matches. Those costs are 25-28% of the emulator's at the median. Details are in `docs/native-rendering-survey.md`, section "Shader trial".
+- **Bugs found:** conditional exec blocks never tested their condition, and cube lookups ignored the source swizzle. Neither showed as an error, and the second only showed in the pixel comparison.
+- **Correction:** the earlier 44% and 47% understated the emulator. That harness left its alpha test at never pass and its constants unmapped. Those numbers are withdrawn.
+- **Not covered:** the other 56 pixel shaders and all 218 vertex shaders are compiled but not compared. Inputs are synthetic, and whole-frame gain is unmeasured.
+- **Process:** third-party code only runs when Bruce runs `run-trial.sh`, about 40 s. The game was not changed by this work.
+- **Next:** Phase 2, the native vertical slice. First decisions: direct Metal or plume, and vertex pulling against copy and swap. Doing the buffer decoder early would test the per-draw budget, now the main unknown.
+
 ## 2026-10-31 (afternoon) — All 382 shaders compile with this project's XenosRecomp patch; pixel shaders cost 44%
 - **Result:** `tools/shader-trial/xenosrecomp-crackdown.patch` takes translation and compilation to 382 of 382 with nothing flagged unsupported. Pixel shaders took 44% of the emulator's time at the median, 45% in total. Details and caveats are in `docs/native-rendering-survey.md`, section "Shader trial".
 - **Biggest find:** conditional exec blocks never tested their condition. No error showed it, so the first pass's 47% measured shaders with wrong behaviour.

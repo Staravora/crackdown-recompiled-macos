@@ -97,31 +97,42 @@ The survey counted 384 shaders, two PS more; that gap is unexplained.
 - **Loops:** loop constants the game sets at runtime are read from shared constants, and the loop now uses its start and step. 9 shaders loop.
 - **Smaller gaps:** `NORMAL0` and `COLOR2` interpolators, 1D fetches as 2D one texel high, unlisted texture slots and bools, empty `vfetch` swizzles, and extra vertex element locations.
 
+- **Cube lookups** ignored the instruction's source swizzle, so shaders keeping their direction in other components sampled the wrong direction. Only the pixel comparison below caught this.
+
 Anything the output doesn't implement now prints `UNSUPPORTED` for that shader: gradient fetches, relative registers, and loops in complex control flow. None of the 382 does. The survey's count of 32 VS and 32 PS using `aL`-relative sources looks wrong, since no shader sets the bits the translator checks.
 
-**Pixel shader cost:** 108 pixel shaders exist in both forms. Each was drawn full screen at 1280x720 with 2x MSAA, in the same conditions for both, best of three interleaved rounds, on the patched output:
+**Pixel comparison.** `tools/shader-trial/pixel_diff.swift` draws each of the 108 pixel shaders seen in the benchmark in both forms, from identical inputs, into a floating-point target, with bools off, on and mixed. Textures have full mip chains. Constants map by guest register, shader literals are placed in the emulator's buffer, and interpolators map by register.
 
-| Measure | XenosRecomp against the emulator's Metal |
-| --- | --- |
-| Median time | **44%** |
-| Middle 80% of shaders | 27% to 70% |
-| Sum of all 108 | 33.91 ms against 75.51 ms |
-| Heaviest shader (`0FB4021B3EBDDBAE`) | 0.46 ms against 2.53 ms |
-| Outline shader (`B20B230BE9FD2568`) | 0.24 ms against 0.89 ms |
-| Cheaper, same, dearer | 104, 2, 2 |
+| Result (worst of the three bool settings) | As shipped | Mip selection matched |
+| --- | --- | --- |
+| Exact (under 2/255 on 99.9% of pixels) | **100** | **106** |
+| Close (under 8/255 on 99% of pixels) | 7 | 2 |
+| Off | 1 | 0 |
 
-The two shaders that looked twice as slow before now sit level with the emulator (1.14 and 0.99 times). Across the shaders, patched output took 97% of the unpatched time at the median, with single shaders moving between 0.46 and 1.77 times. The emulator's own times repeated to within about 1%.
+The difference between the columns is mip selection: the emulator computes gradients itself and XenosRecomp leaves them to the GPU, which can pick a slightly different level on per-pixel coordinates. The native layer can copy the emulator's approach if that shows. 9 shaders have one constant only a discarded result reads, placed by trying each position, and all 9 match exactly, as do the 3 using relative constants.
 
-**Verdict: stay with XenosRecomp.** Every shipped shader now compiles, and pixel shaders cost a bit under half. That is the first direct evidence that native rendering can relieve the GPU in fights and explosions.
+**Pixel shader cost, drawing the same picture.** 1280x720 with 2x MSAA, one draw per pass, 108 shaders. XenosRecomp as a share of the emulator:
 
-**How far to trust the 44%:**
+| Inputs | Median | Middle 80% | Total, ms |
+| --- | --- | --- | --- |
+| Noise textures, no mips, bools on | **28%** | 18% to 48% | 32.0 against 114.1 |
+| Noise textures, no mips, bools off | 28% | 18% to 47% | 31.9 against 109.3 |
+| Noise textures, mips, bools on | 25% | 18% to 37% | 26.3 against 108.9 |
+| Smooth textures, mips, bools on | 26% | 17% to 40% | 21.9 against 86.4 |
 
-- **Nothing here checks the picture.** Compiling isn't correct, and no shader's output has been compared with the emulator's.
-- **Bools were off, and loop counts zero, in both harnesses.** Conditional blocks and runtime loops that the game turns on weren't timed, so real scenes will cost more on both sides, by amounts unknown. This is the biggest gap.
-- **The output still lacks some emulator work,** such as per-fetch format and gamma handling. Some of that will move into the native layer's textures, and some may cost shader time.
-- **Dummy inputs.** Noise textures and random constants.
-- **Vertex shaders weren't timed,** and pixel shaders are only part of a frame. This doesn't mean half the GPU time.
-- **Requirements this adds to the native layer:** upload the shaders' literal constants, because relative reads go to the buffer, and supply bool and loop constants at the shared offsets. 1D textures must be bound as 2D.
+So pixel shaders cost about a quarter to 30% of the emulator's. Turning bools on raises both sides alike. The outline shader (`B20B230BE9FD2568`) takes 0.24 ms against 0.88 ms, and the heaviest (`0FB4021B3EBDDBAE`) 0.24 ms against 2.5 ms. One or two shaders run slightly dearer, the worst 1.12 times.
+
+**The earlier 44% understated the emulator.** XenosRecomp's total barely moved (34 ms then, 32 ms now under the same kind of textures), while the emulator's went from 75 ms to 109 ms. The earlier harness left the emulator's alpha test at never pass, with its constants unmapped, so it wasn't drawing a real picture. The likely cause is the discard, though that wasn't tested on its own.
+
+**Verdict: stay with XenosRecomp, with `xenosrecomp-crackdown.patch`.** Every shipped shader compiles, the 108 compared draw what the emulator draws, and they cost well under half. Phase 1 is done.
+
+**What this doesn't show:**
+
+- **Synthetic inputs.** Real textures, constants and bools come from the game; these are generated. Agreement across three bool settings and random constants is strong evidence, not proof.
+- **Coverage.** 108 of 164 pixel shaders ran in the benchmark and were compared. The other 56 and all 218 vertex shaders have compiled but not been compared or timed.
+- **Whole-frame gain is unknown.** The emulator's frame time also holds vertex work, transfers and passes, and how much is pixel shading in play hasn't been measured. A quarter of the shader cost doesn't mean a quarter of the GPU time.
+- **Texture format work isn't included.** Signed, gamma and other format handling is off here. Some of it moves into the native layer's textures and some may cost shader time.
+- **Requirements this adds to the native layer:** upload the shaders' literal constants, because relative reads go to the buffer; supply bool and loop constants at the shared offsets; bind 1D textures as 2D.
 - **The HLSL branch of the generated code wasn't kept working.** The new LOD fetches and runtime loops exist for Metal only.
 
 ## 1. How the game reaches the GPU
@@ -390,7 +401,7 @@ Add `--crackdown_d3d_census` (default off), using the existing hook machinery in
 
 ### Phase 1: Offline shader trial (3-5 sessions) — recommended first milestone, part 2
 
-**First pass done:** see [Shader trial](#shader-trial-2026-10-31). Left: make the listed fixes in the translator, and check output against the emulator.
+**Done:** see [Shader trial](#shader-trial-2026-10-31).
 
 Build XenosRecomp with PR 22 on this Mac, as a tool outside the game build. Point it at the four shipped files and fix container differences (these shaders come from XDK 4802, older than Unleashed's).
 

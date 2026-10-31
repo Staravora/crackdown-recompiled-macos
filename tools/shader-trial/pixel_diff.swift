@@ -19,7 +19,11 @@ let job = try! JSONDecoder().decode(Job.self, from: Data(contentsOf: URL(fileURL
 let device = MTLCreateSystemDefaultDevice()!
 let queue = device.makeCommandQueue()!
 let diffWidth = 240, diffHeight = 135
-let textureSize = 256
+// NOISE=1 swaps in the older harness's large noise textures, to see how far timing depends on them.
+let noise = ProcessInfo.processInfo.environment["NOISE"] == "1"
+let noMips = ProcessInfo.processInfo.environment["NOMIPS"] == "1"
+let textureSize = noMips ? 1280 : (noise ? 1024 : 256)
+let timedBools = UInt32(ProcessInfo.processInfo.environment["BOOLS"] ?? "65535")!
 
 func matches(_ pattern: String, _ text: String) -> [[String]] {
   let re = try! NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators])
@@ -73,7 +77,7 @@ func patternTexture(_ type: MTLTextureType) -> MTLTexture {
   d.height = d.width
   d.depth = type == .type3D ? 32 : 1
   d.arrayLength = 1
-  d.mipmapLevelCount = 1 + Int(log2(Double(d.width)))
+  d.mipmapLevelCount = noMips ? 1 : 1 + Int(log2(Double(d.width)))
   d.usage = .shaderRead
   d.storageMode = .shared
   let t = device.makeTexture(descriptor: d)!
@@ -88,6 +92,13 @@ func patternTexture(_ type: MTLTextureType) -> MTLTexture {
       bytes[i + 3] = UInt8(127.5 + 127.5 * cos((u + v) * 17))
     }
   }
+  if noise {
+    var state: UInt64 = 88172645463325252
+    for i in 0..<bytes.count {
+      state ^= state << 13; state ^= state >> 7; state ^= state << 17
+      bytes[i] = UInt8(truncatingIfNeeded: state >> 24)
+    }
+  }
   if type == .type3D {
     for z in 0..<d.depth {
       t.replace(region: MTLRegionMake3D(0, 0, z, d.width, d.height, 1), mipmapLevel: 0, slice: 0, withBytes: bytes,
@@ -99,6 +110,7 @@ func patternTexture(_ type: MTLTextureType) -> MTLTexture {
                 bytesPerRow: d.width * 4, bytesPerImage: 0)
     }
   }
+  if noMips { return t }
   let cb = queue.makeCommandBuffer()!
   let blit = cb.makeBlitCommandEncoder()!
   blit.generateMipmaps(for: t)
@@ -111,7 +123,7 @@ let texture2D = patternTexture(.type2D), textureArray = patternTexture(.type2DAr
 let texture3D = patternTexture(.type3D), textureCube = patternTexture(.typeCube)
 
 let sd = MTLSamplerDescriptor()
-sd.minFilter = .linear; sd.magFilter = .linear; sd.mipFilter = .linear
+sd.minFilter = .linear; sd.magFilter = .linear; sd.mipFilter = noMips ? .notMipmapped : .linear
 sd.sAddressMode = .clampToEdge; sd.tAddressMode = .clampToEdge; sd.rAddressMode = .clampToEdge
 sd.supportArgumentBuffers = true
 let sampler = device.makeSamplerState(descriptor: sd)!
@@ -363,8 +375,8 @@ for pattern: UInt32 in [0, 0xFFFF, 0x5555] {
 }
 var timing = ""
 if ProcessInfo.processInfo.environment["TIME"] == "1" {
-  let t = timeForm(emulator, emulator.pipeline(2, .rgba8Unorm), 0xFFFF)
-  let u = timeForm(xenos, xenos.pipeline(2, .rgba8Unorm), 0xFFFF)
+  let t = timeForm(emulator, emulator.pipeline(2, .rgba8Unorm), timedBools)
+  let u = timeForm(xenos, xenos.pipeline(2, .rgba8Unorm), timedBools)
   timing = String(format: ",\"emulator_ms\":%.3f,\"xenos_ms\":%.3f", t, u)
 }
 print("{\"patterns\":[\(report.joined(separator: ","))]\(timing)}")
