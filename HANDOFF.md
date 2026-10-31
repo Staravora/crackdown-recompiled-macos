@@ -1,5 +1,12 @@
 # Session handoff
 
+## 2026-10-31 (afternoon) — Baked buffers decoded live: under half a millisecond a frame, no cost when off
+- **Added:** `src/native/native_probe.cpp`, on the existing `RunCommandBuffer` hook. `--crackdown_native_probe=true` decodes and replays baked buffers from guest memory during a benchmark's recording window, drawing nothing, and writes `native-probe-<label>.json`. Default off.
+- **Result:** rooftop and Los Muertos, no unknown packets, nothing unreadable, no buffer changing. Replay costs 0.11-0.20 ms a frame. Copying all 512 device constants on every run adds 0.19-0.26 ms, and only VS 0-11 adds 0.02 ms. Off, FPS is unchanged in interleaved runs.
+- **Answered:** the pass select is `RunCommandBuffer`'s third argument, written straight into `SET_BIN_SELECT_HI` (read in the recompiled code). Device +12428 and +12432 are the bin mask's two halves, not mask and select; the census report now says `mask_low` and `mask_high`.
+- **Note:** `codesign -s - -f` on the staged binary reports "resource fork, Finder information, or similar detritus" and `codesign -v` complains, but the binary keeps its linker ad-hoc signature and launches normally.
+- **Next:** Phase 2's direct draws and the go/no-go on textures. Start with a Metal device and render thread in shadow mode, and a texture path spike, since the plan's gate is whether invalidation costs as much as the emulator's.
+
 ## 2026-10-31 (afternoon) — Phase 2 started: baked buffer decoder works offline, replay costs almost nothing
 - **Done:** `src/native/baked_buffer.cpp` decodes the game's precompiled command lists into compact records, and `tools/baked_bench.cpp` runs it on census data. It isn't in the game build yet.
 - **Result:** three scenes, no unknown packets, draw totals exact. Decoding everything once takes 2-3 ms, and replay 0.04-0.06 microseconds per draw before Metal, with about 100 constant dwords per draw. Each draw carries nearly all its state, so decoding happens once per list.

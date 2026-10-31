@@ -26,6 +26,7 @@
 #include <rex/system/xmemory.h>
 
 #include "guest_hooks.h"
+#include "native/native_probe.h"
 
 REXCVAR_DEFINE_BOOL(crackdown_d3d_census, false, "Crackdown",
                     "During a benchmark, count the game's Direct3D calls and write census-<label>.json");
@@ -40,8 +41,8 @@ constexpr uint32_t kDeviceFetchConstants = 1024;
 constexpr uint32_t kFetchConstantBytes = 24;
 constexpr uint32_t kFetchConstantCount = 32;
 constexpr uint32_t kDeviceRenderTargets = 12160;
-constexpr uint32_t kDeviceBinMask = 12428;
-constexpr uint32_t kDeviceBinSelect = 12432;
+constexpr uint32_t kDeviceBinMaskLow = 12428;
+constexpr uint32_t kDeviceBinMaskHigh = 12432;
 constexpr uint32_t kDeviceTileCount = 12468;
 constexpr uint32_t kDeviceTileRects = 12472;
 constexpr uint32_t kTextureFetchConstant = 28;
@@ -311,7 +312,7 @@ void CountDraw(DrawKind kind, uint32_t elements, PPCContext& ctx, uint8_t* base)
   g_primitives[ctx.r4.u32 & 31] += 1;
   g_row.tiled_draws += g_tiling;
   if (g_tiling) {
-    ++g_predication[{Load32(base, device + kDeviceBinMask), Load32(base, device + kDeviceBinSelect)}];
+    ++g_predication[{Load32(base, device + kDeviceBinMaskLow), Load32(base, device + kDeviceBinMaskHigh)}];
   }
   ++g_threads[std::hash<std::thread::id>{}(std::this_thread::get_id())];
   SampleBoundTextures(device, base);
@@ -536,7 +537,7 @@ void Write(const std::filesystem::path& path, const std::string& label) {
                        return fmt::format(R"({{"rects":"{}","count":{}}})", key, count);
                      }));
   out += fmt::format(R"("predication":{},)", ReportMap(g_predication, [](const auto& key, uint64_t count) {
-                       return fmt::format(R"({{"mask":"0x{:X}","select":"0x{:X}","draws":{}}})", key.first, key.second,
+                       return fmt::format(R"({{"mask_low":"0x{:X}","mask_high":"0x{:X}","draws":{}}})", key.first, key.second,
                                           count);
                      }));
   out += fmt::format(R"("command_buffers":{},)", ReportMap(g_command_buffers, [](const auto& key, uint64_t count) {
@@ -683,6 +684,7 @@ void CensusEndTiling(PPCContext& ctx, uint8_t* base, GuestFunction original) {
 }
 
 void CensusRunCommandBuffer(PPCContext& ctx, uint8_t* base, GuestFunction original) {
+  native::probe::OnRunCommandBuffer(ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, base);
   if (census::Counting()) {
     std::lock_guard lock(census::g_mutex);
     ++census::g_row.command_buffers;

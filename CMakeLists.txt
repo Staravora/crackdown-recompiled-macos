@@ -213,6 +213,8 @@ set(CRACKDOWN_SOURCES
     src/frame_pacing.cpp
     src/benchmark.cpp
     src/d3d_census.cpp
+    src/native/baked_buffer.cpp
+    src/native/native_probe.cpp
     src/frame_rate.cpp
     src/game_files.cpp
     src/glyph_overlay.cpp

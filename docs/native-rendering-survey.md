@@ -94,9 +94,24 @@ No unknown or truncated packets in any scene, and draw totals match `census-list
 - **`SET_CONSTANT`** in these lists only moves the tile's window offset, which collapses with tiling.
 - **`LOAD_ALU_CONSTANT`** only loads shader literals, at registers 252-255 of each stage, and at 236-239 (VS) in some lists.
 - **Float constants:** type 0 packets write VS registers 12-27 and 248-251, and PS registers 0-19, 64-67 and 248-255 (rooftop). No list writes VS registers 0-11, so those, probably including the view and projection, have to come from the device.
-- **Bin masks:** the low 32 bits are tiles. The high bits pick a pass, and many objects come as a pair of buffers (flags `0x6801` and `0x6841`) for it. `DrawPasses` handles this, but the game's real pass select still has to be read live.
+- **Bin masks:** the low 32 bits are tiles. The high bits pick a pass, and many objects come as a pair of buffers (flags `0x6801` and `0x6841`) for it. The select is `RunCommandBuffer`'s third argument, which it writes straight into `SET_BIN_SELECT_HI`, so the native layer gets it on every run. It's nearly always `0xFFFFFFFF`, with `0x1` and `0x2` on a few hundred runs a frame at most.
 
-So indirect command buffers still look possible for draw state, but each run needs the device's constants as well as its own, and that step isn't measured yet.
+**Live in the game.** `--crackdown_native_probe=true` runs the same decoder from the `RunCommandBuffer` hook during a benchmark's recording window, drawing nothing, and writes `native-probe-<label>.json`. It copies each list out of validated memory and never follows a pointer inside one, which is what froze the first live parser.
+
+| Per frame | Rooftop | Los Muertos |
+| --- | --- | --- |
+| Buffer runs | 1,115 | 822 |
+| Baked draws that pass | 2,843 | 1,879 |
+| Baked draws skipped by pass | 36 | 26 |
+| Replay | 0.20 ms | 0.11 ms |
+| Device constants, VS 0-11 only | 0.02 ms | 0.02 ms |
+| Device constants, all 512 on every run | 0.26 ms | 0.19 ms |
+
+Decoding everything took 3-5 ms in total, spread over first sights. No unknown or truncated packets, nothing unreadable, and no buffer changed. The worst single run was 43-57 us, with one 976 us outlier that looks like a preemption but wasn't investigated.
+
+So even the wasteful option costs under half a millisecond per frame for baked draws. That closes the per-draw question for baked draws: replay at about 0.07 microseconds plus Metal's 1.4 against a 7 microsecond budget. Direct draws through the Direct3D setters aren't measured yet.
+
+**No cost when off.** Interleaved on the rooftop, off against on: 24.44 and 23.89 FPS against 24.25 and 24.89. Off, the hook adds one atomic load.
 
 **Direct Metal, not plume.** One game on one API doesn't need the abstraction, `tools/encode_bench.mm` already shows direct Metal is fast enough, and the design needs bindless textures and tight control of encoding.
 
@@ -203,7 +218,7 @@ Every setter takes the device in `r3`, writes a field and sets a dirty bit, as i
 | +12156 | vertex declaration |
 | +12160 to +12176 | colour render targets, depth stencil |
 | +12412, +12416 | vertex shader, pixel shader |
-| +12428, +12432 | bin mask and select (tiling) |
+| +12428, +12432 | bin mask, low and high halves (tiling). The select's high half is `RunCommandBuffer`'s third argument |
 | +12468, +12472 | tile count, tile rects |
 | +13220 | present interval |
 
@@ -440,7 +455,7 @@ The output helps the emulator too: the per-shader gap shows how much cost is sti
 
 ### Phase 2: Native vertical slice (6-10 sessions)
 
-**Started:** the [baked buffer decoder](#baked-buffer-decoder-2026-10-31) is done offline.
+**Started:** the [baked buffer decoder](#baked-buffer-decoder-2026-10-31) runs live behind a setting, without drawing.
 
 - Metal device, render thread and command queue. Choose plume's Metal backend or direct Metal with a small spike; direct is likely simpler for one game on one API.
 - Shadow-device reader, texture path (reusing SDK untile and format code), no-copy guest memory, vertex pulling or copy-and-swap decided by a spike.
