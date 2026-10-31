@@ -1,5 +1,11 @@
 # Session handoff
 
+## 2026-10-31 (afternoon) — Texture change probe built; the go/no-go waits on a drive with it on
+- **Added:** `src/native/texture_probe.cpp`, default off. Standing-still results are in `docs/native-rendering-survey.md`, section "Texture change test". Cost is about 0.3 ms a frame, and signals caught 88% of changes, with 19 tiled misses.
+- **The go/no-go is not made.** Streaming while moving is unmeasured. Bruce's session at 15:42 (`crackdown_240.log`) has no "Texture probe" line, so the setting wasn't on. The same `open -a ... --args` command turned it on when tested at 15:48, so that launch probably came another way.
+- **Before the next drive:** set `crackdown_texture_probe = true` in the app's `crackdown.toml`, so any launch counts, confirm the log line once he's in, and take it back out afterwards. Read the newest `texture-probe-*.json`, its `timeline` and its tiled misses.
+- **If tiled misses stay:** try more samples, or a full hash of a texture on its first few binds. Also track vertex buffers.
+
 ## 2026-10-31 (afternoon) — Baked buffers decoded live: under half a millisecond a frame, no cost when off
 - **Added:** `src/native/native_probe.cpp`, on the existing `RunCommandBuffer` hook. `--crackdown_native_probe=true` decodes and replays baked buffers from guest memory during a benchmark's recording window, drawing nothing, and writes `native-probe-<label>.json`. Default off.
 - **Result:** rooftop and Los Muertos, no unknown packets, nothing unreadable, no buffer changing. Replay costs 0.11-0.20 ms a frame. Copying all 512 device constants on every run adds 0.19-0.26 ms, and only VS 0-11 adds 0.02 ms. Off, FPS is unchanged in interleaved runs.

@@ -115,6 +115,38 @@ So even the wasteful option costs under half a millisecond per frame for baked d
 
 **Direct Metal, not plume.** One game on one API doesn't need the abstraction, `tools/encode_bench.mm` already shows direct Metal is fast enough, and the design needs bindless textures and tight control of encoding.
 
+## Texture change test (2026-10-31, unfinished)
+
+Phase 2's gate: can a native renderer learn cheaply when a texture changes? `--crackdown_texture_probe=true` tracks every texture the game binds, from baked and direct draws, and compares four signals with a rotating hash of the real memory: the cache flush `826C4C70`, CPU locks, resolves by page, and a per-frame sample of 8 spots of 64 bytes across each bound texture. It runs through normal play and writes `texture-probe-<time>.json` to the logs folder every 900 frames.
+
+**Standing still only**, from the menu to the rooftop, 2,700 frames:
+
+| Per frame | |
+| --- | --- |
+| Textures bound | about 200-220, 44-47 MB |
+| Tracking flushes | 0.001 ms |
+| Tracking binds | 0.16-0.18 ms |
+| Sampling every bound texture | 0.10 ms |
+| Fully hashing bound textures, by comparison | about 10 ms, at 4.6 GB/s |
+
+| 42,893 checks of the real memory | Changes |
+| --- | --- |
+| Announced by a flush | 250 |
+| By a CPU lock | 86 |
+| By a resolve | 91 |
+| Only the sample saw it | 1,092 |
+| Nothing saw it | 208 (189 linear, 19 tiled) |
+
+So signals caught 88% of 1,727 changes. Most changes are linear `k_8` planes in 1280x720 and 640x360 groups, which look like video frames, rewritten without a flush. That's inferred from their shape and not confirmed.
+
+**Not settled:**
+
+- **Cost passes the gate; reliability doesn't yet.** About 0.3 ms a frame is far below the emulator's approach, but a stale texture is a visible bug.
+- **The 19 tiled misses** are about 5% of tiled changes. Sampling mips as well didn't help. They may be small partial updates that eight spots can miss, which is a guess.
+- **Streaming while moving is unmeasured.** A play session on 2026-10-31 ran without the setting, so it gave no probe data. This is the case that decides it.
+- **Vertex buffers** are live guest memory with the same question, and this doesn't track them.
+- Texture sizes are estimates, since the SDK's layout code isn't reachable from the game.
+
 ## Shader trial (2026-10-31)
 
 Phase 1 ran XenosRecomp's Metal branch ([PR 22](https://github.com/hedge-dev/XenosRecomp/pull/22), commit `4906992`) over every shipped shader, first as it stands, then with this project's patch (`tools/shader-trial/xenosrecomp-crackdown.patch`).
