@@ -76,6 +76,56 @@ The stress run uses the emulator's raw 6,207 draws with every state changing on 
 - **Idle reads slower than load 2** (6.56 against 4.32 ms for bindless on one thread), probably because cores clock down between paced frames. The loaded figures are closer to the game, but that explanation is untested.
 - **Pipelines were already compiled**, as the plan assumes, and the frame comes from a standing-still census. The stress run covers a heavier frame.
 
+## Shader trial (2026-10-31)
+
+Phase 1 ran XenosRecomp's Metal branch ([PR 22](https://github.com/hedge-dev/XenosRecomp/pull/22), commit `4906992`) over every shipped shader. Tools are in `tools/shader-trial`.
+
+| Step | Shaders | Share of 382 |
+| --- | --- | --- |
+| Unique shipped shaders | 382 (218 VS, 164 PS) | |
+| Translated without crashing | 368 | 96% |
+| Compiled by Apple's compiler, unaided | 253 | 66% |
+| Compiled after small fixes (estimate) | 364 | 95% |
+
+The survey counted 384 shaders, two PS more; that gap is unexplained. The estimate patches the generated text, so it stands for fixes not yet made in the translator.
+
+**What fails, and the fix:**
+
+| Shaders | Cause | Fix |
+| --- | --- | --- |
+| 95 VS | Vertex shaders get no texture tables, then read fetch slots `s16` and up, which aren't mapped | Add the tables to the vertex entry; map vertex samplers |
+| 14 VS, overlapping the row above | A `vfetch` with every component masked emits an empty swizzle | Skip it |
+| 7 (VS and PS) | `NORMAL0` and `COLOR2` interpolators are missing from the shared struct | Add them |
+| 6 PS | Fetch slots `s1` and `s2` aren't in the constant table | Map them |
+| 8 (4 VS, 4 PS) | Two relative constant operands in one instruction hit an assert | Real translator work |
+| 6 VS | No vertex element mapping for `Position 2` | Add the mapping |
+| 4 PS | 1D textures | Add a heap, or treat as 2D with height 1 |
+| 1 PS | Bool constant `b128` isn't in the constant table | Map it |
+
+None of the 14 translator failures appeared in the benchmark run, and one of the 4 1D shaders did. That run only covers one spot.
+
+**Pixel shader cost:** 108 pixel shaders exist in both forms. Each was drawn full screen at 1280x720 with 2x MSAA, in the same conditions for both, best of three interleaved rounds:
+
+| Measure | XenosRecomp against the emulator's Metal |
+| --- | --- |
+| Median time | **47%** |
+| Middle 80% of shaders | 27% to 69% |
+| Sum of all 108 | 38.85 ms against 82.96 ms |
+| Heaviest shader (`0FB4021B3EBDDBAE`) | 0.58 ms against 2.54 ms |
+| Outline shader (`B20B230BE9FD2568`, `harness` timing) | about 0.45 ms against 0.73 ms |
+| Cheaper, same, dearer | 103, 2, 3 |
+
+**Verdict: stay with XenosRecomp.** It misses the plan's 70% gate unaided by a small margin, but the causes are small and known, so a new backend isn't justified. Pixel shaders cost about half, which is the first direct evidence that native rendering can relieve the GPU in fights and explosions.
+
+**How far to trust the 47%:**
+
+- **Nothing here checks the picture.** Compiling isn't correct, and no shader has been compared against the emulator's output.
+- **Some of the saving may be missing work.** The translator has no handling for explicit LOD fetches (33 VS, 4 PS in the survey), and its output has no equivalent of some emulator steps, such as per-fetch format and gamma handling. Real parity may cost more.
+- **Relative addressing through `aL`** shows no handling in the translator beyond the loop counter; the survey counted 32 VS and 32 PS with that bit set. Loops themselves are handled, unlike the README says.
+- **Dummy inputs.** Noise textures, random constants, bools off. Real data takes different branches.
+- **Two shaders got slower** by about 2x (`500DA34297830D6E`, `CB49964AB01BF2D7`); not investigated.
+- **Vertex shaders weren't timed**, and pixel shaders are only part of a frame. A 47% shader time doesn't mean half the GPU time.
+
 ## 1. How the game reaches the GPU
 
 ### The path today
@@ -341,6 +391,8 @@ Add `--crackdown_d3d_census` (default off), using the existing hook machinery in
 **Done:** one JSON report per scene. It also serves the emulator work today: real numbers on which resolves and transfers dominate.
 
 ### Phase 1: Offline shader trial (3-5 sessions) — recommended first milestone, part 2
+
+**First pass done:** see [Shader trial](#shader-trial-2026-10-31). Left: make the listed fixes in the translator, and check output against the emulator.
 
 Build XenosRecomp with PR 22 on this Mac, as a tool outside the game build. Point it at the four shipped files and fix container differences (these shaders come from XDK 4802, older than Unleashed's).
 

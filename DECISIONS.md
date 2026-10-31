@@ -32,3 +32,4 @@
 | 2026-10-31 | Unlink the guest memory object right after creating it (`0013`). | The game exits with `std::_Exit`, so the destructor never unlinked it and every launch leaked guest memory into swap until reboot. | active |
 | 2026-10-31 | On macOS, destroy the old swapchain before creating the new one (`0014`). | MoltenVK's `oldSwapchain` path can leave the layer's drawable at 1x1, which showed as the flat colour. Destroying first keeps the real size as the last write; patching MoltenVK would mean rebuilding the pinned runtime. |
 | 2026-10-31 | Turn off the green button's hover menu for this app (`0014`). | Its nested AppKit loop stops all painting until it closes. Painting that survives nested loops would be a much larger change. |
+| 2026-10-31 | Stay with XenosRecomp for native shaders after the Phase 1 trial. | 95% of shaders compile after small fixes and pixel shaders cost about half, though output is unchecked. A new backend would redo that work. |

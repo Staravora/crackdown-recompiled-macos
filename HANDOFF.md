@@ -1,7 +1,14 @@
 # Session handoff
 
+## 2026-10-31 (afternoon) — Phase 1 first pass: 95% of shaders compile after small fixes, pixel shaders cost about half
+- **Result:** XenosRecomp's Metal branch translated 368 of 382 shipped shaders. 253 compiled unaided, and an estimated 364 compile with small fixes. Across 108 pixel shaders it took 47% of the emulator's time at the median. Full tables and caveats are in `docs/native-rendering-survey.md`, section "Shader trial".
+- **Verdict:** keep XenosRecomp. The failures are small and known. The 47% is not parity: no output has been checked against the emulator, and explicit LOD fetches aren't handled.
+- **Process:** Bruce ran the build, because running GitHub code needs his approval. The temporary SPIR-V dump in `shader.cpp` is out, and `check-macos-sdk.py --staged` passes. The tools are in `tools/shader-trial`; generated shaders stay in `work/experiments/shader-trial`.
+- **Harness trap:** Apple GPUs skip covered pixels, so timing several opaque quads in one pass reads about 20x low. Time one draw per pass. Earlier harness numbers using 20 draws should be treated with care.
+- **Next:** make the fixes in the translator (needs another build run by Bruce), then render a real scene's shader through both paths and compare pixels. That's the check the 47% most needs.
+
 ## 2026-10-31 (afternoon) — Phase 1 started; shaders extracted, waiting on approval to build XenosRecomp
-- **Done:** `tools/extract-shaders.py` joins each shipped shader's virtual and physical parts into one file, 382 unique (218 VS, 164 PS). The survey said 384, two PS more, and that gap is unexplained. The packs' 12-byte index entries hold the physical offsets, and `boundshaders.bsh` has a different header. All 320 shaders in `RTWUberShader.bin` match `prebuilt_shadercache.dat`, which proves the reader.
+- **Done:** `tools/shader-trial/extract.py` joins each shipped shader's virtual and physical parts into one file, 382 unique (218 VS, 164 PS). The survey said 384, two PS more, and that gap is unexplained. The packs' 12-byte index entries hold the physical offsets, and `boundshaders.bsh` has a different header. All 320 shaders in `RTWUberShader.bin` match `prebuilt_shadercache.dat`, which proves the reader.
 - **Blocked:** building and running XenosRecomp (PR 22, commit 4906992) was stopped by the session's safety check, because it means running code from GitHub. Bruce decides. `work/experiments/shader-trial/run-trial.sh` is written but has never run.
 - **Next:** run it, then read `results.tsv`, then compare per-shader cost against the emulator's MSL.
 
