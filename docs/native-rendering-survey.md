@@ -34,6 +34,8 @@ Phase 0 ran on the live game: `--crackdown_d3d_census` during a benchmark, at th
 | Occlusion queries | 71 (max 270) | 33 (max 214) |
 | Texture locks | 1 | 1 |
 
+A second city spot (second Los Muertos supply point, a rooftop) came to almost the same total by a different route: **4,689 unique draws**, 1,669 direct and 3,020 inside 1,160 buffer runs. So about 4,700 looks like a fair figure for standing in the city, while the share in baked buffers ranges from 41% to 64%.
+
 **This corrects the survey in four ways.**
 
 - **The boundary is not fully clean.** `826C3750` is `RunCommandBuffer`, used about 800 times per frame, and those buffers hold raw PM4 that no D3D hook sees. They look baked into the game data rather than recorded: `826C4148` turns offsets in the object into pointers at load, and `826C3D90` patches in resources, both called from the loader `823BD140`. Hooking D3D alone would miss 41% of city draws, so **a native layer needs a PM4 decoder for them.**
