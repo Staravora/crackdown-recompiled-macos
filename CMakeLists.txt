@@ -265,6 +265,14 @@ set(CRACKDOWN_SOURCES
     src/xdvdfs.cpp
     src/skip_intro.cpp
 )
+if(APPLE)
+    # The native Metal layer. Only the .mm file sees Metal, and the C++ precompiled header can't serve Objective-C++.
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 23)
+    list(APPEND CRACKDOWN_SOURCES src/native/shadow.cpp src/native/metal_device.mm)
+    set_source_files_properties(src/native/metal_device.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc" SKIP_PRECOMPILE_HEADERS ON)
+endif()
 set_source_files_properties(src/updater/third_party/miniz/miniz.c PROPERTIES COMPILE_OPTIONS "-w")
 # Stricter checks for the project's own C++ only: not the generated code, the SDK headers (system includes) or the SDK
 # sources rexglue_configure_target adds to this target.
@@ -304,6 +312,9 @@ endif()
 
 rexglue_setup_host_target(crackdown GPU_PLUGINS xenos)
 target_link_libraries(crackdown PRIVATE trg::launcher)
+if(APPLE)
+    target_link_libraries(crackdown PRIVATE "-framework Metal" "-framework Foundation")
+endif()
 target_compile_definitions(crackdown PRIVATE
     CRACKDOWN_PORT_VERSION="${PROJECT_VERSION}"
     CRACKDOWN_TRG_VERSION="${CRACKDOWN_TRG_VERSION}"

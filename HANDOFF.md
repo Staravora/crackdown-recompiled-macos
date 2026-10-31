@@ -1,5 +1,11 @@
 # Session handoff
 
+## 2026-10-31 (evening) — Metal device and render thread running in shadow mode
+- **Added:** `src/native/shadow.cpp` and `src/native/metal_device.mm`, macOS only, behind `crackdown_native_shadow`, default off. `enable_language(OBJCXX)` and the Metal framework are in `CMakeLists.txt`. Baked lists are now held by `shared_ptr` so frames in flight survive a re-decode.
+- **Result:** rooftop, four runs: about 1,800 baked draws a frame recorded in 0.57 ms, 0 frames dropped, 0 GPU errors. Off 24.00 FPS median against on 24.54, so no measurable cost, for about 85 MB more memory. All of guest memory wraps no-copy, and 12 of 12 GPU read checks matched. Table in `docs/native-rendering-survey.md`, section "Shadow mode".
+- **Not real yet:** placeholder draws with no pixels, one pass, no textures, no direct draws, no window. Recording cost will rise once they change real state. Only run on the rooftop benchmark, not in a drive. Not built on Windows or Linux: `shadow.h` has stubs for them, untested.
+- **Next:** derive real passes from the render target registers, load the translated shaders, and draw real geometry to a debug window. Deciding vertex pulling against copying comes with that. Translated shaders derive from the game, so they have to be generated on the player's machine and stay out of the repo.
+
 ## 2026-10-31 (evening) — Texture go/no-go: go, with the page watch
 - **Result:** 13-minute drive with the watch armed (`crackdown_249.log`, `texture-probe-1793488834.json`). Of 9,187 changes, the watch fired on 33%, resolves wrote 67%, and 48 (0.5%, 3.5 MB) are unexplained. It caught 1,043 of the 1,073 that no cheap signal saw. Fires run at 120 a frame, about the same with or without streaming. Full tables in `docs/native-rendering-survey.md`.
 - **Decision:** a native renderer learns of texture changes from the page watch plus its own resolves. See `DECISIONS.md`.

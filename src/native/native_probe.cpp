@@ -8,6 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <tuple>
 #include <unordered_map>
@@ -21,6 +22,7 @@
 #include <rex/system/xmemory.h>
 
 #include "baked_buffer.h"
+#include "shadow.h"
 #include "texture_probe.h"
 
 REXCVAR_DEFINE_BOOL(crackdown_native_probe, false, "Crackdown",
@@ -51,7 +53,9 @@ constexpr size_t kReportRows = 16;
 
 struct Buffer {
   uint32_t flags = 0;
-  std::vector<BakedList> lists;
+  // Shared with shadow frames still in flight, so a list that's decoded again doesn't pull them out from under the
+  // render thread.
+  std::shared_ptr<const std::vector<BakedList>> lists = std::make_shared<const std::vector<BakedList>>();
   const uint8_t* sample_host = nullptr;
   uint32_t sample_dwords = 0;
   uint32_t sample = 0;
@@ -139,8 +143,7 @@ uint32_t SampleOf(const Buffer& entry) {
 
 // Copies the words out and decodes the copy. Pointers inside a list are never followed: doing that from a game hook is
 // what froze the game the first time.
-void DecodeBuffer(Buffer& entry, uint32_t buffer, const uint8_t* base) {
-  entry.lists.clear();
+void ReadLists(Buffer& entry, std::vector<BakedList>& decoded, uint32_t buffer, const uint8_t* base) {
   entry.sample_host = nullptr;
   if (!Readable(buffer, kCommandBufferSegments + 4)) {
     ++g_totals.unreadable;
@@ -173,7 +176,7 @@ void DecodeBuffer(Buffer& entry, uint32_t buffer, const uint8_t* base) {
       for (uint32_t& word : words) {
         word = std::byteswap(word);
       }
-      entry.lists.push_back(g_library.Decode(words.data(), words.size()));
+      decoded.push_back(g_library.Decode(words.data(), words.size()));
       ++g_totals.lists;
       if (!entry.sample_host) {
         entry.sample_host = host;
@@ -187,9 +190,15 @@ void DecodeBuffer(Buffer& entry, uint32_t buffer, const uint8_t* base) {
   }
 }
 
+void DecodeBuffer(Buffer& entry, uint32_t buffer, const uint8_t* base) {
+  auto decoded = std::make_shared<std::vector<BakedList>>();
+  ReadLists(entry, *decoded, buffer, base);
+  entry.lists = std::move(decoded);
+}
+
 // What the native layer would do with a list at run time, short of Metal.
 void Replay(const Buffer& entry, uint32_t pass_select) {
-  for (const BakedList& list : entry.lists) {
+  for (const BakedList& list : *entry.lists) {
     for (const BakedDraw& draw : list.draws) {
       // Constant writes aren't predicated, so they apply either way.
       for (uint32_t i = 0; i < draw.constant_writes; ++i) {
@@ -255,7 +264,8 @@ void OnGuestFrame() {
 }
 
 void OnRunCommandBuffer(uint32_t device, uint32_t buffer, uint32_t predication, const uint8_t* base) {
-  if (!g_window.load(std::memory_order_relaxed) && !textures::Enabled()) {
+  const bool timed = g_window.load(std::memory_order_relaxed) || textures::Enabled();
+  if (!timed && !shadow::Enabled()) {
     return;
   }
   std::lock_guard lock(g_mutex);
@@ -276,12 +286,20 @@ void OnRunCommandBuffer(uint32_t device, uint32_t buffer, uint32_t predication, 
     }
   }
 
+  if (shadow::Enabled()) {
+    CopyDeviceConstants(device, base, kDeviceVertexConstants, kCameraConstants, 0);
+    shadow::Capture(entry.lists, predication, g_device_constants.data());
+  }
+  if (!timed) {
+    return;
+  }
+
   const Clock::time_point replay_start = Clock::now();
   // The game passes this straight into SET_BIN_SELECT_HI.
   Replay(entry, predication);
   g_totals.replay_ns += Since(replay_start);
   if (textures::Enabled()) {
-    for (const BakedList& list : entry.lists) {
+    for (const BakedList& list : *entry.lists) {
       for (const BakedDraw& draw : list.draws) {
         if (DrawPasses(draw, predication)) {
           textures::OnFetchSet(draw.textures, g_library.texture_set(draw.textures));

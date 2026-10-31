@@ -40,6 +40,7 @@
 #include "guest_fault_log.h"
 #include "hang_watchdog.h"
 #include "benchmark.h"
+#include "native/shadow.h"
 #include "native/texture_probe.h"
 #include "internal_render_scale.h"
 #include "language_setting.h"
@@ -279,6 +280,7 @@ class CrackdownApp : public rex::ReXApp {
         crackdown::benchmark::Install(input, runtime()->virtual_membase(), LogsDir(user_data_root()));
         crackdown::native::textures::Install(runtime()->memory(), runtime()->virtual_membase(),
                                              LogsDir(user_data_root()));
+        crackdown::native::shadow::Install(runtime()->memory(), LogsDir(user_data_root()));
       }
     }
     if (window()) {

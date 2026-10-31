@@ -219,6 +219,34 @@ Vertex buffers are live guest memory with the same question, and the probe doesn
 
 Texture sizes are estimates, since the SDK's layout code isn't reachable from the game.
 
+## Shadow mode (2026-10-31)
+
+`--crackdown_native_shadow=true` starts a Metal device and a render thread of their own beside the emulator. `src/native/shadow.cpp` takes each `RunCommandBuffer` from the game's threads and hands the frame over at the swap, without ever waiting: if the thread falls behind, the frame is dropped and counted. The thread replays constants into a per-frame arena, 5 KB per draw (4 KB vertex, 1 KB pixel), and records one placeholder draw per passing baked draw into an off-screen target. `src/native/metal_device.mm` is the only file that sees Metal. Off by default, and there's no window yet because placeholders have nothing to show.
+
+**Guest memory goes to the GPU without a copy.** All 512 MB of the physical view wraps in one `newBufferWithBytesNoCopy` buffer, which worked first try on the file-backed mapping. That view is the one page watches don't protect, so the GPU can't fault on an armed page. Every 300 frames a blit through the GPU's view is compared with the CPU's, on 4 KB from a live index buffer: 12 of 12 matched across four runs. That proves reads of static data, not that the GPU sees a fresh write the moment it lands.
+
+**Four rooftop runs**, 900 game frames each:
+
+| Per frame | |
+| --- | --- |
+| Baked draws recorded | about 1,800, plus 28 skipped by pass |
+| Dropped frames | 0 |
+| Handing runs over, on the game's thread | about 0.02 ms |
+| Render thread: recording, p50 | 0.57-0.59 ms |
+| Render thread: recording, p95 | 0.75-0.90 ms |
+| Render thread: recording, worst | 2.07 ms |
+| GPU | 0.34-0.49 ms, worst 3.4 ms, 0 errors |
+| Waiting for a free frame | 0 ms |
+
+| Benchmark, interleaved | Average FPS | Median frame | Peak memory |
+| --- | --- | --- | --- |
+| Off | 23.05, 24.25, 24.00 | 43.3, 41.3, 41.6 ms | 2,528-2,564 MB |
+| On | 24.54, 24.94, 23.72 | 40.5, 40.1, 42.1 ms | 2,631-2,651 MB |
+
+**No measurable frame rate cost**, within the noise of three rounds, and about 85 MB more memory, most of it the 60 MB of constant arenas. Wrapping guest memory didn't add its 512 MB.
+
+**This understates a real renderer.** Recording at about 0.3 microseconds a draw is cheaper than the 1.4 in the encoding test because these draws change much less: 16 placeholder pipelines, one pass, no textures, depth, scissor or viewport changes. They produce no pixels and put almost no load on the GPU. Direct draws aren't captured, so this is roughly the baked 40-60% of a frame. What it does prove is the plumbing: Metal runs inside the game next to MoltenVK, the thread keeps up, and the hand-over costs the game nothing measurable. Only the rooftop has been run, not a drive.
+
 ## Shader trial (2026-10-31)
 
 Phase 1 ran XenosRecomp's Metal branch ([PR 22](https://github.com/hedge-dev/XenosRecomp/pull/22), commit `4906992`) over every shipped shader, first as it stands, then with this project's patch (`tools/shader-trial/xenosrecomp-crackdown.patch`).
@@ -559,7 +587,7 @@ The output helps the emulator too: the per-shader gap shows how much cost is sti
 
 ### Phase 2: Native vertical slice (6-10 sessions)
 
-**Started:** the [baked buffer decoder](#baked-buffer-decoder-2026-10-31) runs live behind a setting, without drawing.
+**Started:** the [baked buffer decoder](#baked-buffer-decoder-2026-10-31) runs live behind a setting, the [texture change test](#texture-change-test-2026-10-31) passed, and [shadow mode](#shadow-mode-2026-10-31) records baked draws in Metal with placeholders. Next: real pass structure, translated shaders, a debug window to compare with, then textures and direct draws.
 
 - Metal device, render thread and command queue. Choose plume's Metal backend or direct Metal with a small spike; direct is likely simpler for one game on one API.
 - Shadow-device reader, texture path (reusing SDK untile and format code), no-copy guest memory, vertex pulling or copy-and-swap decided by a spike.
