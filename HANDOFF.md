@@ -1,11 +1,17 @@
 # Session handoff
 
+## 2026-10-31 (evening) — Texture go/no-go: go, with the page watch
+- **Result:** 13-minute drive with the watch armed (`crackdown_249.log`, `texture-probe-1793488834.json`). Of 9,187 changes, the watch fired on 33%, resolves wrote 67%, and 48 (0.5%, 3.5 MB) are unexplained. It caught 1,043 of the 1,073 that no cheap signal saw. Fires run at 120 a frame, about the same with or without streaming. Full tables in `docs/native-rendering-survey.md`.
+- **Decision:** a native renderer learns of texture changes from the page watch plus its own resolves. See `DECISIONS.md`.
+- **Next:** Phase 2 continues with a Metal device and render thread in shadow mode, the direct draw path, then the texture path. Check vertex buffers with the same watch when that path needs them. The survey lists three things the texture path inherits.
+- **Config:** the probe setting is back out of the app's `crackdown.toml`. The built app still has the probe, off by default.
+- **Old iCloud copy retired:** `~/Documents/Codex/2026-10-29/https-github-com-saulob-crackdown-xbox360` went to iCloud's Trash on 2026-10-31 at Bruce's word, because he opened it by mistake and it hung on evicted files. Nothing unique in it: same files or older by name and size, except rebuildable test builds. Its git heads are in this repo, and no source there was edited after the move at 19:58 on 10-30. It's in `~/Library/Mobile Documents/.Trash` until emptied.
+
 ## 2026-10-31 (evening) — Page watch added to the texture probe: 99% on the benchmark, drive pending
 - **Added:** the probe now scores the emulator's page watch, armed before each hash. Fields `changed_watched`, `changed_unwatched`, `unwatched_after_resolve`, `missed_but_watched`, `watch_fires`, and an `unwatched` list. `Install` now takes the `Memory`. Fifth signal only under `crackdown_texture_probe`, and nothing changes with it off.
 - **Benchmark result:** of 1,369 changes the watch fired on 93%, resolves explain 6%, and 12 are unexplained. It caught 295 of the 301 the cheap signals missed. Probe on costs about 2 FPS, hashing included. Table in `docs/native-rendering-survey.md`.
 - **The probe's listener returns the exact fired range**, which holds the emulator to unwatching that page instead of up to 256 KB around it. Keep that for the test. A real renderer has to choose between more faults and a wider dirty area.
-- **Right now:** `crackdown_texture_probe = true` is ON in the app's `crackdown.toml` for Bruce's next drive. Take it out afterwards. Confirm the "Texture probe" log line first.
-- **After the drive:** read the newest `texture-probe-*.json`. Look at `changed_unwatched` minus `unwatched_after_resolve`, any tiled rows in `unwatched`, and `watch_fires_per_frame`. The go/no-go is in the survey. Bruce unlocked agency spawns in the Volk and Shai Gen during the last drive, so teleporting between them is a cheap way to force streaming.
+- **To repeat the test:** set `crackdown_texture_probe = true` in the app's `crackdown.toml` and read the newest `texture-probe-*.json`. Teleporting between agency spawns is a cheap way to force streaming.
 
 ## 2026-10-31 (evening) — Texture drive done: the cheap signals are a no-go
 - **Result:** 10 minutes of driving with the probe on (`crackdown_242.log`, `texture-probe-1793486425.json`). Of 7,557 texture changes, flush, lock and resolve announced 71%, the sample alone saw 16%, and 13% went unseen (702 tiled, 298 linear). Misses run through the whole drive, not just loading. Cost is about 0.7 ms a frame. Full table in `docs/native-rendering-survey.md`, section "Texture change test".

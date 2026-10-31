@@ -185,7 +185,35 @@ The remaining 12 are mostly small linear textures, and nothing yet says what wri
 
 That's the whole probe, hashing included, so it isn't the cost of the watch alone. The watch fired about 50 times a frame, and one bare fault takes 4.6 us on this Mac (`mprotect` plus signal, measured outside the SDK), so about 0.2 ms before the SDK's own lock and bookkeeping. One earlier run read 18.75 FPS and didn't repeat.
 
-**Still open:** the go/no-go needs a drive with this build, because a benchmark doesn't stream the city. Go if watch plus resolves leaves about as little as it does here and nothing tiled, and if faults stay in the same range.
+**Driving with the watch** (`crackdown_249.log`, `texture-probe-1793488834.json`), 23,400 frames over 13 minutes, including jumps between agency spawns in the Volk, Shai Gen and Los Muertos. Frames 2,700-8,100 streamed almost nothing, so about 8.5 minutes of it was streaming.
+
+| 9,187 changes | |
+| --- | --- |
+| The watch fired | 2,986 (33%) |
+| Not fired, but a resolve wrote the page | 6,153 (67%) |
+| Neither | 48 (0.5%, 3.5 MB of 2,097 MB) |
+| Of the 1,073 no cheap signal saw, the watch fired on | 1,043 (97%) |
+
+The resolve share is a steady 240 or so per 30 seconds in every window, moving or not, so it's render targets being read back and not streaming. The share of streamed textures the watch catches is the row that matters.
+
+The `unwatched` list holds 38 of the 48. 37 are linear `k_8_8_8_8`, mostly 128x1 and 24-48 pixels square, and one is a tiled 128x128 that changed 33 times, so it's probably a render target. No DXT texture is in the list. The other 10 aren't listed, so they could be anything. Nothing yet says what writes those small linear ones.
+
+| Per frame | |
+| --- | --- |
+| Watch fires | 120, against 50 on the benchmark |
+| Arming | 0.06 ms |
+| Bytes reported | 1.9 MB |
+| False alarms | 46,652 checks, 8.2 GB over the session, about 0.35 MB a frame |
+
+Fires hold at about 113 a frame in the windows with no streaming and about 125 in the ones with it, so streaming isn't what drives them. Hot data sharing a 16 KB page with a texture is the likely cause, inflated here because the probe rearms every texture it checks and the exact range keeps pages armed. At about 5-10 us each that's roughly 1 ms a frame at worst, spread across the threads that wrote. The 5-10 us is an estimate from the bare 4.6 us fault.
+
+The frame rate with all this on was median 29.5 FPS over 826 seconds, with 0 seconds under 12 and 28 under 20. That isn't a controlled comparison.
+
+**Verdict: go. A native renderer learns of texture changes from the page watch, plus its own resolves.** Coverage is 99.5% of changes and 99.8% of bytes, and streamed textures don't appear among the known gaps. Three things carry into the texture path:
+
+- **The 48.** Small linear textures could be hashed in full at bind, which is cheap at those sizes. That's a plan and not a measurement.
+- **The listener's range.** In the native renderer the emulator's listener is gone, so the renderer sets the range. Exact costs more faults, and a wider one costs more false uploads. The renderer also arms only when it uploads, so fires should fall from what the probe saw.
+- **Reads vs writes.** The first read after a fire has to arm before it reads, as the probe does.
 
 Vertex buffers are live guest memory with the same question, and the probe doesn't track them. The same watch would cover them if it holds up, as `primitive_processor.cpp` already does for index buffers.
 
