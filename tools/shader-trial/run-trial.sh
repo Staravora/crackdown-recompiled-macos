@@ -27,13 +27,8 @@ clang++ $flags -c trial_main.cpp -o build/trial_main.o || exit 1
 clang++ build/shader_recompiler.o build/trial_main.o -o build/xenos_one || exit 1
 
 # One process per shader: a crash in the translator is that shader's failure.
-for bin in extracted/*.bin; do
-  name=${bin:t:r}
-  ./build/xenos_one $bin translated/$name.metal $R/XenosRecomp/shader_common.h \
-    > translated/$name.translate.txt 2>&1 &
-  while (( $(jobs -r | wc -l) >= 6 )); do sleep 0.05; done
-done
-wait
+print -rl -- extracted/*.bin | xargs -P 6 -I{} zsh -c \
+  'n=$(basename {} .bin); ./build/xenos_one {} translated/$n.metal XenosRecomp/XenosRecomp/shader_common.h > translated/$n.translate.txt 2>&1'
 zsh compile-all.sh
 python3 - <<'EOF'
 import collections

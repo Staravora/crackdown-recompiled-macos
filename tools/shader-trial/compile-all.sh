@@ -2,17 +2,10 @@
 # Second half of the trial: compile the translated shaders with Apple's compiler. This toolchain no
 # longer predefines __air__, which the generated code branches on, so it's passed here.
 cd "${0:A:h}"
-one() {
-  local source=$1 name=${1:t:r} out=translated/${1:t:r}
-  if xcrun -sdk macosx metal -D__air__=1 -c $source -o $out.air 2> $out.compile.txt; then
-    printf '%s\tok\n' $name
+print -rl -- translated/*.metal | xargs -P 6 -I{} zsh -c '
+  n=$(basename {} .metal); o=translated/$n
+  if xcrun -sdk macosx metal -D__air__=1 -c {} -o $o.air 2> $o.compile.txt; then
+    printf "%s\tok\n" $n
   else
-    printf '%s\tcompile-failed\t%s\n' $name "$(grep -m1 'error:' $out.compile.txt | sed -E 's/^[^ ]+ error: //' | cut -c1-140)"
-  fi
-}
-: > compiled.tsv
-for source in translated/*.metal; do
-  one $source >> compiled.tsv &
-  while (( $(jobs -r | wc -l) >= 6 )); do sleep 0.05; done
-done
-wait
+    printf "%s\tcompile-failed\t%s\n" $n "$(grep -m1 error: $o.compile.txt | sed -E "s/^[^ ]+ error: //" | cut -c1-140)"
+  fi' > compiled.tsv
