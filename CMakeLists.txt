@@ -212,6 +212,7 @@ set(CRACKDOWN_SOURCES
     src/frame_counter.cpp
     src/frame_pacing.cpp
     src/benchmark.cpp
+    src/d3d_census.cpp
     src/frame_rate.cpp
     src/game_files.cpp
     src/glyph_overlay.cpp

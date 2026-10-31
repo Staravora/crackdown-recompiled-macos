@@ -6,7 +6,7 @@ Scoping survey for replacing the emulated Xenos GPU with native Metal rendering:
 
 Level 3 looks feasible for Crackdown, and in several ways easier than Sonic Unleashed was.
 
-- **The D3D boundary is clean.** No game function outside the D3D block writes command packets itself. About 50-60 entry points need replacing; Unleashed Recompiled needed 42 hooks and 15 stubs.
+- **The D3D boundary is nearly clean.** No game function outside the D3D block writes command packets itself, but 41% of city draws arrive in baked command buffers that need a small decoder ([Census results](#census-results-2026-10-31)). About 50-60 entry points need replacing; Unleashed Recompiled needed 42 hooks and 15 stubs.
 - **The shaders are in hand.** The game ships them in the container format XenosRecomp reads, with constant names intact. 254 of the 262 shaders seen at runtime (97%) trace back to those files.
 - **The rendering is simple.** No memexport anywhere, no multiple render targets, one colour format on 367 of 371 colour-target pipelines, and shaders with a median of 47 (VS) and 30 (PS) instructions.
 - **A Metal path exists to build on.** Unleashed Recompiled has an open native Metal PR, with XenosRecomp MSL output in a companion PR. Neither is merged.
@@ -16,6 +16,41 @@ Three things are harder than Unleashed and carry most of the risk: textures and 
 **Recommended first milestone:** a D3D call census plus an offline shader trial (see [Plan](#5-phased-plan)). It costs a few sessions, needs one short game run, gives the emulator work real per-frame targets, and decides go or no-go on level 3 with numbers. Skip a full native Metal backend for the emulator (level 2) unless the census finds a blocker.
 
 **Confidence.** Function names below are inferred from code shape, callers and the XDK API as remembered; there are no symbols. Counts are measured. What only a live run can answer is listed under [Open questions](#open-questions).
+
+## Census results (2026-10-31)
+
+Phase 0 ran on the live game: `--crackdown_d3d_census` during a benchmark, at the Los Muertos supply point and in the Agency garage. Read reports with `tools/census-lists.py`. Median per frame:
+
+| Per frame | City | Garage |
+| --- | --- | --- |
+| Draws made directly | 2,763 | 784 |
+| Precompiled command buffer runs | 813 | 918 |
+| Draws inside those buffers | 1,902 | 1,579 |
+| **Unique draws** | **4,665** | **2,363** |
+| Direct draws inside tiling | 2,221 | 217 |
+| Tiles (always the same two rects) | 2 | 2 |
+| Resolves | 23 | 41 |
+| Texture changes | 1,476 | 600 |
+| Occlusion queries | 71 (max 270) | 33 (max 214) |
+| Texture locks | 1 | 1 |
+
+**This corrects the survey in four ways.**
+
+- **The boundary is not fully clean.** `826C3750` is `RunCommandBuffer`, used about 800 times per frame, and those buffers hold raw PM4 that no D3D hook sees. They look baked into the game data rather than recorded: `826C4148` turns offsets in the object into pointers at load, and `826C3D90` patches in resources, both called from the loader `823BD140`. Hooking D3D alone would miss 41% of city draws, so **a native layer needs a PM4 decoder for them.**
+- **That decoder is small.** Across 598 buffers (2 MB) in the city and 633 in the garage there are exactly 7 packet types (`DRAW_INDX`, `SET_CONSTANT`, `LOAD_ALU_CONSTANT`, `IM_LOAD`, `WAIT_REG_MEM`, `SET_BIN_MASK_LO`, `SET_BIN_MASK_HI`) plus register writes. None nests another list, none is truncated, none has an unknown packet, and none changed during the window. 64-71% of runs hold one draw. Each run has one `WAIT_REG_MEM`, whose purpose is not yet known.
+- **The draw names were wrong.** `826B91E0` and `826B96D0` are not indexed draws: they are `BeginVertices` and `BeginIndexedVertices`, which return ring space for the caller to fill (`826B9688`, `DrawPrimitiveUP`, is a wrapper). `826B9FF8(prim, base, start, count)` is the indexed draw and `826B9C08` the non-indexed one.
+- **Tile replays explain less than hoped.** The 6,207 draws seen by the emulator are about 4,665 unique ones plus replays, so native rendering cuts draws by roughly a quarter, not by half. The CPU budget is therefore tighter than the bottom line above implied: about 4,700 draws, which leaves about 7 microseconds each on one thread at 33 ms if nothing else ran.
+
+**Open questions answered.**
+
+1. **Tiles:** always two, `0,0,1280,484` and `0,480,1280,720`. Almost all tiled draws use the full mask, so each replays in both.
+2. **CPU reads of resolves:** only the `k_8_8_8_8` 320x180 targets were locked, three of four, once per frame. That is about 230 KB, under the existing `readback_resolve_max_bytes`. A lock is only evidence of a read: a direct read would not show. All but one of the 18 city resolve shapes are bound by the GPU.
+3. **Textures:** 189 of 207 in the city and 68 of 95 in the garage never passed through `CreateTexture` or a resolve, so the texture cache keyed by address has to stay. DXT1 and DXT4/5 dominate.
+4. **`826C3750`:** frequent, static, raw PM4, as above.
+
+**Still open:** whether `826C4C70` is a reliable dirty signal. It runs 77-90 times per frame for about 292 KB, but a benchmark that stands still streams too little to tell. Draws come from two threads, about 96% and 4%, so a native layer must expect both. The census only samples standing still, so driving through the city may be heavier.
+
+**Verdict: go, with the plan changed.** Nothing found is a blocker. Phase 2 gains the buffer decoder, and the first thing to prove is how fast about 4,700 draws can be encoded on this machine.
 
 ## 1. How the game reaches the GPU
 
@@ -84,8 +119,8 @@ Every setter takes the device in `r3`, writes a field and sets a dirty bit, as i
 | | `826BB7D8` block until idle | writes a wait, then fence-waits | 5 / 19 |
 | | `826BB8B0`, `826BB928` fence pending, block on resource | fence word at object +8 | 3-4 / 4 |
 | | `826BB5C8` insert callback | `WAIT_REG_MEM` + `INTERRUPT`; game passes a function | 2 / 5 |
-| Draw | `826B91E0`, `826B96D0` (+ `826B9688`) likely indexed | `DRAW_INDX`; read index state at +12248 | 25, 7 / 38 |
-| | `826B9C08`, `826B9FF8` likely non-indexed | `DRAW_INDX`, shared flush `826C6C48` | 14, 30 / 63 |
+| Draw | `826B91E0`, `826B96D0` BeginVertices, BeginIndexedVertices (+ `826B9688` DrawPrimitiveUP) | return ring space; stride stored at +12248 | 25, 7 / 38 |
+| | `826B9C08`, `826B9FF8` non-indexed and indexed draw | `DRAW_INDX`, shared flush `826C6C48` | 14, 30 / 63 |
 | Targets | `826BE578` Resolve | 897 instructions; loads a copy shader; `IM_LOAD_IMMEDIATE`, `EVENT_WRITE` | 15 / 31 |
 | | `826C04A0`, `826C03E0` Clear, ClearF | quad via `826BF380`; used by tiling | 8, 3 / 16 |
 | | `826B1EE0`, `826B2218` SetRenderTarget, SetDepthStencil | device +12160, +12176 | 12, 11 / 43 |
@@ -100,7 +135,7 @@ Every setter takes the device in `r3`, writes a field and sets a dirty bit, as i
 | | `826ACD08`, `826ACC90` Release, AddRef | atomic count at +4 | 115, 59 / 544 |
 | Shaders | `826B3338`, `826B3748` CreateVertexShader, CreatePixelShader | parse the container | 6, 7 / 13 |
 | | `826B3AE8` CreateVertexDeclaration | walks elements to the 255 terminator | 30 / 39 |
-| Unclear | `826C3750` command buffer replay? | `INDIRECT_BUFFER`, full state flush; one caller, `823B3328` | 1 / 1 |
+| Buffers | `826C3750` RunCommandBuffer | `INDIRECT_BUFFER` per list, full state flush; one caller, `823B3328`; about 800 runs per frame | 1 / 1 |
 | | `826B3C48` | unidentified | 2 / 11 |
 | | `826C42F8`, `826C4258` state block capture, free | walks 26 textures, 16 streams | 4 / 8 |
 
@@ -354,7 +389,7 @@ No frame rate is promised here. The risk to watch is CPU encoding: 6,207 draws m
 
 ## Open questions
 
-Only a live run or a closer read can settle these. Phase 0 covers the first five.
+Only a live run or a closer read can settle these. The census answered the first four; see [Census results](#census-results-2026-10-31).
 
 1. Tile count per mode and how many draws are replays.
 2. Which resolves the CPU reads, and how often.

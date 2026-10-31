@@ -19,6 +19,7 @@
 #include <rex/ui/virtual_key.h>
 
 #include "cheat_hooks.h"
+#include "d3d_census.h"
 
 REXCVAR_DEFINE_BOOL(crackdown_benchmark, false, "Crackdown",
                     "Continue the saved game with a virtual pad, record frame times, write them and quit");
@@ -209,9 +210,11 @@ void Run(uint8_t* membase, std::filesystem::path output_dir) {
   }
   REXLOG_INFO("Benchmark: warming up");
   std::this_thread::sleep_for(std::chrono::seconds(REXCVAR_GET(crackdown_benchmark_warmup_seconds)));
+  census::Begin();
   g_recording.store(true, std::memory_order_relaxed);
   std::this_thread::sleep_for(std::chrono::seconds(REXCVAR_GET(crackdown_benchmark_seconds)));
   g_recording.store(false, std::memory_order_relaxed);
+  census::Write(output_dir / fmt::format("census-{}.json", label), label);
 
   std::vector<Clock::time_point> frames;
   {
@@ -269,6 +272,7 @@ void OnGuestFrame() {
   if (!g_recording.load(std::memory_order_relaxed)) {
     return;
   }
+  census::OnGuestFrame();
   std::lock_guard lock(g_frames_mutex);
   g_frames.push_back(Clock::now());
 }

@@ -42,6 +42,20 @@ void SwapPacket(PPCContext&, uint8_t*, GuestFunction original);
 void SwapCallback(PPCContext&, uint8_t*, GuestFunction original);
 void SwapBuilder(PPCContext&, uint8_t*, GuestFunction original);
 
+void CensusBeginVertices(PPCContext&, uint8_t*, GuestFunction original);
+void CensusBeginIndexedVertices(PPCContext&, uint8_t*, GuestFunction original);
+void CensusDrawVertices(PPCContext&, uint8_t*, GuestFunction original);
+void CensusDrawIndexed(PPCContext&, uint8_t*, GuestFunction original);
+void CensusClear(PPCContext&, uint8_t*, GuestFunction original);
+void CensusResolve(PPCContext&, uint8_t*, GuestFunction original);
+void CensusBeginTiling(PPCContext&, uint8_t*, GuestFunction original);
+void CensusEndTiling(PPCContext&, uint8_t*, GuestFunction original);
+void CensusRunCommandBuffer(PPCContext&, uint8_t*, GuestFunction original);
+void CensusQueryIssue(PPCContext&, uint8_t*, GuestFunction original);
+void CensusTextureLock(PPCContext&, uint8_t*, GuestFunction original);
+void CensusCreateTexture(PPCContext&, uint8_t*, GuestFunction original);
+void CensusCacheFlush(PPCContext&, uint8_t*, GuestFunction original);
+
 void GpuFence(PPCContext&, uint8_t*, GuestFunction original);
 void GpuPoll(PPCContext&, uint8_t*, GuestFunction original);
 

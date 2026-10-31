@@ -1,5 +1,13 @@
 # Session handoff
 
+## 2026-10-31 (night) — Phase 0 census done: go, with a buffer decoder added; flat colour reproduced
+- **Census:** `--crackdown_d3d_census` during a benchmark writes `census-<label>.json` and `.lists` to the logs folder; read them with `tools/census-lists.py`. Every hook runs the guest function unchanged, and with the flag off each is one branch. Base guest only.
+- **Result:** 4,665 unique draws per city frame and 2,363 in the garage. `826C3750` is `RunCommandBuffer`, about 800 runs per frame, carrying 41% of city draws as raw PM4 that D3D hooks can't see. So the boundary is not fully clean, but those buffers are static and use only 7 packet types, so the decoder is small. Details and answers: `docs/native-rendering-survey.md`, Census results. The survey's draw function names were wrong and are corrected.
+- **Lesson:** guest addresses at or above `0xE0000000` need `rex::memory::detail::PhysicalHostOffset`. Without it, reads land 4 KB off, and my first parser followed junk pointers into the ring, which hung the game behind a blank window and flooded the log with access violations. Parsing live was also wrong in itself, so lists are now copied once when the window ends and parsed offline. Any tool reading guest objects must use the translation.
+- **Flat colour reproduced:** one blue-grey colour over the whole window with no HUD, while the game keeps running at normal speed. With the census off it hit 2 of 6 city runs, one with the query wrap fix and one without, so neither that fix nor the census causes it. With the census on it hit 2 of 3. Logs of good and flat runs are identical apart from noise, and all runs show the same swapchain sequence (2560x1440 then 1440x810), so that is not the cause. Both census-off hits were last in the batch, as the Air heated up and FPS fell from 23.8 to 17.3, but that could be chance. Next: a GPU capture of a flat run, to split game frame from presenter copy.
+- **Run watching:** the shell can't capture the screen, but `app_screenshot` from computer use can see the game window, so runs can be checked for a blank picture.
+- **Next for native:** Phase 1 shader trial, plus an early test of how fast about 4,700 draws encode on this machine.
+
 ## 2026-10-31 (early morning) — Periodic 120 ms freeze removed; a stable 30 needs a lower typical frame
 - **Finding:** the raw frame times showed the worst hitches on a steady beat of about 1.45 s (36-40 frames, 13 of 14 gaps). The cause was patch `0012`: `BeginSubmission` waited for the GPU to drain every time the query pool cursor passed 3/4 of its 8192 slots.
 - **Fix (in `0012`):** wrap without waiting, and wait only if the slots the next submission may use still hold unread results.
