@@ -1,5 +1,10 @@
 # Session handoff
 
+## 2026-10-31 (afternoon) — Phase 1 started; shaders extracted, waiting on approval to build XenosRecomp
+- **Done:** `tools/extract-shaders.py` joins each shipped shader's virtual and physical parts into one file, 382 unique (218 VS, 164 PS). The survey said 384, two PS more, and that gap is unexplained. The packs' 12-byte index entries hold the physical offsets, and `boundshaders.bsh` has a different header. All 320 shaders in `RTWUberShader.bin` match `prebuilt_shadercache.dat`, which proves the reader.
+- **Blocked:** building and running XenosRecomp (PR 22, commit 4906992) was stopped by the session's safety check, because it means running code from GitHub. Bruce decides. `work/experiments/shader-trial/run-trial.sh` is written but has never run.
+- **Next:** run it, then read `results.tsv`, then compare per-shader cost against the emulator's MSL.
+
 ## 2026-10-31 (afternoon) — Encoding test passed: Metal records a city frame in about 7 ms on one thread
 - **Test:** `tools/encode_bench.mm` records a census-shaped frame (4,700 draws, 24 passes, 391 pipelines) with deliberately high state churn, while threads stand in for the game. Results are in `docs/native-rendering-survey.md`, section "Encoding test". Apple's Metal validation passed on it.
 - **Result:** under 3 busy threads, one thread took 7.81 ms with bound textures and 6.54 ms bindless, at most 11.4 ms. That is about 1.4 microseconds per draw against the 7 microsecond budget. At 6,207 draws with all state changing every draw, the worst median was 17.27 ms.
