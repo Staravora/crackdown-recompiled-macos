@@ -27,6 +27,7 @@
 
 #include "guest_hooks.h"
 #include "native/native_probe.h"
+#include "native/texture_probe.h"
 
 REXCVAR_DEFINE_BOOL(crackdown_d3d_census, false, "Crackdown",
                     "During a benchmark, count the game's Direct3D calls and write census-<label>.json");
@@ -586,6 +587,7 @@ void OnGuestFrame() {
 namespace crackdown::hooks {
 
 void CensusBeginVertices(PPCContext& ctx, uint8_t* base, GuestFunction original) {
+  native::textures::OnDraw(ctx.r3.u32);
   if (!census::Counting()) {
     return original(ctx, base);
   }
@@ -594,6 +596,7 @@ void CensusBeginVertices(PPCContext& ctx, uint8_t* base, GuestFunction original)
 }
 
 void CensusBeginIndexedVertices(PPCContext& ctx, uint8_t* base, GuestFunction original) {
+  native::textures::OnDraw(ctx.r3.u32);
   if (!census::Counting()) {
     return original(ctx, base);
   }
@@ -602,6 +605,7 @@ void CensusBeginIndexedVertices(PPCContext& ctx, uint8_t* base, GuestFunction or
 }
 
 void CensusDrawVertices(PPCContext& ctx, uint8_t* base, GuestFunction original) {
+  native::textures::OnDraw(ctx.r3.u32);
   if (!census::Counting()) {
     return original(ctx, base);
   }
@@ -610,6 +614,7 @@ void CensusDrawVertices(PPCContext& ctx, uint8_t* base, GuestFunction original) 
 }
 
 void CensusDrawIndexed(PPCContext& ctx, uint8_t* base, GuestFunction original) {
+  native::textures::OnDraw(ctx.r3.u32);
   if (!census::Counting()) {
     return original(ctx, base);
   }
@@ -626,6 +631,7 @@ void CensusClear(PPCContext& ctx, uint8_t* base, GuestFunction original) {
 }
 
 void CensusResolve(PPCContext& ctx, uint8_t* base, GuestFunction original) {
+  native::textures::OnResolve(ctx.r6.u32);
   if (!census::Counting()) {
     return original(ctx, base);
   }
@@ -705,6 +711,7 @@ void CensusQueryIssue(PPCContext& ctx, uint8_t* base, GuestFunction original) {
 }
 
 void CensusTextureLock(PPCContext& ctx, uint8_t* base, GuestFunction original) {
+  native::textures::OnLock(ctx.r3.u32);
   if (census::Counting()) {
     const auto fetch = census::DecodeFetch(census::GuestPointer(base, ctx.r3.u32 + census::kTextureFetchConstant));
     std::lock_guard lock(census::g_mutex);
@@ -725,6 +732,7 @@ void CensusCreateTexture(PPCContext& ctx, uint8_t* base, GuestFunction original)
 }
 
 void CensusCacheFlush(PPCContext& ctx, uint8_t* base, GuestFunction original) {
+  native::textures::OnCacheFlush(ctx.r3.u32, ctx.r4.u32);
   if (census::Counting()) {
     std::lock_guard lock(census::g_mutex);
     ++census::g_row.flushes;

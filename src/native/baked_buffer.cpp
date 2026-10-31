@@ -145,8 +145,13 @@ BakedList BakedLibrary::Decode(const uint32_t* words, size_t count) {
         pipeline = Mix(pipeline, draw.initiator & 0x3F);
         draw.pipeline = Intern(pipelines_, pipeline);
 
+        const size_t known_sets = texture_sets_.size();
         draw.textures =
             Intern(texture_sets_, HashRange(0xCBF29CE484222325ull, &reg(kFetchConstants), kFetchDwords));
+        if (texture_sets_.size() != known_sets) {
+          texture_set_data_.insert(texture_set_data_.end(), &reg(kFetchConstants),
+                                   &reg(kFetchConstants) + kFetchDwords);
+        }
 
         uint64_t dynamic = 0xCBF29CE484222325ull;
         dynamic = HashRange(dynamic, &reg(0x200E), 2);    // Screen scissor.

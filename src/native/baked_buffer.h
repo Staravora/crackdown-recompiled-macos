@@ -53,6 +53,9 @@ class BakedLibrary {
   // Decodes one list of host-order packets. Keep the result: this is the slow path, and it interns as it goes.
   BakedList Decode(const uint32_t* words, size_t count);
 
+  // The 32 fetch constants of a texture set, six dwords each.
+  const uint32_t* texture_set(uint32_t id) const { return texture_set_data_.data() + size_t(id) * 192; }
+
   size_t pipeline_count() const { return pipelines_.size(); }
   size_t texture_set_count() const { return texture_sets_.size(); }
   size_t dynamic_state_count() const { return dynamic_states_.size(); }
@@ -62,6 +65,7 @@ class BakedLibrary {
   std::unordered_map<uint64_t, uint32_t> pipelines_;
   std::unordered_map<uint64_t, uint32_t> texture_sets_;
   std::unordered_map<uint64_t, uint32_t> dynamic_states_;
+  std::vector<uint32_t> texture_set_data_;
   std::vector<uint32_t> registers_;
   DecodeStats stats_;
 };

@@ -21,6 +21,7 @@
 #include <rex/system/xmemory.h>
 
 #include "baked_buffer.h"
+#include "texture_probe.h"
 
 REXCVAR_DEFINE_BOOL(crackdown_native_probe, false, "Crackdown",
                     "During a benchmark, decode the baked command buffers live, time it and write native-probe-<label>.json");
@@ -254,7 +255,7 @@ void OnGuestFrame() {
 }
 
 void OnRunCommandBuffer(uint32_t device, uint32_t buffer, uint32_t predication, const uint8_t* base) {
-  if (!g_window.load(std::memory_order_relaxed)) {
+  if (!g_window.load(std::memory_order_relaxed) && !textures::Enabled()) {
     return;
   }
   std::lock_guard lock(g_mutex);
@@ -279,6 +280,15 @@ void OnRunCommandBuffer(uint32_t device, uint32_t buffer, uint32_t predication, 
   // The game passes this straight into SET_BIN_SELECT_HI.
   Replay(entry, predication);
   g_totals.replay_ns += Since(replay_start);
+  if (textures::Enabled()) {
+    for (const BakedList& list : entry.lists) {
+      for (const BakedDraw& draw : list.draws) {
+        if (DrawPasses(draw, predication)) {
+          textures::OnFetchSet(draw.textures, g_library.texture_set(draw.textures));
+        }
+      }
+    }
+  }
 
   const uint64_t run_ns = Since(run_start);
   g_totals.worst_run_ns = std::max(g_totals.worst_run_ns, run_ns);

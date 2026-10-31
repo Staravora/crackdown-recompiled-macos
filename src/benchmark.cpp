@@ -21,6 +21,7 @@
 #include "cheat_hooks.h"
 #include "d3d_census.h"
 #include "native/native_probe.h"
+#include "native/texture_probe.h"
 
 REXCVAR_DEFINE_BOOL(crackdown_benchmark, false, "Crackdown",
                     "Continue the saved game with a virtual pad, record frame times, write them and quit");
@@ -277,6 +278,7 @@ void Install(rex::input::InputSystem* input, uint8_t* membase, const std::filesy
 }
 
 void OnGuestFrame() {
+  native::textures::OnGuestFrame();
   g_frame_count.fetch_add(1, std::memory_order_relaxed);
   if (!g_recording.load(std::memory_order_relaxed)) {
     return;
