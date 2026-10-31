@@ -1,5 +1,11 @@
 # Session handoff
 
+## 2026-10-31 (morning) — First play-test on clean swap: 29 FPS, no stalls
+- **Result:** about 3 minutes of gameplay on a cool machine (`crackdown_199.log`): median 29 FPS, mean 28, 5th percentile 22.5. No second under 12 FPS and no log gap over 1.5 s, against 12 such seconds in 8 minutes on full swap. Swap stayed at 0.
+- **Worst stretch:** 16-22 FPS for 8 seconds, about 85 s into gameplay. No disk reads, paging or pipeline creation lined up with it, so it was rendering load. Most of the run also shows the GPU at 97-98% busy.
+- **Not proven:** Bruce's route is unknown, and disk reads stayed under 2 MB/s, which fits little streaming or files already cached. The run is too short to show heat drift or to clear stalls in a long crossing. It ran well above the benchmark's 24 FPS, which points at heat, but the scene differs.
+- **Next:** confirm the route; if needed, a longer crossing with the same per-second disk, paging and GPU recording.
+
 ## 2026-10-31 (small hours) — Clean baseline after the reboot; second spot; flat colour clue
 - **Baseline:** on a clean system the first spot gives 23.6-24.5 FPS, median 41-42 ms, p99 52 ms, 1% low 19.3, with 2-3 frames of 80 ms or more per run. That is far steadier than before the reboot (p99 80 ms, 1% low 11.5, 4 such frames), but the typical frame is about 5 ms slower than the earlier 36 ms. The cause of that is unknown: heat and WindowServer's steady GPU use (about 40% on an idle desktop) are candidates.
 - **Second spot:** `--crackdown_benchmark_supply_point=1` in Los Muertos is a rooftop, confirmed by screenshot: 22.5-22.8 FPS, p99 87-108 ms, 5-19 frames of 80 ms or more. Its census has 4,689 unique draws, 64% in baked buffers.
