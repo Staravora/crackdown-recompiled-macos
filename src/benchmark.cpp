@@ -226,13 +226,28 @@ void Run(uint8_t* membase, std::filesystem::path output_dir) {
       frames.size() > 1 ? std::chrono::duration<double>(frames.back() - frames.front()).count() : 0.0;
   const double average_fps = span_s > 0 ? double(frame_ms.size()) / span_s : 0.0;
   const double p99_ms = Percentile(frame_ms, 0.99);
+  // A stable 30 FPS needs every frame inside 33.3 ms, so frames past it are what stutter costs.
+  size_t over_33_ms = 0;
+  size_t over_50_ms = 0;
+  double slow_ms = 0.0;
+  {
+    std::ofstream frames_file(output_dir / fmt::format("frames-{}.txt", label));
+    for (double ms : frame_ms) {
+      frames_file << fmt::format("{:.2f}\n", ms);
+      over_33_ms += ms > 33.4;
+      over_50_ms += ms > 50.0;
+      slow_ms += ms > 33.4 ? ms : 0.0;
+    }
+  }
   Finish(output_dir,
          fmt::format(R"({{"label":"{}","status":"ok","character_after_s":{:.1f},"frames":{},"average_fps":{:.2f},)"
                      R"("median_frame_ms":{:.2f},"p90_frame_ms":{:.2f},"p99_frame_ms":{:.2f},)"
-                     R"("max_frame_ms":{:.2f},"one_percent_low_fps":{:.2f}}})",
+                     R"("max_frame_ms":{:.2f},"one_percent_low_fps":{:.2f},"frames_over_33ms":{},)"
+                     R"("frames_over_50ms":{},"share_of_time_in_slow_frames":{:.3f}}})",
                      label, gameplay_after, frame_ms.size(), average_fps, Percentile(frame_ms, 0.5),
                      Percentile(frame_ms, 0.9), p99_ms, Percentile(frame_ms, 1.0),
-                     p99_ms > 0 ? 1000.0 / p99_ms : 0.0),
+                     p99_ms > 0 ? 1000.0 / p99_ms : 0.0, over_33_ms, over_50_ms,
+                     span_s > 0 ? slow_ms / (span_s * 1000.0) : 0.0),
          0);
 }
 
