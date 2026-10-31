@@ -115,7 +115,7 @@ So even the wasteful option costs under half a millisecond per frame for baked d
 
 **Direct Metal, not plume.** One game on one API doesn't need the abstraction, `tools/encode_bench.mm` already shows direct Metal is fast enough, and the design needs bindless textures and tight control of encoding.
 
-## Texture change test (2026-10-31, unfinished)
+## Texture change test (2026-10-31)
 
 Phase 2's gate: can a native renderer learn cheaply when a texture changes? `--crackdown_texture_probe=true` tracks every texture the game binds, from baked and direct draws, and compares four signals with a rotating hash of the real memory: the cache flush `826C4C70`, CPU locks, resolves by page, and a per-frame sample of 8 spots of 64 bytes across each bound texture. It runs through normal play and writes `texture-probe-<time>.json` to the logs folder every 900 frames.
 
@@ -139,13 +139,35 @@ Phase 2's gate: can a native renderer learn cheaply when a texture changes? `--c
 
 So signals caught 88% of 1,727 changes. Most changes are linear `k_8` planes in 1280x720 and 640x360 groups, which look like video frames, rewritten without a flush. That's inferred from their shape and not confirmed.
 
-**Not settled:**
+**Driving**, Bruce's 10-minute session in the same app with the setting on (`crackdown_242.log`, 18,000 frames, 8,273 textures, 524 MB of them):
 
-- **Cost passes the gate; reliability doesn't yet.** About 0.3 ms a frame is far below the emulator's approach, but a stale texture is a visible bug.
-- **The 19 tiled misses** are about 5% of tiled changes. Sampling mips as well didn't help. They may be small partial updates that eight spots can miss, which is a guess.
-- **Streaming while moving is unmeasured.** A play session on 2026-10-31 ran without the setting, so it gave no probe data. This is the case that decides it.
-- **Vertex buffers** are live guest memory with the same question, and this doesn't track them.
-- Texture sizes are estimates, since the SDK's layout code isn't reachable from the game.
+| Per frame | |
+| --- | --- |
+| Textures bound | about 430, 75 MB |
+| Tracking flushes | 0.003 ms |
+| Tracking binds | 0.45 ms |
+| Sampling every bound texture | 0.23 ms |
+| Fully hashing bound textures, by comparison | about 17 ms, at 4.33 GB/s |
+
+| 540,178 checks of the real memory | Changes | Share |
+| --- | --- | --- |
+| Announced by a flush | 3,909 | 52% |
+| By a CPU lock | 79 | 1% |
+| By a resolve | 1,368 | 18% |
+| Only the sample saw it | 1,201 | 16% |
+| Nothing saw it | 1,000 (702 tiled, 298 linear) | 13% |
+
+Misses are 6.5% of changed bytes. 191 of them are in the first 30 seconds, and the other 809 run through the whole drive at about 1.4 a second, so this isn't a loading effect. The textures listed are nearly all tiled DXT at 8-64 KB in a few address runs, each missed 3-5 times, which looks like a streaming pool reusing slots. That's inferred from the addresses. If so, a miss would show the wrong texture and not just an old one.
+
+The frame rate with the probe on was median 29.8 FPS over 650 seconds, with 0 seconds under 12 and 28 under 20. That isn't a controlled comparison.
+
+**Verdict: no-go for these signals as the way a native renderer invalidates textures.** Cost is fine at about 0.7 ms a frame, but one change in eight goes unseen. Hashing everything is out at 17 ms a frame. More samples or hashing a texture's first binds could shrink the misses but can't prove there are none.
+
+**Next candidate, untested: the emulator's own page watch.** Its texture cache doesn't use these signals. `texture/cache.cpp` calls `SharedMemory::WatchMemoryRange`, which arms page protection through `Memory::EnablePhysicalMemoryAccessCallbacks`, so the first write to a watched page faults and notifies. It sees writes by hardware page rather than by what the game announces. `RegisterPhysicalMemoryInvalidationCallback` is public and takes several listeners, so the game can listen without an SDK patch. To test it, add that as a fifth signal in the probe and count how many of the misses it catches, on another drive. Page size is 16 KB here against the guest's 4 KB, so expect extra false alarms from neighbouring data.
+
+Vertex buffers are live guest memory with the same question, and the probe doesn't track them. The same watch would cover them if it holds up.
+
+Texture sizes are estimates, since the SDK's layout code isn't reachable from the game.
 
 ## Shader trial (2026-10-31)
 
