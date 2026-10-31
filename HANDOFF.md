@@ -1,5 +1,12 @@
 # Session handoff
 
+## 2026-10-31 (late night) — Guest memory leaked on every launch; swap reached 40 GB
+- **Symptom:** macOS "out of application memory" during play. Swap was 40.3 of 40.96 GB, with the game closed, while all running processes added up to about 16 GB, so 24+ GB belonged to no process. Free disk fell to 15 GB, since swap lives on disk.
+- **Cause:** `Memory::Initialize` creates a POSIX shared memory object with a new name each launch (`xenia_memory_<tick>`). Only `Memory::~Memory` unlinks it, and every exit path is `std::_Exit`, so a normal close, a kill and a crash all leave it behind with whatever guest memory was touched. Benchmarks launch and kill the game constantly, which made it much worse. The code path is confirmed. That it accounts for all the unowned swap is a strong inference, not yet measured.
+- **Fix:** patch `0013` unlinks the object right after creating it. The handle and views keep it alive, and the kernel reclaims it on any exit. A small test confirmed views still alias after the unlink. Staged and verified, **not yet run in the game**, deliberately, with swap almost full.
+- **Needed:** existing objects can't be unlinked without their names, so **a reboot is required** to get the swap and disk space back. After it, confirm the fix: note `sysctl vm.swapusage`, do several launches and closes, and check it does not climb.
+- **Play session (8 min):** FPS fell from about 28 to 16, which Bruce saw as throttling. 12 seconds dropped under 12 FPS, with gaps of up to 2 s while crossing the city. Only 2 of 12 had a pipeline created nearby, so shader compiles are not the main cause. Paging under full swap is a candidate, unproven; re-test after the reboot before chasing streaming.
+
 ## 2026-10-31 (night) — Phase 0 census done: go, with a buffer decoder added; flat colour reproduced
 - **Census:** `--crackdown_d3d_census` during a benchmark writes `census-<label>.json` and `.lists` to the logs folder; read them with `tools/census-lists.py`. Every hook runs the guest function unchanged, and with the flag off each is one branch. Base guest only.
 - **Result:** 4,665 unique draws per city frame and 2,363 in the garage. `826C3750` is `RunCommandBuffer`, about 800 runs per frame, carrying 41% of city draws as raw PM4 that D3D hooks can't see. So the boundary is not fully clean, but those buffers are static and use only 7 packet types, so the decoder is small. Details and answers: `docs/native-rendering-survey.md`, Census results. The survey's draw function names were wrong and are corrected.

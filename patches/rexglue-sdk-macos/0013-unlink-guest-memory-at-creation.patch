@@ -1,0 +1,17 @@
+diff --git a/src/core/memory_posix.cpp b/src/core/memory_posix.cpp
+index b52bf39..6e46aac 100644
+--- a/src/core/memory_posix.cpp
++++ b/src/core/memory_posix.cpp
+@@ -478,9 +478,11 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
+   if (ret < 0) {
+     return kFileMappingHandleInvalid;
+   }
++  // The object only lives as long as the handle and its views. Named, it would outlast a hard exit,
++  // kill or crash, and its pages would stay in memory and swap until reboot. Views use the handle.
++  shm_unlink(full_path.c_str());
+   if (rex_ftruncate64(ret, static_cast<off_t>(length)) != 0) {
+     close(ret);
+-    shm_unlink(full_path.c_str());
+     return kFileMappingHandleInvalid;
+   }
+   return static_cast<FileMappingHandle>(ret);
