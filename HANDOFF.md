@@ -1,5 +1,12 @@
 # Session handoff
 
+## 2026-10-31 (afternoon) — All 382 shaders compile with this project's XenosRecomp patch; pixel shaders cost 44%
+- **Result:** `tools/shader-trial/xenosrecomp-crackdown.patch` takes translation and compilation to 382 of 382 with nothing flagged unsupported. Pixel shaders took 44% of the emulator's time at the median, 45% in total. Details and caveats are in `docs/native-rendering-survey.md`, section "Shader trial".
+- **Biggest find:** conditional exec blocks never tested their condition. No error showed it, so the first pass's 47% measured shaders with wrong behaviour.
+- **Not checked:** no output has been compared against the emulator. Both harnesses run with bools off and loop counts zero, so conditional blocks the game turns on weren't timed.
+- **Script notes:** `run-trial.sh` keeps going after a failed step, and the last full run of it hit a job-limit bug at the compile step. The `xargs` version of the compile step ran here, but the translate step's `xargs` line has not been run, because that step runs third-party code.
+- **Next:** render the same inputs through both forms of each pixel shader and diff the pixels, with bools on. That needs a map between the emulator's packed constants and XenosRecomp's registers.
+
 ## 2026-10-31 (afternoon) — Phase 1 first pass: 95% of shaders compile after small fixes, pixel shaders cost about half
 - **Result:** XenosRecomp's Metal branch translated 368 of 382 shipped shaders. 253 compiled unaided, and an estimated 364 compile with small fixes. Across 108 pixel shaders it took 47% of the emulator's time at the median. Full tables and caveats are in `docs/native-rendering-survey.md`, section "Shader trial".
 - **Verdict:** keep XenosRecomp. The failures are small and known. The 47% is not parity: no output has been checked against the emulator, and explicit LOD fetches aren't handled.

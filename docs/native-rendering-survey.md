@@ -78,53 +78,51 @@ The stress run uses the emulator's raw 6,207 draws with every state changing on 
 
 ## Shader trial (2026-10-31)
 
-Phase 1 ran XenosRecomp's Metal branch ([PR 22](https://github.com/hedge-dev/XenosRecomp/pull/22), commit `4906992`) over every shipped shader. Tools are in `tools/shader-trial`.
+Phase 1 ran XenosRecomp's Metal branch ([PR 22](https://github.com/hedge-dev/XenosRecomp/pull/22), commit `4906992`) over every shipped shader, first as it stands, then with this project's patch (`tools/shader-trial/xenosrecomp-crackdown.patch`).
 
-| Step | Shaders | Share of 382 |
+| Step | Unpatched | Patched |
 | --- | --- | --- |
-| Unique shipped shaders | 382 (218 VS, 164 PS) | |
-| Translated without crashing | 368 | 96% |
-| Compiled by Apple's compiler, unaided | 253 | 66% |
-| Compiled after small fixes (estimate) | 364 | 95% |
+| Translated without crashing | 368 of 382 | **382** |
+| Compiled by Apple's compiler | 253 | **382** |
+| Features flagged unsupported | not reported | **none** |
 
-The survey counted 384 shaders, two PS more; that gap is unexplained. The estimate patches the generated text, so it stands for fixes not yet made in the translator.
+The survey counted 384 shaders, two PS more; that gap is unexplained.
 
-**What fails, and the fix:**
+**The patch fixes:**
 
-| Shaders | Cause | Fix |
-| --- | --- | --- |
-| 95 VS | Vertex shaders get no texture tables, then read fetch slots `s16` and up, which aren't mapped | Add the tables to the vertex entry; map vertex samplers |
-| 14 VS, overlapping the row above | A `vfetch` with every component masked emits an empty swizzle | Skip it |
-| 7 (VS and PS) | `NORMAL0` and `COLOR2` interpolators are missing from the shared struct | Add them |
-| 6 PS | Fetch slots `s1` and `s2` aren't in the constant table | Map them |
-| 8 (4 VS, 4 PS) | Two relative constant operands in one instruction hit an assert | Real translator work |
-| 6 VS | No vertex element mapping for `Position 2` | Add the mapping |
-| 4 PS | 1D textures | Add a heap, or treat as 2D with height 1 |
-| 1 PS | Bool constant `b128` isn't in the constant table | Map it |
+- **Conditional exec blocks never tested their condition,** so those blocks always ran. No error showed this. 181 shaders now have bool conditions. Conditional ends also stay inside the condition, as the emulator has them, and one end opcode that never ended the shader is fixed.
+- **Texture levels:** explicit LOD and LOD bias now work, used by 101 and 22 shaders, following the emulator's rule that vertex shaders always pick their level.
+- **Vertex texture fetch:** vertex shaders get the texture tables, and fetch constants 16 to 19 map to table registers 0 to 3 (checked against the constant tables).
+- **Relative constants:** the second and third constants read `const1Relative`, as the emulator does. This was what tripped the asserts.
+- **Loops:** loop constants the game sets at runtime are read from shared constants, and the loop now uses its start and step. 9 shaders loop.
+- **Smaller gaps:** `NORMAL0` and `COLOR2` interpolators, 1D fetches as 2D one texel high, unlisted texture slots and bools, empty `vfetch` swizzles, and extra vertex element locations.
 
-None of the 14 translator failures appeared in the benchmark run, and one of the 4 1D shaders did. That run only covers one spot.
+Anything the output doesn't implement now prints `UNSUPPORTED` for that shader: gradient fetches, relative registers, and loops in complex control flow. None of the 382 does. The survey's count of 32 VS and 32 PS using `aL`-relative sources looks wrong, since no shader sets the bits the translator checks.
 
-**Pixel shader cost:** 108 pixel shaders exist in both forms. Each was drawn full screen at 1280x720 with 2x MSAA, in the same conditions for both, best of three interleaved rounds:
+**Pixel shader cost:** 108 pixel shaders exist in both forms. Each was drawn full screen at 1280x720 with 2x MSAA, in the same conditions for both, best of three interleaved rounds, on the patched output:
 
 | Measure | XenosRecomp against the emulator's Metal |
 | --- | --- |
-| Median time | **47%** |
-| Middle 80% of shaders | 27% to 69% |
-| Sum of all 108 | 38.85 ms against 82.96 ms |
-| Heaviest shader (`0FB4021B3EBDDBAE`) | 0.58 ms against 2.54 ms |
-| Outline shader (`B20B230BE9FD2568`, `harness` timing) | about 0.45 ms against 0.73 ms |
-| Cheaper, same, dearer | 103, 2, 3 |
+| Median time | **44%** |
+| Middle 80% of shaders | 27% to 70% |
+| Sum of all 108 | 33.91 ms against 75.51 ms |
+| Heaviest shader (`0FB4021B3EBDDBAE`) | 0.46 ms against 2.53 ms |
+| Outline shader (`B20B230BE9FD2568`) | 0.24 ms against 0.89 ms |
+| Cheaper, same, dearer | 104, 2, 2 |
 
-**Verdict: stay with XenosRecomp.** It misses the plan's 70% gate unaided by a small margin, but the causes are small and known, so a new backend isn't justified. Pixel shaders cost about half, which is the first direct evidence that native rendering can relieve the GPU in fights and explosions.
+The two shaders that looked twice as slow before now sit level with the emulator (1.14 and 0.99 times). Across the shaders, patched output took 97% of the unpatched time at the median, with single shaders moving between 0.46 and 1.77 times. The emulator's own times repeated to within about 1%.
 
-**How far to trust the 47%:**
+**Verdict: stay with XenosRecomp.** Every shipped shader now compiles, and pixel shaders cost a bit under half. That is the first direct evidence that native rendering can relieve the GPU in fights and explosions.
 
-- **Nothing here checks the picture.** Compiling isn't correct, and no shader has been compared against the emulator's output.
-- **Some of the saving may be missing work.** The translator has no handling for explicit LOD fetches (33 VS, 4 PS in the survey), and its output has no equivalent of some emulator steps, such as per-fetch format and gamma handling. Real parity may cost more.
-- **Relative addressing through `aL`** shows no handling in the translator beyond the loop counter; the survey counted 32 VS and 32 PS with that bit set. Loops themselves are handled, unlike the README says.
-- **Dummy inputs.** Noise textures, random constants, bools off. Real data takes different branches.
-- **Two shaders got slower** by about 2x (`500DA34297830D6E`, `CB49964AB01BF2D7`); not investigated.
-- **Vertex shaders weren't timed**, and pixel shaders are only part of a frame. A 47% shader time doesn't mean half the GPU time.
+**How far to trust the 44%:**
+
+- **Nothing here checks the picture.** Compiling isn't correct, and no shader's output has been compared with the emulator's.
+- **Bools were off, and loop counts zero, in both harnesses.** Conditional blocks and runtime loops that the game turns on weren't timed, so real scenes will cost more on both sides, by amounts unknown. This is the biggest gap.
+- **The output still lacks some emulator work,** such as per-fetch format and gamma handling. Some of that will move into the native layer's textures, and some may cost shader time.
+- **Dummy inputs.** Noise textures and random constants.
+- **Vertex shaders weren't timed,** and pixel shaders are only part of a frame. This doesn't mean half the GPU time.
+- **Requirements this adds to the native layer:** upload the shaders' literal constants, because relative reads go to the buffer, and supply bool and loop constants at the shared offsets. 1D textures must be bound as 2D.
+- **The HLSL branch of the generated code wasn't kept working.** The new LOD fetches and runtime loops exist for Metal only.
 
 ## 1. How the game reaches the GPU
 
