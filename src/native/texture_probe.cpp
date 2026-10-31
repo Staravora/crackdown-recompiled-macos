@@ -67,7 +67,9 @@ struct Texture {
   uint64_t sample = 0;
   uint32_t checked_frame = 0;
   uint32_t bound_frame = 0;
+  uint32_t watch_stamp = 0;
   uint32_t misses = 0;
+  uint32_t unwatched = 0;
   uint32_t changes = 0;
 };
 
@@ -98,12 +100,21 @@ struct Totals {
   uint64_t missed_bytes = 0;
   uint64_t false_alarms = 0;
   uint64_t false_alarm_bytes = 0;
+  uint64_t changed_watched = 0;
+  uint64_t changed_unwatched = 0;
+  uint64_t unwatched_after_resolve = 0;
+  uint64_t unwatched_bytes = 0;
+  uint64_t missed_but_watched = 0;
+  uint64_t watch_false_alarms = 0;
+  uint64_t watch_false_alarm_bytes = 0;
+  uint64_t watch_arm_ns = 0;
   uint64_t worst_new_bytes_in_frame = 0;
 };
 
 std::atomic<bool> g_on{false};
 std::mutex g_mutex;
 uint8_t* g_membase = nullptr;
+rex::memory::Memory* g_memory = nullptr;
 std::filesystem::path g_path;
 uint32_t g_frame = 1;
 Totals g_totals;
@@ -112,12 +123,19 @@ std::vector<uint64_t> g_order;
 size_t g_cursor = 0;
 std::vector<uint32_t> g_flushed(kPages, 0);
 std::vector<uint32_t> g_resolved(kPages, 0);
+// Written from the fault handler, on whichever thread wrote, so these take no lock. A write leaves the stamp current at
+// the time, and a texture keeps the stamp taken just before it was watched and read.
+std::vector<std::atomic<uint32_t>> g_watched(kPages);
+std::atomic<uint32_t> g_watch_stamp{1};
+std::atomic<uint64_t> g_watch_fires{0};
+std::atomic<uint64_t> g_watch_bytes{0};
 std::vector<uint32_t> g_set_frame;
 std::vector<uint64_t> g_bound_now;
 std::array<std::array<uint8_t, kFetchConstantBytes>, kFetchConstantCount> g_bound{};
 uint64_t g_frame_new_bytes = 0;
 std::vector<std::string> g_timeline;
 Totals g_last_row;
+uint64_t g_last_row_fires = 0;
 
 uint64_t Since(Clock::time_point start) {
   return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
@@ -205,7 +223,8 @@ uint64_t HashRange(uint64_t hash, const Range& range) {
   return hash;
 }
 
-bool MarkedSince(const std::vector<uint32_t>& pages, const Range& range, uint32_t since) {
+template <typename Pages>
+bool MarkedSince(const Pages& pages, const Range& range, uint32_t since) {
   if (!range.bytes) {
     return false;
   }
@@ -227,6 +246,27 @@ void Mark(std::vector<uint32_t>& pages, const Range& range) {
   const uint32_t last = std::min((uint64_t(range.start) + range.bytes - 1) >> kPageShift, uint64_t(kPages - 1));
   for (uint32_t page = first; page <= last; ++page) {
     pages[page] = g_frame;
+  }
+}
+
+// The emulator's write watch: a protected page faults on its first write, and every listener hears about it. Its own
+// listener asks to unwatch up to 256 KB around the write, and this one wouldn't hear about those pages, so this holds it
+// to the page that fired. The emulator stays correct: it invalidates its wider range either way.
+std::pair<uint32_t, uint32_t> OnWatchFired(void*, uint32_t start, uint32_t length, bool) {
+  const uint32_t stamp = g_watch_stamp.load(std::memory_order_relaxed);
+  const uint32_t first = start >> kPageShift;
+  const uint32_t last = uint32_t(std::min((uint64_t(start) + length - 1) >> kPageShift, uint64_t(kPages - 1)));
+  for (uint32_t page = first; page <= last; ++page) {
+    g_watched[page].store(stamp, std::memory_order_relaxed);
+  }
+  g_watch_fires.fetch_add(1, std::memory_order_relaxed);
+  g_watch_bytes.fetch_add(length, std::memory_order_relaxed);
+  return {start, length};
+}
+
+void Arm(const Range& range) {
+  if (range.bytes) {
+    g_memory->EnablePhysicalMemoryAccessCallbacks(range.start, range.bytes, true, false);
   }
 }
 
@@ -303,6 +343,15 @@ void CheckTextures() {
       continue;
     }
     const uint64_t bytes = uint64_t(texture.base.bytes) + texture.mips.bytes;
+    const bool watched = MarkedSince(g_watched, texture.base, texture.watch_stamp) ||
+                         MarkedSince(g_watched, texture.mips, texture.watch_stamp);
+    // As a renderer would: watch first and read after, so a write during the read fires too and no change can slip
+    // between the two.
+    const Clock::time_point arm_start = Clock::now();
+    const uint32_t stamp = g_watch_stamp.fetch_add(1, std::memory_order_relaxed) + 1;
+    Arm(texture.base);
+    Arm(texture.mips);
+    g_totals.watch_arm_ns += Since(arm_start);
     const uint64_t hash = HashRange(HashRange(0x9E3779B97F4A7C15ull, texture.base), texture.mips);
     g_totals.hashed_bytes += bytes;
     budget -= std::min(budget, bytes);
@@ -317,6 +366,19 @@ void CheckTextures() {
         ++texture.changes;
         g_totals.changed_bytes += bytes;
         ++(texture.sample_changed ? g_totals.sample_caught : g_totals.sample_missed);
+        if (watched) {
+          ++g_totals.changed_watched;
+        } else {
+          ++g_totals.changed_unwatched;
+          // A native renderer does its own resolves, so these are the ones that would count against it only if
+          // something else wrote the page too.
+          if (resolved) {
+            ++g_totals.unwatched_after_resolve;
+          } else {
+            g_totals.unwatched_bytes += bytes;
+            ++texture.unwatched;
+          }
+        }
         if (flushed) {
           ++g_totals.changed_flushed;
         } else if (texture.locked) {
@@ -329,10 +391,17 @@ void CheckTextures() {
           ++g_totals.changed_missed;
           g_totals.missed_bytes += bytes;
           ++texture.misses;
+          g_totals.missed_but_watched += watched;
         }
-      } else if (flushed) {
-        ++g_totals.false_alarms;
-        g_totals.false_alarm_bytes += bytes;
+      } else {
+        if (flushed) {
+          ++g_totals.false_alarms;
+          g_totals.false_alarm_bytes += bytes;
+        }
+        if (watched) {
+          ++g_totals.watch_false_alarms;
+          g_totals.watch_false_alarm_bytes += bytes;
+        }
       }
     }
     texture.hash = hash;
@@ -340,6 +409,7 @@ void CheckTextures() {
     texture.locked = false;
     texture.sample_changed = false;
     texture.checked_frame = g_frame + 1;
+    texture.watch_stamp = stamp;
   }
   g_totals.hash_ns += Since(start);
 }
@@ -348,13 +418,16 @@ void Report() {
   const double frames = double(g_frame);
   uint64_t all_bytes = 0, resolved_count = 0;
   uint64_t missed_tiled = 0, missed_linear = 0, linear_bound_bytes = 0, linear_bound = 0;
-  std::vector<const Texture*> missed;
+  std::vector<const Texture*> missed, unwatched;
   for (const auto& [base, texture] : g_textures) {
     all_bytes += uint64_t(texture.base.bytes) + texture.mips.bytes;
     resolved_count += texture.resolved;
     if (texture.misses) {
       missed.push_back(&texture);
       (texture.tiled ? missed_tiled : missed_linear) += texture.misses;
+    }
+    if (texture.unwatched) {
+      unwatched.push_back(&texture);
     }
     if (!texture.tiled && !texture.resolved && texture.bound_frame + kRecentFrames >= g_frame) {
       ++linear_bound;
@@ -371,13 +444,25 @@ void Report() {
     rows += fmt::format(R"({}{{"base":"0x{:X}","format":{},"width":{},"height":{},"tiled":{},"bytes":{},"misses":{},"changes":{}}})",
                         i ? "," : "", t.base.start, t.format, t.width, t.height, t.tiled, t.base.bytes, t.misses, t.changes);
   }
+  std::sort(unwatched.begin(), unwatched.end(),
+            [](const Texture* a, const Texture* b) { return a->unwatched > b->unwatched; });
+  std::string unwatched_rows;
+  for (size_t i = 0; i < std::min(unwatched.size(), kReportRows); ++i) {
+    const Texture& t = *unwatched[i];
+    unwatched_rows += fmt::format(R"({}{{"base":"0x{:X}","format":{},"width":{},"height":{},"tiled":{},"bytes":{},"unwatched":{},"changes":{}}})",
+                                  i ? "," : "", t.base.start, t.format, t.width, t.height, t.tiled, t.base.bytes, t.unwatched, t.changes);
+  }
+  const uint64_t watch_fires = g_watch_fires.load(std::memory_order_relaxed);
+  const uint64_t watch_bytes = g_watch_bytes.load(std::memory_order_relaxed);
   const Totals& d = g_last_row;
   g_timeline.push_back(fmt::format(
-      R"({{"frame":{},"textures":{},"new_mb":{:.2f},"changed_flushed":{},"changed_missed":{},"flushes":{},"flush_mb":{:.2f}}})", g_frame,
+      R"({{"frame":{},"textures":{},"new_mb":{:.2f},"changed_flushed":{},"changed_missed":{},"changed_watched":{},"changed_unwatched":{},"watch_fires":{},"flushes":{},"flush_mb":{:.2f}}})", g_frame,
       g_textures.size(), (g_totals.new_bytes - d.new_bytes) / 1048576.0, g_totals.changed_flushed - d.changed_flushed,
-      g_totals.changed_missed - d.changed_missed, g_totals.flushes - d.flushes,
+      g_totals.changed_missed - d.changed_missed, g_totals.changed_watched - d.changed_watched,
+      g_totals.changed_unwatched - d.changed_unwatched, watch_fires - g_last_row_fires, g_totals.flushes - d.flushes,
       (g_totals.flush_bytes - d.flush_bytes) / 1048576.0));
   g_last_row = g_totals;
+  g_last_row_fires = watch_fires;
   std::string timeline;
   for (size_t i = 0; i < g_timeline.size(); ++i) {
     timeline += (i ? "," : "") + g_timeline[i];
@@ -391,7 +476,9 @@ void Report() {
       R"("checks":{},"changed_flushed":{},"changed_locked":{},"changed_resolved":{},"changed_missed":{},)"
       R"("missed_tiled":{},"missed_linear":{},"linear_recent":{},"linear_recent_mb":{:.1f},"changed_mb":{:.1f},"missed_mb":{:.1f},"false_alarms":{},"false_alarm_mb":{:.1f},)"
       R"("changed_sample_only":{},"sample_caught":{},"sample_missed":{},"sample_ms_per_frame":{:.4f},)"
-      R"("hash_gb_per_s":{:.2f},"hashed_gb":{:.2f},"missed":[{}],"timeline":[{}]}})",
+      R"("changed_watched":{},"changed_unwatched":{},"unwatched_after_resolve":{},"unwatched_mb":{:.1f},"missed_but_watched":{},)"
+      R"("watch_false_alarms":{},"watch_false_alarm_mb":{:.1f},"watch_fires":{},"watch_fires_per_frame":{:.1f},"watch_mb_per_frame":{:.2f},"watch_arm_ms_per_frame":{:.4f},)"
+      R"("hash_gb_per_s":{:.2f},"hashed_gb":{:.2f},"missed":[{}],"unwatched":[{}],"timeline":[{}]}})",
       g_frame, g_textures.size(), resolved_count, all_bytes / 1048576.0, g_totals.new_bytes / 1048576.0,
       g_totals.worst_new_bytes_in_frame / 1048576.0, g_totals.bound_textures / frames,
       g_totals.bound_bytes / frames / 1048576.0, g_totals.bind_ns / 1e6 / frames, g_totals.flushes / frames,
@@ -399,8 +486,12 @@ void Report() {
       g_totals.changed_flushed, g_totals.changed_locked, g_totals.changed_resolved, g_totals.changed_missed,
       missed_tiled, missed_linear, linear_bound, linear_bound_bytes / 1048576.0, g_totals.changed_bytes / 1048576.0, g_totals.missed_bytes / 1048576.0, g_totals.false_alarms,
       g_totals.false_alarm_bytes / 1048576.0, g_totals.changed_sample_only, g_totals.sample_caught, g_totals.sample_missed,
-      g_totals.sample_ns / 1e6 / frames, g_totals.hash_ns ? double(g_totals.hashed_bytes) / g_totals.hash_ns : 0.0,
-      g_totals.hashed_bytes / 1e9, rows, timeline);
+      g_totals.sample_ns / 1e6 / frames, g_totals.changed_watched, g_totals.changed_unwatched,
+      g_totals.unwatched_after_resolve, g_totals.unwatched_bytes / 1048576.0, g_totals.missed_but_watched,
+      g_totals.watch_false_alarms, g_totals.watch_false_alarm_bytes / 1048576.0, watch_fires, watch_fires / frames,
+      watch_bytes / frames / 1048576.0, g_totals.watch_arm_ns / 1e6 / frames,
+      g_totals.hash_ns ? double(g_totals.hashed_bytes) / g_totals.hash_ns : 0.0, g_totals.hashed_bytes / 1e9, rows,
+      unwatched_rows, timeline);
 }
 
 }  // namespace
@@ -409,11 +500,13 @@ bool Enabled() {
   return g_on.load(std::memory_order_relaxed);
 }
 
-void Install(uint8_t* membase, const std::filesystem::path& output_dir) {
+void Install(rex::memory::Memory* memory, uint8_t* membase, const std::filesystem::path& output_dir) {
   if (!REXCVAR_GET(crackdown_texture_probe)) {
     return;
   }
   g_membase = membase;
+  g_memory = memory;
+  memory->RegisterPhysicalMemoryInvalidationCallback(OnWatchFired, nullptr);
   g_path = output_dir / fmt::format("texture-probe-{}.json", uint64_t(std::time(nullptr)));
   g_on.store(true, std::memory_order_relaxed);
   REXLOG_INFO("Texture probe: writing {}", g_path.string());

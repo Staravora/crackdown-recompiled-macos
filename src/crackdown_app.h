@@ -277,7 +277,8 @@ class CrackdownApp : public rex::ReXApp {
       if (auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system())) {
         input->SetDeviceAssignment(std::make_unique<rex::input::SharedAssignment>());
         crackdown::benchmark::Install(input, runtime()->virtual_membase(), LogsDir(user_data_root()));
-        crackdown::native::textures::Install(runtime()->virtual_membase(), LogsDir(user_data_root()));
+        crackdown::native::textures::Install(runtime()->memory(), runtime()->virtual_membase(),
+                                             LogsDir(user_data_root()));
       }
     }
     if (window()) {

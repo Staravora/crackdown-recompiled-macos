@@ -163,9 +163,31 @@ The frame rate with the probe on was median 29.8 FPS over 650 seconds, with 0 se
 
 **Verdict: no-go for these signals as the way a native renderer invalidates textures.** Cost is fine at about 0.7 ms a frame, but one change in eight goes unseen. Hashing everything is out at 17 ms a frame. More samples or hashing a texture's first binds could shrink the misses but can't prove there are none.
 
-**Next candidate, untested: the emulator's own page watch.** Its texture cache doesn't use these signals. `texture/cache.cpp` calls `SharedMemory::WatchMemoryRange`, which arms page protection through `Memory::EnablePhysicalMemoryAccessCallbacks`, so the first write to a watched page faults and notifies. It sees writes by hardware page rather than by what the game announces. `RegisterPhysicalMemoryInvalidationCallback` is public and takes several listeners, so the game can listen without an SDK patch. To test it, add that as a fifth signal in the probe and count how many of the misses it catches, on another drive. Page size is 16 KB here against the guest's 4 KB, so expect extra false alarms from neighbouring data.
+**Next candidate: the emulator's own page watch.** Its texture cache doesn't use these signals. `texture/cache.cpp` calls `SharedMemory::WatchMemoryRange`, which arms page protection through `Memory::EnablePhysicalMemoryAccessCallbacks`, so the first write to a watched page faults and notifies. File reads into watched memory go through the physical view and trigger the same callbacks by hand in `XFile::ReadInternal`. `RegisterPhysicalMemoryInvalidationCallback` is public and takes several listeners, so the probe listens without an SDK patch.
 
-Vertex buffers are live guest memory with the same question, and the probe doesn't track them. The same watch would cover them if it holds up.
+The probe arms each texture just before hashing it, as a renderer would arm before reading, so a change that fired nothing is a real gap and not a timing artefact. Its listener returns the exact fired range. Otherwise the emulator's listener widens the unwatch to as much as 256 KB around the write, and the pages around it lose their watch without telling the probe. The first run left that in and showed 186 unwatched changes against 98 after this fix.
+
+**Unattended benchmark only**, 1,800 frames from the menu to the rooftop, not moving:
+
+| 1,369 changes | |
+| --- | --- |
+| The watch fired | 1,271 (93%) |
+| Not fired, but a resolve wrote the page | 86 (6%) |
+| Neither | 12 (1%, 1.6 MB) |
+| Of the 301 no cheap signal saw, the watch fired on | 295 |
+
+The remaining 12 are mostly small linear textures, and nothing yet says what writes them. A resolve's readback writes through the physical view, which is why those don't fire, and a native renderer would know about its own resolves. False alarms are 761 checks, or 389 MB, which is the price of 16 KB host pages over 4 KB guest pages: a texture gets re-read without having changed.
+
+| Benchmark, interleaved | Average FPS | Median frame |
+| --- | --- | --- |
+| Probe off | 25.73, 24.92 | 39.0, 39.6 ms |
+| Probe on, watch armed | 23.49, 23.24 | 42.1, 42.9 ms |
+
+That's the whole probe, hashing included, so it isn't the cost of the watch alone. The watch fired about 50 times a frame, and one bare fault takes 4.6 us on this Mac (`mprotect` plus signal, measured outside the SDK), so about 0.2 ms before the SDK's own lock and bookkeeping. One earlier run read 18.75 FPS and didn't repeat.
+
+**Still open:** the go/no-go needs a drive with this build, because a benchmark doesn't stream the city. Go if watch plus resolves leaves about as little as it does here and nothing tiled, and if faults stay in the same range.
+
+Vertex buffers are live guest memory with the same question, and the probe doesn't track them. The same watch would cover them if it holds up, as `primitive_processor.cpp` already does for index buffers.
 
 Texture sizes are estimates, since the SDK's layout code isn't reachable from the game.
 

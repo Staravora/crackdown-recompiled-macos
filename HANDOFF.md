@@ -1,10 +1,16 @@
 # Session handoff
 
+## 2026-10-31 (evening) — Page watch added to the texture probe: 99% on the benchmark, drive pending
+- **Added:** the probe now scores the emulator's page watch, armed before each hash. Fields `changed_watched`, `changed_unwatched`, `unwatched_after_resolve`, `missed_but_watched`, `watch_fires`, and an `unwatched` list. `Install` now takes the `Memory`. Fifth signal only under `crackdown_texture_probe`, and nothing changes with it off.
+- **Benchmark result:** of 1,369 changes the watch fired on 93%, resolves explain 6%, and 12 are unexplained. It caught 295 of the 301 the cheap signals missed. Probe on costs about 2 FPS, hashing included. Table in `docs/native-rendering-survey.md`.
+- **The probe's listener returns the exact fired range**, which holds the emulator to unwatching that page instead of up to 256 KB around it. Keep that for the test. A real renderer has to choose between more faults and a wider dirty area.
+- **Right now:** `crackdown_texture_probe = true` is ON in the app's `crackdown.toml` for Bruce's next drive. Take it out afterwards. Confirm the "Texture probe" log line first.
+- **After the drive:** read the newest `texture-probe-*.json`. Look at `changed_unwatched` minus `unwatched_after_resolve`, any tiled rows in `unwatched`, and `watch_fires_per_frame`. The go/no-go is in the survey. Bruce unlocked agency spawns in the Volk and Shai Gen during the last drive, so teleporting between them is a cheap way to force streaming.
+
 ## 2026-10-31 (evening) — Texture drive done: the cheap signals are a no-go
 - **Result:** 10 minutes of driving with the probe on (`crackdown_242.log`, `texture-probe-1793486425.json`). Of 7,557 texture changes, flush, lock and resolve announced 71%, the sample alone saw 16%, and 13% went unseen (702 tiled, 298 linear). Misses run through the whole drive, not just loading. Cost is about 0.7 ms a frame. Full table in `docs/native-rendering-survey.md`, section "Texture change test".
 - **Decision:** a native renderer can't rely on these signals. Hashing everything would cost about 17 ms a frame.
-- **Next:** test the emulator's own page watch as a fifth probe signal, using `RegisterPhysicalMemoryInvalidationCallback`, which needs no SDK patch. Bruce drives once more with `crackdown_texture_probe = true` set in the app's `crackdown.toml`. It's a go if it catches the 1,000-odd misses at a fault cost we can live with. Rest of Phase 2 waits on this.
-- **Config:** the probe setting is back out of the app's `crackdown.toml`. The app, build and SDK are unchanged.
+- **Next:** the emulator's page watch, in the entry above. Rest of Phase 2 waits on it.
 
 ## 2026-10-31 (afternoon) — Texture change probe built; the go/no-go waits on a drive with it on
 - **Added:** `src/native/texture_probe.cpp`, default off. Standing-still results are in `docs/native-rendering-survey.md`, section "Texture change test". Cost is about 0.3 ms a frame, and signals caught 88% of changes, with 19 tiled misses.
