@@ -1,0 +1,548 @@
+diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
+index 9191a28..caf96a0 100644
+--- a/XenosRecomp/shader_common.h
++++ b/XenosRecomp/shader_common.h
+@@ -151,6 +151,72 @@ float4 tfetchCube(constant TextureCubeDescriptorHeap* textureHeap,
+     return texture.sample(sampler, cubeMapData->cubeMapDirections[(uint)texCoord.z]);
+ }
+ 
++float4 tfetch2DLod(constant Texture2DDescriptorHeap* textureHeap,
++                   constant SamplerDescriptorHeap* samplerHeap,
++                   uint resourceDescriptorIndex,
++                   uint samplerDescriptorIndex,
++                   float2 texCoord, float2 offset, float lod)
++{
++    texture2d<float> texture = textureHeap[resourceDescriptorIndex].tex;
++    sampler sampler = samplerHeap[samplerDescriptorIndex].samp;
++    return texture.sample(sampler, texCoord + offset / (float2)getTexture2DDimensions(texture), level(lod));
++}
++
++float4 tfetch2DBias(constant Texture2DDescriptorHeap* textureHeap,
++                    constant SamplerDescriptorHeap* samplerHeap,
++                    uint resourceDescriptorIndex,
++                    uint samplerDescriptorIndex,
++                    float2 texCoord, float2 offset, float lodBias)
++{
++    texture2d<float> texture = textureHeap[resourceDescriptorIndex].tex;
++    sampler sampler = samplerHeap[samplerDescriptorIndex].samp;
++    return texture.sample(sampler, texCoord + offset / (float2)getTexture2DDimensions(texture), bias(lodBias));
++}
++
++float4 tfetch3DLod(constant Texture3DDescriptorHeap* textureHeap,
++                   constant SamplerDescriptorHeap* samplerHeap,
++                   uint resourceDescriptorIndex,
++                   uint samplerDescriptorIndex,
++                   float3 texCoord, float lod)
++{
++    texture3d<float> texture = textureHeap[resourceDescriptorIndex].tex;
++    sampler sampler = samplerHeap[samplerDescriptorIndex].samp;
++    return texture.sample(sampler, texCoord, level(lod));
++}
++
++float4 tfetch3DBias(constant Texture3DDescriptorHeap* textureHeap,
++                    constant SamplerDescriptorHeap* samplerHeap,
++                    uint resourceDescriptorIndex,
++                    uint samplerDescriptorIndex,
++                    float3 texCoord, float lodBias)
++{
++    texture3d<float> texture = textureHeap[resourceDescriptorIndex].tex;
++    sampler sampler = samplerHeap[samplerDescriptorIndex].samp;
++    return texture.sample(sampler, texCoord, bias(lodBias));
++}
++
++float4 tfetchCubeLod(constant TextureCubeDescriptorHeap* textureHeap,
++                     constant SamplerDescriptorHeap* samplerHeap,
++                     uint resourceDescriptorIndex,
++                     uint samplerDescriptorIndex,
++                     float3 texCoord, thread CubeMapData* cubeMapData, float lod)
++{
++    texturecube<float> texture = textureHeap[resourceDescriptorIndex].tex;
++    sampler sampler = samplerHeap[samplerDescriptorIndex].samp;
++    return texture.sample(sampler, cubeMapData->cubeMapDirections[(uint)texCoord.z], level(lod));
++}
++
++float4 tfetchCubeBias(constant TextureCubeDescriptorHeap* textureHeap,
++                      constant SamplerDescriptorHeap* samplerHeap,
++                      uint resourceDescriptorIndex,
++                      uint samplerDescriptorIndex,
++                      float3 texCoord, thread CubeMapData* cubeMapData, float lodBias)
++{
++    texturecube<float> texture = textureHeap[resourceDescriptorIndex].tex;
++    sampler sampler = samplerHeap[samplerDescriptorIndex].samp;
++    return texture.sample(sampler, cubeMapData->cubeMapDirections[(uint)texCoord.z], bias(lodBias));
++}
++
+ float4 cube(float4 value, thread CubeMapData* cubeMapData)
+ {
+     uint index = cubeMapData->cubeMapIndex;
+diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
+index fd59693..f132137 100644
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -93,7 +93,8 @@ static constexpr DeclUsageLocation USAGE_LOCATIONS[] =
+     { DeclUsage::TexCoord, 5, 13 },
+     { DeclUsage::TexCoord, 6, 14 },
+     { DeclUsage::TexCoord, 7, 15 },
+-    { DeclUsage::Position, 1, 15 },
++    { DeclUsage::Position, 1, 16 },
++    { DeclUsage::Position, 2, 17 },
+ };
+ 
+ static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
+@@ -115,7 +116,9 @@ static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
+     { DeclUsage::TexCoord, 14 },
+     { DeclUsage::TexCoord, 15 },
+     { DeclUsage::Color, 0 },
+-    { DeclUsage::Color, 1 }
++    { DeclUsage::Color, 1 },
++    { DeclUsage::Color, 2 },
++    { DeclUsage::Normal, 0 }
+ };
+ 
+ static constexpr std::string_view TEXTURE_DIMENSIONS[] = 
+@@ -130,6 +133,17 @@ static FetchDestinationSwizzle getDestSwizzle(uint32_t dstSwizzle, uint32_t inde
+     return FetchDestinationSwizzle((dstSwizzle >> (index * 3)) & 0x7);
+ }
+ 
++std::string ShaderRecompiler::boolMask(uint32_t address)
++{
++    auto findResult = boolConstants.find(address);
++    if (findResult != boolConstants.end())
++        return findResult->second;
++
++    // Pixel shader bools start at 128 in the hardware's numbering.
++    uint32_t bit = address >= 128 ? address - 128 + 16 : address + (isPixelShader ? 16 : 0);
++    return fmt::format("(1 << {})", bit);
++}
++
+ uint32_t ShaderRecompiler::printDstSwizzle(uint32_t dstSwizzle, bool operand)
+ {
+     uint32_t size = 0;
+@@ -177,6 +191,32 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+         ++indentation;
+     }
+ 
++    // A fetch can write only constants 0 and 1, or nothing at all.
++    bool readsVertexData = false;
++    for (size_t i = 0; i < 4; i++)
++    {
++        const auto swizzle = getDestSwizzle(instr.dstSwizzle, i);
++        readsVertexData |= swizzle >= FetchDestinationSwizzle::X && swizzle <= FetchDestinationSwizzle::W;
++    }
++
++    if (!readsVertexData)
++    {
++        printDstSwizzle01(instr.dstRegister, instr.dstSwizzle);
++
++        if (instr.isPredicated)
++        {
++            --indentation;
++            indent();
++            out += "}\n";
++        }
++        return;
++    }
++
++    if (instr.srcRegisterAm)
++        warn("relative vertex fetch source");
++    if (instr.dstRegisterAam)
++        warn("relative vertex fetch destination");
++
+     indent();
+     print("r{}.", instr.dstRegister);
+     uint32_t size = printDstSwizzle(instr.dstSwizzle, false);
+@@ -237,8 +277,36 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+ 
+ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicubic)
+ {
+-    if (instr.opcode != FetchOpcode::TextureFetch && instr.opcode != FetchOpcode::GetTextureWeights)
++    switch (instr.opcode)
++    {
++    case FetchOpcode::TextureFetch:
++    case FetchOpcode::GetTextureWeights:
++    case FetchOpcode::SetTextureLod:
++        break;
++    case FetchOpcode::GetTextureBorderColorFrac:
++        warn("getBCF");
++        return;
++    case FetchOpcode::GetTextureComputedLod:
++        warn("getCompTexLOD");
++        return;
++    case FetchOpcode::GetTextureGradients:
++        warn("getGradients");
++        return;
++    case FetchOpcode::SetTextureGradientsHorz:
++    case FetchOpcode::SetTextureGradientsVert:
++        warn("setTexGradients");
++        return;
++    default:
++        warn("unknown fetch opcode");
+         return;
++    }
++
++    if (instr.srcRegisterAm)
++        warn("relative texture fetch source");
++    if (instr.dstRegisterAm)
++        warn("relative texture fetch destination");
++    if (instr.useRegGradients)
++        warn("register gradients");
+ 
+     if (instr.isPredicated)
+     {
+@@ -258,13 +326,34 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+                 out += SWIZZLES[((instr.srcSwizzle >> (i * 2))) & 0x3];
+         };
+ 
++    if (instr.opcode == FetchOpcode::SetTextureLod)
++    {
++        indent();
++        out += "tfetchLod = ";
++        printSrcRegister(1);
++        out += ";\n";
++
++        if (instr.isPredicated)
++        {
++            --indentation;
++            indent();
++            out += "}\n";
++        }
++        return;
++    }
++
+     std::string constName;
+     const char* constNamePtr = nullptr;
+ #ifdef UNLEASHED_RECOMP
+     bool subtractFromOne = false;
+ #endif
+ 
+-    auto findResult = samplers.find(instr.constIndex);
++    // Vertex samplers are fetch constants 16 to 19, which the constant table counts from 0.
++    uint32_t samplerRegister = instr.constIndex;
++    if (!isPixelShader && samplerRegister >= 16)
++        samplerRegister -= 16;
++
++    auto findResult = samplers.find(samplerRegister);
+     if (findResult != samplers.end())
+     {
+         constNamePtr = findResult->second;
+@@ -275,7 +364,7 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+     }
+     else
+     {
+-        constName = fmt::format("s{}", instr.constIndex);
++        constName = fmt::format("s{}", samplerRegister);
+         constNamePtr = constName.c_str();
+     }
+ 
+@@ -325,7 +414,8 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+     switch (instr.dimension)
+     {
+     case TextureDimension::Texture1D:
+-        dimension = "1D";
++        // Bound as a 2D texture one texel high.
++        dimension = "2D";
+         componentCount = 1;
+         break;
+     case TextureDimension::Texture2D:
+@@ -349,6 +439,24 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+         out += "Bicubic";
+ #endif
+ 
++    // Same rule as the emulator: vertex shaders have no gradients, so they always pick the level
++    // themselves. The bias is in 16ths.
++    const bool computedLod = instr.useCompLod && (isPixelShader || instr.useRegGradients);
++    const float lodBias = instr.lodBias / 16.0f;
++    std::string lodExpression;
++    if (instr.opcode == FetchOpcode::TextureFetch)
++    {
++        if (instr.useRegLod)
++            lodExpression = fmt::format("tfetchLod + {}", lodBias);
++        else if (!computedLod || instr.lodBias != 0)
++            lodExpression = fmt::format("{}", lodBias);
++
++        if (!computedLod)
++            out += "Lod";
++        else if (!lodExpression.empty())
++            out += "Bias";
++    }
++
+     println("(");
+ 
+     println("#ifdef __air__");
+@@ -360,10 +468,23 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+ 
+     indent();
+     print("\t{0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr, dimension);
+-    printSrcRegister(componentCount);
++
++    if (instr.dimension == TextureDimension::Texture1D)
++    {
++        out += "float2(";
++        printSrcRegister(1);
++        out += ", 0.5)";
++    }
++    else
++    {
++        printSrcRegister(componentCount);
++    }
+ 
+     switch (instr.dimension)
+     {
++    case TextureDimension::Texture1D:
++        print(", float2({}, 0)", instr.offsetX * 0.5f);
++        break;
+     case TextureDimension::Texture2D:
+         print(", float2({}, {})", instr.offsetX * 0.5f, instr.offsetY * 0.5f);
+         break;
+@@ -378,6 +499,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+         break;
+     }
+ 
++    if (!lodExpression.empty())
++        print(", {}", lodExpression);
++
+     out += ").";
+ 
+     printDstSwizzle(instr.dstSwizzle, true);
+@@ -477,6 +601,8 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+                 if (select)
+                 {
+                     abs = (reg & 0x80) != 0;
++                    if ((reg & 0x40) != 0)
++                        warn("relative source register");
+                     reg &= 0x3F;
+                 }
+                 else
+@@ -489,6 +615,17 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+ 
+             std::string regFormatted;
+ 
++            // The second and third constants share const1Relative, as the emulator reads it.
++            bool constRelative = false;
++            if (operand == VECTOR_0)
++                constRelative = instr.const0Relative;
++            else if (operand == VECTOR_1)
++                constRelative = instr.src1Select ? instr.const0Relative : instr.const1Relative;
++            else
++                constRelative = (instr.src1Select && instr.src2Select) ? instr.const0Relative : instr.const1Relative;
++
++            const char* relativeOffset = constRelative ? (instr.constAddressRegisterRelative ? " + a0" : " + aL") : "";
++
+             if (select)
+             {
+                 regFormatted = fmt::format("r{}", reg);
+@@ -511,18 +648,24 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+                     #endif
+                         {
+                             regFormatted = fmt::format("{}({}{})", constantName,
+-                                reg - findResult->second->registerIndex, instr.const0Relative ? (instr.constAddressRegisterRelative ? " + a0" : " + aL") : "");
++                                reg - findResult->second->registerIndex, relativeOffset);
+                         }
+                     }
++                    else if (constRelative)
++                    {
++                        regFormatted = fmt::format("relativeConstant({}{})", reg, relativeOffset);
++                    }
+                     else
+                     {
+-                        assert(!instr.const0Relative && !instr.const1Relative);
+                         regFormatted = constantName;
+                     }
+                 }
++                else if (constRelative)
++                {
++                    regFormatted = fmt::format("relativeConstant({}{})", reg, relativeOffset);
++                }
+                 else
+                 {
+-                    assert(!instr.const0Relative && !instr.const1Relative);
+                     regFormatted = fmt::format("c{}", reg);
+                 }
+             }
+@@ -1378,8 +1521,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         }
+     }
+ 
++    const char* constantsName = isPixelShader ? "Pixel" : "Vertex";
++
++    println("#define relativeConstant(INDEX) vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + (INDEX) * 16, 0x10)", constantsName);
++
+     out += "\n#elif defined(__air__)\n\n";
+ 
++    println("#define relativeConstant(INDEX) (*(reinterpret_cast<device float4*>(g_PushConstants.{}ShaderConstants + (INDEX) * 16)))", constantsName);
++
+     for (uint32_t i = 0; i < constantTableContainer->constantTable.constants; i++)
+     {
+         const auto constantInfo = reinterpret_cast<const ConstantInfo*>(
+@@ -1447,8 +1596,26 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         }
+     }
+ 
++    // The table doesn't name every slot a shader fetches, so the rest are addressed by register.
++    for (uint32_t i = 0; i < 16; i++)
++    {
++        if (samplers.find(i) != samplers.end())
++            continue;
++
++        for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
++        {
++            println("#define s{}_Texture{}DescriptorIndex (*(reinterpret_cast<device uint*>(g_PushConstants.SharedConstants + {})))",
++                i, TEXTURE_DIMENSIONS[j], j * 64 + i * 4);
++        }
++
++        println("#define s{}_SamplerDescriptorIndex (*(reinterpret_cast<device uint*>(g_PushConstants.SharedConstants + {})))",
++            i, std::size(TEXTURE_DIMENSIONS) * 64 + i * 4);
++    }
++
+     out += "\n#else\n\n";
+ 
++    out += "#define relativeConstant(INDEX) float4(0.0, 0.0, 0.0, 0.0)\n\n";
++
+     println("cbuffer {}ShaderConstants : register(b{}, space4)", isPixelShader ? "Pixel" : "Vertex", isPixelShader ? 1 : 0);
+     out += "{\n";
+ 
+@@ -1737,6 +1904,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     else
+     {
+         out += "#ifdef __air__\n";
++        out += "\tconstant Texture2DDescriptorHeap* g_Texture2DDescriptorHeap [[buffer(0)]],\n";
++        out += "\tconstant Texture3DDescriptorHeap* g_Texture3DDescriptorHeap [[buffer(1)]],\n";
++        out += "\tconstant TextureCubeDescriptorHeap* g_TextureCubeDescriptorHeap [[buffer(2)]],\n";
++        out += "\tconstant SamplerDescriptorHeap* g_SamplerDescriptorHeap [[buffer(3)]],\n";
+         out += "\tconstant PushConstants& g_PushConstants [[buffer(8)]],\n";
+         out += "\tVertexShaderInput input [[stage_in]]\n";
+         out += "#else\n";
+@@ -1901,6 +2072,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     out += "\tint aL = 0;\n";
+     out += "\tbool p0 = false;\n";
+     out += "\tfloat ps = 0.0;\n";
++    out += "\tfloat tfetchLod = 0.0;\n";
+     if (isPixelShader)
+     {
+ #ifdef UNLEASHED_RECOMP
+@@ -1998,6 +2170,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     controlFlowCode = code;
+     instrAddress = 0;
+     uint32_t pc = 0;
++    bool conditionalEnd = false;
+ 
+     while (instrAddress < instrSize)
+     {
+@@ -2051,7 +2224,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                 address = cfInstr.condExec.address;
+                 count = cfInstr.condExec.count;
+                 sequence = cfInstr.condExec.sequence;
+-                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecEnd || cfInstr.opcode == ControlFlowOpcode::CondExecEnd);
++                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecEnd || cfInstr.opcode == ControlFlowOpcode::CondExecPredCleanEnd);
+                 break;
+ 
+             case ControlFlowOpcode::CondExecPred:
+@@ -2115,11 +2288,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                     }
+                     else
+                     {
+-                        auto findResult = boolConstants.find(cfInstr.condJmp.boolAddress);
+-                        if (findResult != boolConstants.end())
+-                            println("if ((g_Booleans & {}) {}= 0)", findResult->second, cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");
+-                        else
+-                            println("if (b{} {}= 0)", uint32_t(cfInstr.condJmp.boolAddress), cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");
++                        println("if ((g_Booleans & {}) {}= 0)", boolMask(cfInstr.condJmp.boolAddress), cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");
+                     }
+ 
+                     if (simpleControlFlow)
+@@ -2140,6 +2309,35 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             }
+             }
+ 
++            // A conditional exec's instructions and its end both sit inside the condition.
++            bool conditional = false;
++
++            switch (cfInstr.opcode)
++            {
++            case ControlFlowOpcode::CondExec:
++            case ControlFlowOpcode::CondExecEnd:
++            case ControlFlowOpcode::CondExecPredClean:
++            case ControlFlowOpcode::CondExecPredCleanEnd:
++                indent();
++                println("if ((g_Booleans & {}) {}= 0)", boolMask(cfInstr.condExec.boolAddress), cfInstr.condExec.condition ? "!" : "=");
++                conditional = true;
++                break;
++
++            case ControlFlowOpcode::CondExecPred:
++            case ControlFlowOpcode::CondExecPredEnd:
++                indent();
++                println("if ({}p0)", cfInstr.condExecPred.condition ? "" : "!");
++                conditional = true;
++                break;
++            }
++
++            if (conditional)
++            {
++                indent();
++                out += "{\n";
++                ++indentation;
++            }
++
+             auto instructionCode = code + address * 3;
+             
+             for (uint32_t i = 0; i < count; i++)
+@@ -2275,6 +2473,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                 {
+                     out += "\t\t\tbreak;\n";
+                 }
++
++                conditionalEnd |= conditional;
++            }
++
++            if (conditional)
++            {
++                --indentation;
++                indent();
++                out += "}\n";
+             }
+         }
+ 
+@@ -2298,7 +2505,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         out += "\toutput.oPos.xy += g_HalfPixelOffset * output.oPos.w;\n";
+ #endif
+ 
+-    if (!simpleControlFlow)
++    if (!simpleControlFlow || conditionalEnd)
+         out += "\treturn output;\n";
+ #ifdef UNLEASHED_RECOMP
+     else if (hasMtxProjection)
+diff --git a/XenosRecomp/shader_recompiler.h b/XenosRecomp/shader_recompiler.h
+index 4f468ec..018671e 100644
+--- a/XenosRecomp/shader_recompiler.h
++++ b/XenosRecomp/shader_recompiler.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <set>
++
+ #include "shader.h"
+ #include "shader_code.h"
+ 
+@@ -33,6 +35,7 @@ struct ShaderRecompiler : StringBuffer
+     std::unordered_map<uint32_t, const char*> samplers;
+     std::unordered_map<uint32_t, uint32_t> ifEndLabels;
+     uint32_t specConstantsMask = 0;
++    std::set<std::string> warnings;
+ 
+ #ifdef UNLEASHED_RECOMP
+     bool hasMtxProjection = false;
+@@ -45,6 +48,14 @@ struct ShaderRecompiler : StringBuffer
+             out += '\t';
+     }
+ 
++    // Reports a feature the output doesn't implement, once per shader, so gaps can't pass silently.
++    void warn(const std::string& what)
++    {
++        if (warnings.insert(what).second)
++            fmt::println("UNSUPPORTED {}", what);
++    }
++
++    std::string boolMask(uint32_t address);
+     uint32_t printDstSwizzle(uint32_t dstSwizzle, bool operand);
+     void printDstSwizzle01(uint32_t dstRegister, uint32_t dstSwizzle);
+ 

@@ -3,7 +3,7 @@
 Apple's GPUs skip fully covered pixels, so several opaque quads in one pass would only shade once."""
 import json, re, statistics, subprocess
 rows = [r for r in json.load(open("joined.json")) if r["msl"] and "-fs-" in r["msl"] and r["key"]]
-ok = {l.split("\t")[0] for l in open("compiled-fixed.tsv") if l.split("\t")[1] == "ok"}
+ok = {l.split("\t")[0] for l in open("compiled.tsv") if l.split("\t")[1] == "ok"}
 rows = [r for r in rows if "ps_" + r["key"] in ok]
 print(len(rows), "pairs", flush=True)
 def run(binary, path):
@@ -13,7 +13,7 @@ def run(binary, path):
 results = {i: {"xenos": [], "emulator": []} for i in range(len(rows))}
 for round_number in range(3):
     for i, row in enumerate(rows):
-        results[i]["xenos"].append(run("build/harness_xenos", f"fixed/ps_{row['key']}.metal"))
+        results[i]["xenos"].append(run("build/harness_xenos", f"translated/ps_{row['key']}.metal"))
         results[i]["emulator"].append(run("build/harness_emulator", row["msl"]))
     print("round", round_number + 1, flush=True)
 with open("timing.tsv", "w") as f:

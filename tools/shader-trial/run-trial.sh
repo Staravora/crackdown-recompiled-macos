@@ -1,15 +1,20 @@
 #!/bin/zsh
 # Phase 1 shader trial: build XenosRecomp's translator (PR 22, commit 4906992, MIT, from
-# github.com/hedge-dev/XenosRecomp) without its HLSL compiler, translate every extracted shader to
+# github.com/hedge-dev/XenosRecomp) with this project's patch and without its HLSL compiler,
+# translate every extracted shader to
 # Metal, and compile each with Apple's metal compiler. Results land in compiled.tsv; nothing touches
 # the game or the app. Rerunnable.
 set -u
 cd "${0:A:h}"
 R=XenosRecomp
 
+rm -f done.txt
+git -C $R checkout -q -- . || exit 1
 git -C $R checkout -q 4906992 || exit 1
+git -C $R apply ../xenosrecomp-crackdown.patch || exit 1
 git -C $R submodule update --init --depth 1 thirdparty/fmt thirdparty/xxHash || exit 1
 
+rm -rf translated
 mkdir -p stubs build translated
 : > stubs/dxcapi.h
 : > stubs/smolv.h
@@ -40,3 +45,5 @@ for kind in ("vs", "ps"):
 for message, count in collections.Counter(row[2] for row in rows if row[1] != "ok").most_common(12):
     print(count, message)
 EOF
+
+date > done.txt
