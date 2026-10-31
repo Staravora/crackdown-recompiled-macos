@@ -44,18 +44,18 @@ diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graph
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
-@@ -79,6 +79,11 @@
+@@ -77,6 +77,11 @@
+ REXCVAR_DEFINE_BOOL(vulkan_hoist_shared_memory_uploads, false, "GPU/Vulkan",
+                     "Run shared memory uploads requested inside a render pass before that pass "
                      "when no draw in it has accessed the range, instead of splitting the pass")
-     .lifecycle(rex::cvar::Lifecycle::kHotReload);
- 
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
 +REXCVAR_DEFINE_BOOL(vulkan_occlusion_queries_in_render_passes, false, "GPU/Vulkan",
 +                    "Record guest occlusion queries inside render passes, one host query per pass "
 +                    "they span, instead of ending the render pass at every query begin and end")
-+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-+
- REXCVAR_DEFINE_STRING(vulkan_skip_pixel_shader, "", "GPU/Vulkan",
-                       "Skip draws using the pixel shader with this ucode hash, in hex (diagnostic)")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
+ REXCVAR_DEFINE_STRING(vulkan_skip_pixel_shader, "", "GPU/Vulkan",
 @@ -3211,6 +3216,8 @@
      if (REXCVAR_GET(vulkan_log_pass_breaks)) {
        ++g_pass_breaks.framebuffer_switches;
@@ -180,15 +180,15 @@ diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/com
    uint32_t host_index = active_occlusion_query_.host_index;
    active_occlusion_query_ = {};
  
-@@ -5206,10 +5268,61 @@
+@@ -5206,8 +5268,59 @@
                         return query.sample_count_address == sample_count_address;
                       }),
        pending_occlusion_queries_.end());
 -  pending_occlusion_queries_.push_back({GetCurrentSubmission(), host_index, sample_count_address});
 +  pending_occlusion_queries_.push_back({GetCurrentSubmission(), {host_index}, sample_count_address});
    return true;
- }
- 
++}
++
 +void VulkanCommandProcessor::BeginOcclusionQuerySegment() {
 +  ActiveOcclusionQuery& query = active_occlusion_query_;
 +  if (!query.valid || !query.in_render_passes || query.host_index != UINT32_MAX ||
@@ -238,11 +238,9 @@ diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/com
 +  deferred_command_buffer_.CmdVkPipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
 +                                                VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &memory_barrier,
 +                                                0, nullptr, 0, nullptr);
-+}
-+
+ }
+ 
  void VulkanCommandProcessor::CompleteOcclusionQueries(bool wait) {
-   const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
-   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
 @@ -5247,8 +5360,11 @@
        readback_invalidated = true;
      }
@@ -257,16 +255,27 @@ diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/com
    }
  }
  
-@@ -5483,6 +5599,21 @@
+@@ -5483,6 +5599,32 @@
      // are fulfilled).
      deferred_command_buffer_.Reset();
  
 +    if (occlusion_query_pool_ != VK_NULL_HANDLE) {
-+      if (REXCVAR_GET(vulkan_occlusion_queries_in_render_passes) &&
-+          occlusion_query_cursor_ > kMaxOcclusionQueries / 4 * 3) {
-+        // Segments can't wrap inside a submission; results still in flight must be read first.
-+        CompleteOcclusionQueries(true);
-+        occlusion_query_cursor_ = 0;
++      if (REXCVAR_GET(vulkan_occlusion_queries_in_render_passes)) {
++        if (occlusion_query_cursor_ > kMaxOcclusionQueries / 4 * 3) {
++          occlusion_query_cursor_ = 0;
++        }
++        // Segments can't wrap inside a submission, so the slots it may use must hold no unread
++        // results. Waiting only then avoids draining the GPU on every wrap of the pool.
++        const uint32_t room_end = occlusion_query_cursor_ + kMaxOcclusionQueries / 4;
++        bool room_pending = false;
++        for (const PendingOcclusionQuery& query : pending_occlusion_queries_) {
++          for (uint32_t host_index : query.host_indices) {
++            room_pending |= host_index >= occlusion_query_cursor_ && host_index < room_end;
++          }
++        }
++        if (room_pending) {
++          CompleteOcclusionQueries(true);
++        }
 +      }
 +      if (occlusion_query_pool_reset_needed_) {
 +        deferred_command_buffer_.CmdVkResetQueryPool(occlusion_query_pool_, 0,
@@ -279,7 +288,7 @@ diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/com
      // Reset cached state of the command buffer.
      dynamic_viewport_update_needed_ = true;
      dynamic_scissor_update_needed_ = true;
-@@ -5658,14 +5789,18 @@
+@@ -5658,13 +5800,17 @@
    if (submission_open_) {
      assert_false(scratch_buffer_used_);
  
@@ -293,9 +302,8 @@ diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/com
  
 +    // Ends an open segment; an in-pass query continues in the next submission's passes.
      EndRenderPass();
- 
-+    CopyAndResetSubmissionOcclusionQueries();
 +
++    CopyAndResetSubmissionOcclusionQueries();
+ 
      pipeline_cache_->EndSubmission();
  
-     render_target_cache_->EndSubmission();

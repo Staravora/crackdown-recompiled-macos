@@ -1,12 +1,20 @@
 # Session handoff
 
+## 2026-10-31 (early morning) — Periodic 120 ms freeze removed; a stable 30 needs a lower typical frame
+- **Finding:** the raw frame times showed the worst hitches on a steady beat of about 1.45 s (36-40 frames, 13 of 14 gaps). The cause was patch `0012`: `BeginSubmission` waited for the GPU to drain every time the query pool cursor passed 3/4 of its 8192 slots.
+- **Fix (in `0012`):** wrap without waiting, and wait only if the slots the next submission may use still hold unread results.
+- **Measured** (interleaved, three runs each, median, old -> fixed): frames of 80 ms or more 24 -> 4, p99 122 -> 80 ms, 1% low 7.9 -> 11.5 FPS, average 24.6 -> 24.7 FPS. The beat is gone (0-1 on-beat gaps per run, was 7-11). The average did not move because the stall's drained queue also gave a few fast 25 ms catch-up frames. Runs vary by a few FPS as the Air warms up, so compare within a batch.
+- **What's left for 30:** clamping every spike to the median only reached 29 FPS, and 75% of frames sit at 34-40 ms, so the typical frame has to drop as well. Those 25 ms catch-up frames hint that the CPU side can run near 25 ms and the GPU or queue sets the ~36 ms floor. That is inference, not measured; a GPU trace should confirm it. Remaining spikes are 60-95 ms and irregular, with one 225 ms outlier early in a run. They are not yet explained.
+- **Not verified:** image correctness and feel in play since the fix. The benchmark stands still at one spot, so moving through the city is unmeasured.
+- **Tools:** the raw frames are `Crackdown Data/logs/frames-<label>.txt`.
+
 ## 2026-10-31 (just after midnight) — Project moved out of iCloud to `~/Developer/crackdown`
 - **New location:** `~/Developer/crackdown` (same layout: `HANDOFF.md`, `outputs`, `work/`). Work here. The old copy in `~/Documents/Codex/2026-10-29/...` stays until a launch from the new path is confirmed, then goes to the Trash; nothing is deleted before that.
 - **Verified:** 24,402 entries match by name and size, none are evicted, both repos pass `git fsck` on the same commits (`790ff0e`, SDK `f5337cd`), and the 443 game data and app files match by SHA-256. Local differences are the expected uncommitted `src/benchmark.cpp` and the patched SDK tree.
 - **Absolute symlinks:** `crackdown/game/assets` and `crackdown/tools/rexglue/mac-arm64` pointed at the old path. Both are now relative, and both are gitignored, so a fresh checkout must recreate them. Left alone they would have kept reading from iCloud. The staged SDK and the binary hold no old paths (`@executable_path` rpath).
 - **iCloud can wedge:** with thousands of files queued, reads blocked for good while `bird` and `cloudd` sat idle at 0% CPU and `fileproviderd` looked busy. `killall bird` cleared it at once (launchd relaunches it). The fetch had stalled right after a burst of 10 parallel readers plus a Finder "Download Now", so 4 readers with a stall watchdog was used for the rest.
 - **Rebuilt:** fresh `game-build-macos` and `sdk-build-macos` configured at the new path with the old settings; see `game-build-move.log` and `sdk-build-move.log` in `work/`.
-- **Not yet done:** no launch from the new path. Next: confirm it runs, then frame spike metrics and a moving benchmark route.
+- **Launch confirmed:** three benchmark runs from the new path all reached the city (26.6 FPS average); the log's user data, settings and Vulkan paths are all under `~/Developer/crackdown`, with no mention of the old folder. A full game build takes about 3 minutes and the SDK about 2, against 10+ minutes for a game build on iCloud.
 
 ## 2026-10-30 (night) — iCloud eviction blocks the game, builds and git
 - **Finding:** the workspace is in iCloud-synced `~/Documents` and the disk is 98% full (11 GB free), so macOS evicted files to dataless placeholders: 54 of 196 game files (1.40 GB), 299 in this repo, 3065 in the SDK, about 1000 in the build folders. Three benchmark launches hung at boot (no frames, a guest thread in `pread` under `NtReadFile`, no FPS in the title). A local `git commit` failed with `Operation timed out` and a game build took over 10 minutes. `bird` used 93% CPU and `fileproviderd` 43%, which also competes with benchmarks. Check with `find <dir> -type f -flags +dataless | wc -l`.
