@@ -76,6 +76,30 @@ The stress run uses the emulator's raw 6,207 draws with every state changing on 
 - **Idle reads slower than load 2** (6.56 against 4.32 ms for bindless on one thread), probably because cores clock down between paced frames. The loaded figures are closer to the game, but that explanation is untested.
 - **Pipelines were already compiled**, as the plan assumes, and the frame comes from a standing-still census. The stress run covers a heavier frame.
 
+## Baked buffer decoder (2026-10-31)
+
+Phase 2's first piece is `src/native/baked_buffer.cpp`, with `tools/baked_bench.cpp` running it on the command lists the census saved. No game code runs, and the decoder isn't in the game build yet.
+
+| Scene | Lists | Draws per frame | Pipelines | Texture sets | Decode all once | Replay per draw |
+| --- | --- | --- | --- | --- | --- | --- |
+| Los Muertos | 598 | 1,902 | 47 | 949 | 3.2 ms | 0.057 microseconds |
+| Rooftop | 1,054 | 3,020 | 75 | 1,534 | 2.8 ms | 0.036 microseconds |
+| Agency garage | 633 | 1,579 | 39 | 668 | 2.1 ms | 0.040 microseconds |
+
+No unknown or truncated packets in any scene, and draw totals match `census-lists.py` exactly. Replay here covers the pass check, the list's float constants (97-115 dwords per draw), redundant-state checks and a byte-swapped copy of the literals, on a shuffled frame. It doesn't include Metal encoding or anything from the device.
+
+**What the lists turned out to be.** Each draw carries both shaders, all 32 fetch constants, render state, bools and loops, plus many of its float constants. So a list needs decoding only once, and only 4 dynamic states appear.
+
+- **`WAIT_REG_MEM`** is a wait on `COHER_STATUS_HOST`, a cache flush handshake. Native rendering doesn't need it.
+- **`SET_CONSTANT`** in these lists only moves the tile's window offset, which collapses with tiling.
+- **`LOAD_ALU_CONSTANT`** only loads shader literals, at registers 252-255 of each stage, and at 236-239 (VS) in some lists.
+- **Float constants:** type 0 packets write VS registers 12-27 and 248-251, and PS registers 0-19, 64-67 and 248-255 (rooftop). No list writes VS registers 0-11, so those, probably including the view and projection, have to come from the device.
+- **Bin masks:** the low 32 bits are tiles. The high bits pick a pass, and many objects come as a pair of buffers (flags `0x6801` and `0x6841`) for it. `DrawPasses` handles this, but the game's real pass select still has to be read live.
+
+So indirect command buffers still look possible for draw state, but each run needs the device's constants as well as its own, and that step isn't measured yet.
+
+**Direct Metal, not plume.** One game on one API doesn't need the abstraction, `tools/encode_bench.mm` already shows direct Metal is fast enough, and the design needs bindless textures and tight control of encoding.
+
 ## Shader trial (2026-10-31)
 
 Phase 1 ran XenosRecomp's Metal branch ([PR 22](https://github.com/hedge-dev/XenosRecomp/pull/22), commit `4906992`) over every shipped shader, first as it stands, then with this project's patch (`tools/shader-trial/xenosrecomp-crackdown.patch`).
@@ -415,6 +439,8 @@ Measure with the existing Metal harness (`experiments/menu-bench/harness/`):
 The output helps the emulator too: the per-shader gap shows how much cost is still emulation overhead in the SPIR-V translator, and which patterns are worth backporting.
 
 ### Phase 2: Native vertical slice (6-10 sessions)
+
+**Started:** the [baked buffer decoder](#baked-buffer-decoder-2026-10-31) is done offline.
 
 - Metal device, render thread and command queue. Choose plume's Metal backend or direct Metal with a small spike; direct is likely simpler for one game on one API.
 - Shadow-device reader, texture path (reusing SDK untile and format code), no-copy guest memory, vertex pulling or copy-and-swap decided by a spike.

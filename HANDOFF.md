@@ -1,5 +1,12 @@
 # Session handoff
 
+## 2026-10-31 (afternoon) — Phase 2 started: baked buffer decoder works offline, replay costs almost nothing
+- **Done:** `src/native/baked_buffer.cpp` decodes the game's precompiled command lists into compact records, and `tools/baked_bench.cpp` runs it on census data. It isn't in the game build yet.
+- **Result:** three scenes, no unknown packets, draw totals exact. Decoding everything once takes 2-3 ms, and replay 0.04-0.06 microseconds per draw before Metal, with about 100 constant dwords per draw. Each draw carries nearly all its state, so decoding happens once per list.
+- **Depends on outside state:** lists write many float constants themselves, but never VS registers 0-11, so those come from the device. The pass select in the high bin mask bits also has to be read live.
+- **Decision:** direct Metal, not plume.
+- **Next:** read this live. Hook `RunCommandBuffer` behind a default-off cvar, decode from guest memory, and measure the real cost of pulling device constants per run. Guest addresses at or above `0xE0000000` need `PhysicalHostOffset`, which is what hung the first live parser.
+
 ## 2026-10-31 (afternoon) — Phase 1 done: 382 shaders compile, 106 of 108 match the emulator, pixel shaders cost about a quarter
 - **Result:** with `tools/shader-trial/xenosrecomp-crackdown.patch`, all 382 shipped shaders compile. `pixel_diff.swift` compares the 108 that ran in the benchmark against the emulator from identical inputs: 100 exact, 7 close, 1 off, or 106 exact and 2 close once mip selection matches. Those costs are 25-28% of the emulator's at the median. Details are in `docs/native-rendering-survey.md`, section "Shader trial".
 - **Bugs found:** conditional exec blocks never tested their condition, and cube lookups ignored the source swizzle. Neither showed as an error, and the second only showed in the pixel comparison.
