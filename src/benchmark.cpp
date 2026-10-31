@@ -25,6 +25,8 @@ REXCVAR_DEFINE_BOOL(crackdown_benchmark, false, "Crackdown",
                     "Continue the saved game with a virtual pad, record frame times, write them and quit");
 REXCVAR_DEFINE_INT32(crackdown_benchmark_district, 1, "Crackdown",
                      "District the benchmark spawns in: 0 Agency, 1 Los Muertos, 2 Volk, 3 Shai-Gen");
+REXCVAR_DEFINE_INT32(crackdown_benchmark_supply_point, 0, "Crackdown",
+                     "Supply point the benchmark picks in its district, counted from the first");
 REXCVAR_DEFINE_INT32(crackdown_benchmark_warmup_seconds, 15, "Crackdown",
                      "Seconds in gameplay before the benchmark starts recording");
 REXCVAR_DEFINE_INT32(crackdown_benchmark_seconds, 20, "Crackdown", "Seconds of gameplay the benchmark records");
@@ -204,8 +206,12 @@ void Run(uint8_t* membase, std::filesystem::path output_dir) {
   for (int32_t i = 0; i < REXCVAR_GET(crackdown_benchmark_district); ++i) {
     Press(rex::input::X_INPUT_GAMEPAD_DPAD_DOWN);
   }
-  // The district, its first supply point, then the loadout.
-  for (int i = 0; i < 3; ++i) {
+  Press(rex::input::X_INPUT_GAMEPAD_A);
+  for (int32_t i = 0; i < REXCVAR_GET(crackdown_benchmark_supply_point); ++i) {
+    Press(rex::input::X_INPUT_GAMEPAD_DPAD_DOWN);
+  }
+  // The supply point, then the loadout.
+  for (int i = 0; i < 2; ++i) {
     Press(rex::input::X_INPUT_GAMEPAD_A);
   }
   REXLOG_INFO("Benchmark: warming up");
