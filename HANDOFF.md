@@ -1,5 +1,14 @@
 # Session handoff
 
+## 2026-10-31 (midday) — 21-minute city crossing: traversal stalls gone, 30 FPS most of the time
+- **Route:** Bruce crossed Los Muertos, The Volk and Shai Gen by car, on foot and over rooftops, in fullscreen (`crackdown_200.log`).
+- **Result (21 min of gameplay):** median 29.8 FPS, mean 28.0, 83% of seconds at 25 or more, 64% at 29 or more. No second under 12 FPS and no log gap over 1.5 s. The last long play on full swap (`crackdown_185.log`, 7 min) had mean 24.5, 12 seconds under 12 and 90 under 20; this run had 56 under 20 in three times the length. Swap stayed at 0. Per-second FPS can hide shorter hitches; Bruce noticed a few minor ones.
+- **Heat:** the fall from 28 to 16 FPS did not return. Every 5-minute block held a median of 29.6 or better, and the mean only moved from 28.4 to 27.3, while the full-swap session lost 5 FPS on average. So memory pressure, not throttling, looks like the main cause of that drop, though the two sessions are not a controlled comparison. The machine still needs watching in warmer conditions.
+- **Streaming:** 1.2 GB read in play, often a steady 4 MB/s. FPS was 29.5 while the disk was busy and 27.7 while quiet, so streaming isn't what slows it now. 109 pipelines were created, and only a few slow stretches overlapped any of them.
+- **What's left:** about 8 clusters of seconds under 22 FPS, the longest unbroken runs 15-19 s at 16-22 FPS, with no disk reads or paging behind them. Most have no pipeline creation either, so this looks like GPU load, consistent with the GPU sitting at 95-98%. Some of the worst start with a 15-80 MB rise in resident memory, but the 19 s stretch at 1209 s has none. Native rendering is the fix to aim at.
+- **Not retested:** Bruce closed the game while fullscreen, so leaving fullscreen as a flat colour trigger is still one sighting.
+- **Next:** GPU capture of a flat frame after leaving fullscreen, then Phase 1.
+
 ## 2026-10-31 (morning) — First play-test on clean swap: 29 FPS, no stalls
 - **Result:** about 3 minutes of gameplay on a cool machine (`crackdown_199.log`): median 29 FPS, mean 28, 5th percentile 22.5. No second under 12 FPS and no log gap over 1.5 s, against 12 such seconds in 8 minutes on full swap. Swap stayed at 0.
 - **Worst stretch:** 16-22 FPS for 8 seconds, about 85 s into gameplay. No disk reads, paging or pipeline creation lined up with it, so it was rendering load. Most of the run also shows the GPU at 97-98% busy.
