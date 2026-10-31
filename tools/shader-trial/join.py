@@ -38,6 +38,6 @@ vertex = [r for r in rows if r["msl"] and "-vs-" in r["msl"]]
 print("modules", len(rows), "with MSL", len(pixel) + len(vertex), "pixel", len(pixel), "vertex", len(vertex))
 print("pixel with shipped key", sum(1 for r in pixel if r["key"]), "unique", len({r["key"] for r in pixel if r["key"]}))
 print("vertex with shipped key", sum(1 for r in vertex if r["key"]))
-ok = {l.split("\t")[0] for l in open("compiled.tsv") if l.split("\t")[1] == "ok"}
+ok = {l.split("\t")[0] for l in open("compiled.tsv") if l.split("\t")[1].strip() == "ok"}
 print("pixel with compiled translation", sum(1 for r in pixel if r["key"] and "ps_" + r["key"] in ok))
 print("B20B230BE9FD2568", [r for r in rows if r["ucode"] == "B20B230BE9FD2568"][:2])

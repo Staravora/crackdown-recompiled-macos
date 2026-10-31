@@ -3,7 +3,7 @@
 Apple's GPUs skip fully covered pixels, so several opaque quads in one pass would only shade once."""
 import json, re, statistics, subprocess
 rows = [r for r in json.load(open("joined.json")) if r["msl"] and "-fs-" in r["msl"] and r["key"]]
-ok = {l.split("\t")[0] for l in open("compiled.tsv") if l.split("\t")[1] == "ok"}
+ok = {l.split("\t")[0] for l in open("compiled.tsv") if l.split("\t")[1].strip() == "ok"}
 rows = [r for r in rows if "ps_" + r["key"] in ok]
 print(len(rows), "pairs", flush=True)
 def run(binary, path):

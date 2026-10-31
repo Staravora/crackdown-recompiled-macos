@@ -76,20 +76,27 @@ index 9191a28..caf96a0 100644
  {
      uint index = cubeMapData->cubeMapIndex;
 diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
-index fd59693..f132137 100644
+index fd59693..2c73efe 100644
 --- a/XenosRecomp/shader_recompiler.cpp
 +++ b/XenosRecomp/shader_recompiler.cpp
-@@ -93,7 +93,8 @@ static constexpr DeclUsageLocation USAGE_LOCATIONS[] =
+@@ -93,7 +93,15 @@ static constexpr DeclUsageLocation USAGE_LOCATIONS[] =
      { DeclUsage::TexCoord, 5, 13 },
      { DeclUsage::TexCoord, 6, 14 },
      { DeclUsage::TexCoord, 7, 15 },
 -    { DeclUsage::Position, 1, 15 },
 +    { DeclUsage::Position, 1, 16 },
 +    { DeclUsage::Position, 2, 17 },
++    { DeclUsage::Position, 3, 18 },
++    { DeclUsage::Normal, 1, 19 },
++    { DeclUsage::Normal, 2, 20 },
++    { DeclUsage::Tangent, 1, 21 },
++    { DeclUsage::Binormal, 1, 22 },
++    { DeclUsage::Color, 2, 23 },
++    { DeclUsage::Color, 3, 24 },
  };
  
  static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
-@@ -115,7 +116,9 @@ static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
+@@ -115,7 +123,9 @@ static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
      { DeclUsage::TexCoord, 14 },
      { DeclUsage::TexCoord, 15 },
      { DeclUsage::Color, 0 },
@@ -100,7 +107,7 @@ index fd59693..f132137 100644
  };
  
  static constexpr std::string_view TEXTURE_DIMENSIONS[] = 
-@@ -130,6 +133,17 @@ static FetchDestinationSwizzle getDestSwizzle(uint32_t dstSwizzle, uint32_t inde
+@@ -130,6 +140,24 @@ static FetchDestinationSwizzle getDestSwizzle(uint32_t dstSwizzle, uint32_t inde
      return FetchDestinationSwizzle((dstSwizzle >> (index * 3)) & 0x7);
  }
  
@@ -115,10 +122,17 @@ index fd59693..f132137 100644
 +    return fmt::format("(1 << {})", bit);
 +}
 +
++void ShaderRecompiler::requireLoopConstant(uint32_t loopId)
++{
++    // Loop constants the shader doesn't define are set by the game, as count, start and step.
++    if (loopConstants.insert(loopId).second)
++        println("#define i{} (*(reinterpret_cast<device int4*>(g_PushConstants.SharedConstants + {})))", loopId, 512 + loopId * 16);
++}
++
  uint32_t ShaderRecompiler::printDstSwizzle(uint32_t dstSwizzle, bool operand)
  {
      uint32_t size = 0;
-@@ -177,6 +191,32 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+@@ -177,6 +205,32 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
          ++indentation;
      }
  
@@ -151,7 +165,7 @@ index fd59693..f132137 100644
      indent();
      print("r{}.", instr.dstRegister);
      uint32_t size = printDstSwizzle(instr.dstSwizzle, false);
-@@ -237,8 +277,36 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+@@ -237,8 +291,36 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
  
  void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicubic)
  {
@@ -170,14 +184,14 @@ index fd59693..f132137 100644
 +        return;
 +    case FetchOpcode::GetTextureGradients:
 +        warn("getGradients");
-+        return;
+         return;
 +    case FetchOpcode::SetTextureGradientsHorz:
 +    case FetchOpcode::SetTextureGradientsVert:
 +        warn("setTexGradients");
 +        return;
 +    default:
 +        warn("unknown fetch opcode");
-         return;
++        return;
 +    }
 +
 +    if (instr.srcRegisterAm)
@@ -189,7 +203,7 @@ index fd59693..f132137 100644
  
      if (instr.isPredicated)
      {
-@@ -258,13 +326,34 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -258,13 +340,34 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
                  out += SWIZZLES[((instr.srcSwizzle >> (i * 2))) & 0x3];
          };
  
@@ -225,7 +239,7 @@ index fd59693..f132137 100644
      if (findResult != samplers.end())
      {
          constNamePtr = findResult->second;
-@@ -275,7 +364,7 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -275,7 +378,7 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
      }
      else
      {
@@ -234,7 +248,7 @@ index fd59693..f132137 100644
          constNamePtr = constName.c_str();
      }
  
-@@ -325,7 +414,8 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -325,7 +428,8 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
      switch (instr.dimension)
      {
      case TextureDimension::Texture1D:
@@ -244,7 +258,7 @@ index fd59693..f132137 100644
          componentCount = 1;
          break;
      case TextureDimension::Texture2D:
-@@ -349,6 +439,24 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -349,6 +453,24 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
          out += "Bicubic";
  #endif
  
@@ -269,7 +283,7 @@ index fd59693..f132137 100644
      println("(");
  
      println("#ifdef __air__");
-@@ -360,10 +468,23 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -360,10 +482,23 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
  
      indent();
      print("\t{0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr, dimension);
@@ -294,7 +308,7 @@ index fd59693..f132137 100644
      case TextureDimension::Texture2D:
          print(", float2({}, {})", instr.offsetX * 0.5f, instr.offsetY * 0.5f);
          break;
-@@ -378,6 +499,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -378,6 +513,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
          break;
      }
  
@@ -304,7 +318,7 @@ index fd59693..f132137 100644
      out += ").";
  
      printDstSwizzle(instr.dstSwizzle, true);
-@@ -477,6 +601,8 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+@@ -477,6 +615,8 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
                  if (select)
                  {
                      abs = (reg & 0x80) != 0;
@@ -313,7 +327,7 @@ index fd59693..f132137 100644
                      reg &= 0x3F;
                  }
                  else
-@@ -489,6 +615,17 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+@@ -489,6 +629,17 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
  
              std::string regFormatted;
  
@@ -331,7 +345,7 @@ index fd59693..f132137 100644
              if (select)
              {
                  regFormatted = fmt::format("r{}", reg);
-@@ -511,18 +648,24 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+@@ -511,18 +662,24 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
                      #endif
                          {
                              regFormatted = fmt::format("{}({}{})", constantName,
@@ -359,7 +373,7 @@ index fd59693..f132137 100644
                      regFormatted = fmt::format("c{}", reg);
                  }
              }
-@@ -1378,8 +1521,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1378,8 +1535,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          }
      }
  
@@ -374,7 +388,7 @@ index fd59693..f132137 100644
      for (uint32_t i = 0; i < constantTableContainer->constantTable.constants; i++)
      {
          const auto constantInfo = reinterpret_cast<const ConstantInfo*>(
-@@ -1447,8 +1596,26 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1447,8 +1610,26 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          }
      }
  
@@ -401,7 +415,7 @@ index fd59693..f132137 100644
      println("cbuffer {}ShaderConstants : register(b{}, space4)", isPixelShader ? "Pixel" : "Vertex", isPixelShader ? 1 : 0);
      out += "{\n";
  
-@@ -1737,6 +1904,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1737,6 +1918,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      else
      {
          out += "#ifdef __air__\n";
@@ -412,7 +426,15 @@ index fd59693..f132137 100644
          out += "\tconstant PushConstants& g_PushConstants [[buffer(8)]],\n";
          out += "\tVertexShaderInput input [[stage_in]]\n";
          out += "#else\n";
-@@ -1901,6 +2072,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1828,6 +2013,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+                 println("\tint4 i{} = int4({}, {}, {}, {});",
+                     (definition->registerIndex - 8992) / 4 + i, x, y, z, w);
++                loopConstants.insert((definition->registerIndex - 8992) / 4 + i);
+             }
+             definitions += 2;
+             definitions += definition->count;
+@@ -1901,6 +2087,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      out += "\tint aL = 0;\n";
      out += "\tbool p0 = false;\n";
      out += "\tfloat ps = 0.0;\n";
@@ -420,7 +442,7 @@ index fd59693..f132137 100644
      if (isPixelShader)
      {
  #ifdef UNLEASHED_RECOMP
-@@ -1998,6 +2170,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1998,6 +2185,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      controlFlowCode = code;
      instrAddress = 0;
      uint32_t pc = 0;
@@ -428,7 +450,7 @@ index fd59693..f132137 100644
  
      while (instrAddress < instrSize)
      {
-@@ -2051,7 +2224,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -2051,7 +2239,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  address = cfInstr.condExec.address;
                  count = cfInstr.condExec.count;
                  sequence = cfInstr.condExec.sequence;
@@ -437,7 +459,32 @@ index fd59693..f132137 100644
                  break;
  
              case ControlFlowOpcode::CondExecPred:
-@@ -2115,11 +2288,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -2063,19 +2251,23 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                 break;
+ 
+             case ControlFlowOpcode::LoopStart:
++                requireLoopConstant(cfInstr.loopStart.loopId);
+                 if (simpleControlFlow)
+                 {
+                     indent();
++                    println("aL = i{}.y;", uint32_t(cfInstr.loopStart.loopId));
++                    indent();
+                 #ifdef UNLEASHED_RECOMP
+                     print("UNROLL ");
+                 #endif
+-                    println("for (aL = 0; aL < i{}.x; aL++)", uint32_t(cfInstr.loopStart.loopId));
++                    println("for (int loop{0} = 0; loop{0} < i{1}.x; loop{0}++, aL += i{1}.z)", pc, uint32_t(cfInstr.loopStart.loopId));
+                     indent();
+                     out += "{\n";
+                     ++indentation;
+                 }
+                 else 
+                 {
++                    warn("loop in complex control flow");
+                     out += "\t\t\taL = 0;\n";
+                 }
+                 break;
+@@ -2115,11 +2307,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                      }
                      else
                      {
@@ -450,7 +497,7 @@ index fd59693..f132137 100644
                      }
  
                      if (simpleControlFlow)
-@@ -2140,6 +2309,35 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -2140,6 +2328,35 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              }
              }
  
@@ -486,7 +533,7 @@ index fd59693..f132137 100644
              auto instructionCode = code + address * 3;
              
              for (uint32_t i = 0; i < count; i++)
-@@ -2275,6 +2473,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -2275,6 +2492,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  {
                      out += "\t\t\tbreak;\n";
                  }
@@ -502,7 +549,7 @@ index fd59693..f132137 100644
              }
          }
  
-@@ -2298,7 +2505,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -2298,7 +2524,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          out += "\toutput.oPos.xy += g_HalfPixelOffset * output.oPos.w;\n";
  #endif
  
@@ -512,7 +559,7 @@ index fd59693..f132137 100644
  #ifdef UNLEASHED_RECOMP
      else if (hasMtxProjection)
 diff --git a/XenosRecomp/shader_recompiler.h b/XenosRecomp/shader_recompiler.h
-index 4f468ec..018671e 100644
+index 4f468ec..e8502b8 100644
 --- a/XenosRecomp/shader_recompiler.h
 +++ b/XenosRecomp/shader_recompiler.h
 @@ -1,5 +1,7 @@
@@ -523,15 +570,16 @@ index 4f468ec..018671e 100644
  #include "shader.h"
  #include "shader_code.h"
  
-@@ -33,6 +35,7 @@ struct ShaderRecompiler : StringBuffer
+@@ -33,6 +35,8 @@ struct ShaderRecompiler : StringBuffer
      std::unordered_map<uint32_t, const char*> samplers;
      std::unordered_map<uint32_t, uint32_t> ifEndLabels;
      uint32_t specConstantsMask = 0;
 +    std::set<std::string> warnings;
++    std::set<uint32_t> loopConstants;
  
  #ifdef UNLEASHED_RECOMP
      bool hasMtxProjection = false;
-@@ -45,6 +48,14 @@ struct ShaderRecompiler : StringBuffer
+@@ -45,6 +49,15 @@ struct ShaderRecompiler : StringBuffer
              out += '\t';
      }
  
@@ -543,6 +591,7 @@ index 4f468ec..018671e 100644
 +    }
 +
 +    std::string boolMask(uint32_t address);
++    void requireLoopConstant(uint32_t loopId);
      uint32_t printDstSwizzle(uint32_t dstSwizzle, bool operand);
      void printDstSwizzle01(uint32_t dstRegister, uint32_t dstSwizzle);
  
