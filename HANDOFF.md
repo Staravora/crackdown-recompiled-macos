@@ -7,6 +7,8 @@
 - **Known problems, parked by Bruce's call:** the player goes under the map, the cursor stays on screen and stops it turning all the way round, and NPCs away from the player look like they drop to a reduced animation state (his guess, not traced). Good enough for direct draws; fix them when the camera next gets in the way. For the turning limit, look at how `src/mouse_look.cpp` handles the cursor first.
 - **Checked:** full detail with the camera 480 units away, mid-play and from the start flag. Freeze Time held a car in place for 20 seconds. `cheat_menu_tests` and `launcher_pages_tests` pass, after adding the new rows to the layout test.
 - **Not checked:** saved spots and a camera over tall ground. Windows, Linux and the title update 6 guest aren't built; the hook points are shared by name, but `CameraUpdate` and `SimulationUpdate` weren't run there.
+- **Backup:** private GitLab repo `zuhl_dev/crackdown-recompiled-macos`, remote `gitlab`, which `macos-arm64` tracks, so a plain `git push` goes there. `origin` is still Saulo's public repo: don't push to it. The repo holds no game files or SDK checkout. gitleaks flags three lines in Saulo's first commit, all false alarms: a key-code range in `src/keybinds.h` and two public signing-key fingerprints in `tools/setup-linux-build-env.sh`.
+- **Publishing plan, Bruce's call on each step:** a public GitHub fork once a stranger can build and play from a clean checkout on a Mac, then tell Saulo. Before any Mac download, check how his releases handle the recompiled game code. GPL-2.0-only requires source and a record of changes.
 - **Next:** direct draws, now testable from any spot, then pixel shaders and textures through the page watch.
 
 ## 2026-10-31 (night) — Every baked pass drawn to its own target
