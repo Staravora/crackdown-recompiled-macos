@@ -194,6 +194,35 @@ void TestAnImpossibleShaderSizeIsIgnored() {
   CHECK(library.Decode(words.data(), words.size()).draws[0].vertex_shader == 0x1000);
 }
 
+void TestAVertexShaderInsideTheRingComesWithItsCode() {
+  BakedLibrary library;
+  std::vector<uint32_t> words;
+  AddVertexShader(words, 0x1000, 90);
+  words.insert(words.end(), {Packet(0x2B, 5), 0, 3, 0xAAAAAAAA, 0xBBBBBBBB, 0xCCCCCCCC});
+  AddDraw(words, 0x2000);
+  const RingRead read = ReadRing(library, words);
+  CHECK(read.draws[0].vertex_shader == 0);
+  CHECK(read.draws[0].vertex_shader_dwords == 3);
+  CHECK(library.TakeVertexShaderLoaded());
+  CHECK(library.inline_vertex_shader().size() == 3);
+  CHECK(library.inline_vertex_shader()[2] == 0xCCCCCCCC);
+
+  std::vector<uint32_t> next;
+  AddVertexShader(next, 0x1100, 90);
+  AddDraw(next, 0x3000);
+  CHECK(ReadRing(library, next).draws[0].vertex_shader == 0x1100);
+  CHECK(library.inline_vertex_shader().empty());
+}
+
+void TestAPixelShaderInsideTheRingLeavesTheVertexShaderAlone() {
+  BakedLibrary library;
+  std::vector<uint32_t> words;
+  AddVertexShader(words, 0x1000, 90);
+  words.insert(words.end(), {Packet(0x2B, 3), 1, 1, 0xAAAAAAAA});
+  AddDraw(words, 0x2000);
+  CHECK(ReadRing(library, words).draws[0].vertex_shader == 0x1000);
+}
+
 void TestADrawWithoutAnIndexBufferReadsNoFurther() {
   BakedLibrary library;
   const std::vector<uint32_t> words = {Packet(0x22, 2), 0, 0x00040086, Packet(0x2F, 3), 0xAAAA, 0, 16};
@@ -216,6 +245,8 @@ int main() {
   TestTheRingLoadsConstantsFromMemoryAsTheGpuWould();
   TestTheRingSetsRegistersWithSetConstant();
   TestAnImpossibleShaderSizeIsIgnored();
+  TestAVertexShaderInsideTheRingComesWithItsCode();
+  TestAPixelShaderInsideTheRingLeavesTheVertexShaderAlone();
   TestADrawWithoutAnIndexBufferReadsNoFurther();
   return check::Finish("baked_buffer_tests");
 }

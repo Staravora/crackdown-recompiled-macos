@@ -227,17 +227,26 @@ size_t BakedLibrary::DecodeWords(const uint32_t* words, size_t count, BakedList&
           state_.vertex_shader_dwords = data[1] & 0xFFFF;
           literals_open_[0] = false;
           vertex_shader_loaded_ = true;
+          inline_vertex_shader_.clear();
         } else {
           state_.pixel_shader = data[0] & ~3u;
           literals_open_[1] = false;
         }
         break;
       case kOpShaderLoadInline:
-        // Its code lives in the ring, gone by the time a frame is drawn, so these draws are counted as having no shader.
+        // The code follows in the packet. A list can keep it, but nothing here reads that yet, so those draws count as
+        // having no shader.
         if ((data[0] & 3) == 0) {
+          const uint32_t dwords = data[1] & 0xFFFF;
+          const bool usable = from_ring && dwords + 2 <= body;
           state_.vertex_shader = 0;
-          state_.vertex_shader_dwords = 0;
+          state_.vertex_shader_dwords = usable ? dwords : 0;
           literals_open_[0] = false;
+          vertex_shader_loaded_ = true;
+          inline_vertex_shader_.clear();
+          if (usable) {
+            inline_vertex_shader_.assign(data + 2, data + 2 + dwords);
+          }
         } else {
           state_.pixel_shader = 0;
           literals_open_[1] = false;

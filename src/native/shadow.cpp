@@ -71,6 +71,9 @@ constexpr uint32_t kDepthWrite = 1 << 2;
 constexpr uint32_t kBlendDestinationShift = 8;
 constexpr uint32_t kBlendFactorMask = 0x1F;
 constexpr uint32_t kBlendFactorZero = 0;
+constexpr uint32_t kBlendFactorOne = 1;
+constexpr uint32_t kColorMaskFirstTarget = 0xF;
+constexpr uint32_t kAlphaTestEnable = 1 << 3;
 constexpr uint32_t kIndexEndianShift = 30;
 constexpr uint32_t kIndexEndian16 = 1;
 constexpr uint32_t kIndexEndian32 = 2;
@@ -101,6 +104,8 @@ struct Totals {
   uint64_t other_primitive_draws = 0;
   uint64_t other_index_order_draws = 0;
   uint64_t transparent_draws = 0;
+  uint64_t no_color_draws = 0;
+  uint64_t alpha_tested_draws = 0;
   uint64_t index_copy_ns = 0;
   uint64_t shaders_found = 0;
   uint64_t shaders_missing = 0;
@@ -352,11 +357,21 @@ bool InsideTarget(const MetalViewport& viewport, const Targets& targets) {
          viewport.x + viewport.width <= float(targets.width) + 1 && viewport.y + viewport.height <= float(targets.height) + 1;
 }
 
-// Blending with what's already there, without writing depth.
-bool IsTransparent(const BakedDraw& draw) {
-  const bool writes_depth = (draw.depth_control & kDepthEnable) && (draw.depth_control & kDepthWrite);
+// What a grey picture has to leave out or it paints a solid sheet: without pixel shaders, a draw that writes no depth is
+// either blended over what's there or writes no colour at all, as a stencil shadow does. The sky writes neither depth nor
+// blends, so it stays.
+bool WritesDepth(const BakedDraw& draw) {
+  return (draw.depth_control & kDepthEnable) && (draw.depth_control & kDepthWrite);
+}
+
+bool IsBlended(const BakedDraw& draw) {
+  const uint32_t source_factor = draw.blend_control & kBlendFactorMask;
   const uint32_t destination_factor = (draw.blend_control >> kBlendDestinationShift) & kBlendFactorMask;
-  return !writes_depth && destination_factor != kBlendFactorZero;
+  return source_factor != kBlendFactorOne || destination_factor != kBlendFactorZero;
+}
+
+bool WritesNoColor(const BakedDraw& draw) {
+  return (draw.color_mask & kColorMaskFirstTarget) == 0;
 }
 
 // A depth test that passes on greater-or-equal means reversed depth, which clears to 0.
@@ -382,10 +397,16 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         }
         ++g_totals.draws;
         ApplyLiterals(draw);
-        // Without pixel shaders these would be solid sheets, not the light and glass they are.
-        if (IsTransparent(draw)) {
-          ++g_totals.transparent_draws;
-          continue;
+        g_totals.alpha_tested_draws += (draw.color_control & kAlphaTestEnable) != 0;
+        if (!WritesDepth(draw) && run.targets.color) {
+          if (WritesNoColor(draw)) {
+            ++g_totals.no_color_draws;
+            continue;
+          }
+          if (IsBlended(draw)) {
+            ++g_totals.transparent_draws;
+            continue;
+          }
         }
         const uint32_t primitive = draw.initiator & 0x3F;
         const uint32_t source = (draw.initiator >> 6) & 3;
@@ -504,7 +525,7 @@ void Report(const MetalDevice& device) {
   std::ofstream out(g_path);
   out << fmt::format(
       R"({{"guest_frames":{},"frames":{},"dropped":{},"draws_per_frame":{:.1f},"skipped_draws_per_frame":{:.1f},"no_room":{},)"
-      R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"no_target_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},"other_index_order_draws_per_frame":{:.1f},"transparent_draws_per_frame":{:.1f},"direct_draws_per_frame":{:.1f},"ring_desyncs":{},"passes_per_frame":{:.1f},"targets":{},)"
+      R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"no_target_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},"other_index_order_draws_per_frame":{:.1f},"transparent_draws_per_frame":{:.1f},"no_color_draws_per_frame":{:.1f},"alpha_tested_draws_per_frame":{:.1f},"direct_draws_per_frame":{:.1f},"ring_desyncs":{},"passes_per_frame":{:.1f},"targets":{},)"
       R"("shaders_found":{},"shaders_missing":{},"shaders_failed":{},"index_copy_ms_per_frame":{:.3f},)"
       R"("capture_ms_per_frame":{:.4f},"wait_ms_per_frame":{:.3f},"encode_ms_p50":{:.3f},"encode_ms_p95":{:.3f},"encode_ms_max":{:.3f},)"
       R"("gpu_frames":{},"gpu_errors":{},"gpu_ms_per_frame":{:.3f},"gpu_ms_worst":{:.3f},)"
@@ -512,7 +533,7 @@ void Report(const MetalDevice& device) {
       guest_frames, g_totals.frames, dropped, g_totals.draws / frames, g_totals.skipped_draws / frames, g_totals.no_room,
       g_totals.recorded_draws / frames, g_totals.recorded_indices / frames, g_totals.no_shader_draws / frames,
       g_totals.no_target_draws / frames, g_totals.other_primitive_draws / frames, g_totals.other_index_order_draws / frames,
-      g_totals.transparent_draws / frames, direct_draws / double(std::max<uint64_t>(guest_frames, 1)), ring_desyncs,
+      g_totals.transparent_draws / frames, g_totals.no_color_draws / frames, g_totals.alpha_tested_draws / frames, direct_draws / double(std::max<uint64_t>(guest_frames, 1)), ring_desyncs,
       g_totals.passes / frames, g_targets.size(), g_totals.shaders_found, g_totals.shaders_missing, g_totals.shaders_failed,
       g_totals.index_copy_ns / 1e6 / frames,
       capture_ns / 1e6 / double(std::max<uint64_t>(guest_frames, 1)), g_totals.wait_ns / 1e6 / frames,

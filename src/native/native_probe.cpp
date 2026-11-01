@@ -182,10 +182,18 @@ shadow::Targets TargetsOf(uint32_t device, const uint8_t* base) {
 }
 
 void OnRingDraw(uint32_t device, const uint8_t* base, const BakedDraw& draw, const uint32_t* fetch_constants) {
-  // A shader bound to a new vertex format is patched into a copy in the ring, which has moved on by the time a frame is
-  // drawn, so the code goes along with the draw.
+  // A shader bound to a new vertex format is patched into a copy in the ring, or into the packet itself, and both have
+  // moved on by the time a frame is drawn, so the code goes along with the draw.
   if (g_ring.TakeVertexShaderLoaded()) {
-    if (const uint8_t* code = HostOfList(draw.vertex_shader, draw.vertex_shader_dwords)) {
+    const std::vector<uint32_t>& inline_code = g_ring.inline_vertex_shader();
+    if (!inline_code.empty()) {
+      std::vector<uint8_t> code(inline_code.size() * 4);
+      for (size_t i = 0; i < inline_code.size(); ++i) {
+        const uint32_t word = std::byteswap(inline_code[i]);
+        std::memcpy(code.data() + i * 4, &word, sizeof(word));
+      }
+      g_vertex_code = std::make_shared<const std::vector<uint8_t>>(std::move(code));
+    } else if (const uint8_t* code = HostOfList(draw.vertex_shader, draw.vertex_shader_dwords)) {
       g_vertex_code = std::make_shared<const std::vector<uint8_t>>(code, code + size_t(draw.vertex_shader_dwords) * 4);
     } else {
       g_vertex_code = nullptr;

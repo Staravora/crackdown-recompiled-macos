@@ -323,7 +323,9 @@ Shadow mode now records direct draws alongside baked ones, in the order the game
 
 **How they're read: as a stream, the way the GPU reads them.** D3D's ring holds everything the GPU will do, as only what changed, in the packets the baked decoder already knows. `BakedLibrary::DecodeRing` keeps its registers between calls and does what the GPU would to them, including `SET_CONSTANT` and loads from memory, so it always knows what the GPU would hold. Commands sit in contiguous segments, from `device + 14552` to the write pointer at `device + 48`, and D3D keeps its transient data, such as patched shaders and vertices, in the same memory between them. `826BB1A0` closes a segment, so a hook there reads the rest of it first. The stream is read after every draw and before every baked run, which keeps the two in order. Nothing about the device's layout had to be worked out beyond those fields. A takeover removes the ring, so this is a shadow mode shortcut: the same state has to come from the device then.
 
-**Reading a span around each draw call didn't work.** That was the first version, and it looked right until a drive. A span could hold a stretch of other work, including transient data, so a draw call's words weren't always its own. Only the last draw was kept, and parsing stopped at the data. That lost draws, constants and whole objects, and left registers stale. Bruce's drive showed cars thrown apart and flickering.
+**Reading a span around each draw call didn't work.** That was the first version, and it looked right until a drive. A span could hold a stretch of other work, including transient data, so a draw call's words weren't always its own. Only the last draw was kept, and parsing stopped at the data. That lost draws, constants and whole objects, and left registers stale, which showed as flicker.
+
+**The exploded cars were embedded shaders.** Vehicles grew tents of flat sheets, fixed to them, with the bodies otherwise correct. D3D can put a patched vertex shader inside the ring as `IM_LOAD_IMMEDIATE`, and those draws were left with the previous draw's shader and its vertex layout, so they read their vertices at the wrong stride. `DecodeRing` now keeps that code and it travels with the draw. Finding it took Bruce's observation that the bodies were fine and the sheets stayed attached, then a build that coloured each draw by its number, so a pixel of a sheet named its draw. Stale constants, the first guess, weren't the cause, and neither was the targeting glow. Several minutes of driving showed no more of them.
 
 **Other things that were found the hard way:**
 
@@ -332,22 +334,22 @@ Shadow mode now records direct draws alongside baked ones, in the order the game
 - **Binding also rewrites each fetch's destination swizzle**, for example to swap red and blue or to force W to 1. The hash now ignores it, and the translated shaders, which are fixed to the shipped swizzle, get a per-element remap (`select`) built from the shipped and live swizzles. **That changed `manifest.txt` and the metallibs:** rerun `pull_vertices.py` after updating, and old shaders won't work with this build. 177 shaders now, down from 191, since some differed only in swizzle.
 - **One shader can load several blocks of literals,** and the baked decoder kept only the last, so some baked draws had partly wrong constants. It now keeps up to six, per stage. No difference in the picture was looked for.
 - **Surfaces know their size.** `surface + 36` holds width and height, and a tiled surface holds one tile, so the tile rects give the whole height. Targets are keyed on the surfaces and no longer guessed from viewports, which gave up to 53 targets in place of 3.
-- **Transparent draws are left out of the grey view.** A blended draw that doesn't write depth comes out as a solid sheet with no pixel shader: a spiky wedge across the player turned out to be one, alpha blended with depth writes off.
+- **Effect draws are left out of the grey view.** A draw that writes no depth and is blended, or writes no colour at all, comes out as a solid sheet with no pixel shader: a spiky wedge across the player turned out to be one, alpha blended with depth writes off. The sky writes no depth and isn't blended, so it stays. About 40 alpha-tested draws a frame stay too, since only a pixel shader can cut them out, so foliage and fences show as solid planes.
 
 **Ruled out for the flicker:** reading late. Holding the game at each frame's end until Metal finished didn't change it. With time frozen and the camera still, the old build jumped by about 100,000 pixels every so often, because the sky dome came and went. The stream build held 1,500-2,300 pixels between all eight frozen pairs, which is pedestrians, who don't freeze. A few draws a frame were also going to bogus targets.
 
 | Rooftop, one run, last 300 frames | |
 | --- | --- |
-| Drawn | 4,149 draws, 2,878 of them direct, 1.99 million indices, 5 passes, 3 targets |
-| Left out as transparent | 236 |
+| Drawn | About 4,000 draws, 2,716 of them direct, about 2 million indices, 5 passes, 3 targets |
+| Left out as blended, or writing no colour | 233, 11 |
 | Left out as not indexed lists or strips | 342 |
-| No matching shader | 1 |
+| No matching shader | 0, with 1 shader unmatched |
 | No target | 0 |
 | Ring parse errors | 0 |
-| Render thread, recording, p50 | 3.5 ms |
-| Game thread, capture | 0.88 ms |
+| Render thread, recording, p50 | 3.5 ms, measured before embedded shaders |
+| Game thread, capture | 0.88 ms, measured before embedded shaders |
 | GPU errors | 0 |
-| Dropped frames | 4 in the run |
+| Dropped frames | 3 in the last 300 |
 
 Before the stream, 2,380 direct draws were captured a frame on the same spot. The interleaved cost below was measured on that earlier build and hasn't been repeated:
 
@@ -362,7 +364,6 @@ The Air warmed through those runs, so compare each pair rather than the rows: on
 
 **Other limits:**
 
-- **Cars haven't been rechecked in a drive with the stream.** No scripted spot had traffic in view, so stale constants are the likely cause of the thrown-apart cars, not a proven one.
 - Vertex data is read a frame late from live memory, so a buffer rewritten every frame could tear. Nothing has been seen to do so.
 - Baked shaders are cached by address, so one streamed out and replaced at the same address would stay wrong.
 - The hook on `826BB1A0` is bound for the base guest only. The title update 6 guest hasn't got it, and these device offsets haven't been checked there.

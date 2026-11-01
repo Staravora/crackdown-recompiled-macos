@@ -90,6 +90,9 @@ class BakedLibrary {
   // Whether a vertex shader has loaded since this was last asked.
   bool TakeVertexShaderLoaded() { return std::exchange(vertex_shader_loaded_, false); }
 
+  // The vertex shader's code, in host order, if it came inside the ring and not from an address.
+  const std::vector<uint32_t>& inline_vertex_shader() const { return inline_vertex_shader_; }
+
   // The vertex constants DecodeRing has seen, as the GPU would hold them.
   const uint32_t* vertex_constants() const { return registers_.data() + (kFloatConstantRegister - kRegisterBase); }
 
@@ -116,6 +119,7 @@ class BakedLibrary {
   BakedDraw state_{};
   bool literals_open_[2] = {};
   bool vertex_shader_loaded_ = false;
+  std::vector<uint32_t> inline_vertex_shader_;
   uint64_t mask_ = ~0ull;
   DecodeStats stats_;
 };
