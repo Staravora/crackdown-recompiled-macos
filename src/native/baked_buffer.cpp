@@ -20,6 +20,8 @@ constexpr uint32_t kModeControl = 0x2208;
 constexpr uint32_t kFloatConstants = 0x4000;
 constexpr uint32_t kFetchConstants = 0x4800;
 constexpr uint32_t kFetchDwords = 32 * 6;
+constexpr uint32_t kBoolConstants = 0x4900;
+constexpr uint32_t kPixelBoolConstants = 0x4904;
 
 constexpr uint32_t kOpDraw = 0x22;
 constexpr uint32_t kOpShaderLoad = 0x27;
@@ -57,6 +59,7 @@ BakedList BakedLibrary::Decode(const uint32_t* words, size_t count) {
   uint64_t mask = ~0ull;
   BakedDraw state{};
   uint32_t first_constant_write = 0;
+  uint32_t last_texture_set = ~0u;
 
   size_t at = 0;
   while (at < count) {
@@ -119,7 +122,12 @@ BakedList BakedLibrary::Decode(const uint32_t* words, size_t count) {
         state.literal_dwords = uint16_t(data[2] & 0xFFF);
         break;
       case kOpShaderLoad:
-        ((data[0] & 3) == 0 ? state.vertex_shader : state.pixel_shader) = data[0] & ~3u;
+        if ((data[0] & 3) == 0) {
+          state.vertex_shader = data[0] & ~3u;
+          state.vertex_shader_dwords = data[1] & 0xFFFF;
+        } else {
+          state.pixel_shader = data[0] & ~3u;
+        }
         break;
       case kOpWaitRegister:
         // A cache flush handshake, which a native renderer doesn't have.
@@ -131,6 +139,8 @@ BakedList BakedLibrary::Decode(const uint32_t* words, size_t count) {
         draw.index_buffer = data[2];
         draw.index_info = data[3];
         draw.index_offset = reg(kIndexOffset);
+        draw.booleans = (reg(kBoolConstants) & 0xFFFF) | (reg(kPixelBoolConstants) << 16);
+        draw.depth_control = reg(kDepthControl);
 
         // Formats and sample counts only: the EDRAM bases and pitches aren't pipeline state.
         uint64_t pipeline = 0xCBF29CE484222325ull;
@@ -152,6 +162,11 @@ BakedList BakedLibrary::Decode(const uint32_t* words, size_t count) {
           texture_set_data_.insert(texture_set_data_.end(), &reg(kFetchConstants),
                                    &reg(kFetchConstants) + kFetchDwords);
         }
+        if (draw.textures != last_texture_set) {
+          last_texture_set = draw.textures;
+          list.fetch_data.insert(list.fetch_data.end(), &reg(kFetchConstants), &reg(kFetchConstants) + kFetchDwords);
+        }
+        draw.fetch_constants = uint32_t(list.fetch_data.size() / kFetchDwords) - 1;
 
         uint64_t dynamic = 0xCBF29CE484222325ull;
         dynamic = HashRange(dynamic, &reg(0x200E), 2);    // Screen scissor.

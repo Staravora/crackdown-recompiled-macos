@@ -15,6 +15,7 @@ struct BakedDraw {
   uint32_t textures;  // Interned fetch constants.
   uint32_t dynamic;   // Interned viewport, scissor and references.
   uint32_t vertex_shader;
+  uint32_t vertex_shader_dwords;
   uint32_t pixel_shader;
   uint32_t literals;  // Guest address of the shader's literal constants.
   uint16_t literal_register;
@@ -23,6 +24,9 @@ struct BakedDraw {
   uint32_t index_info;
   uint32_t initiator;
   uint32_t index_offset;
+  uint32_t booleans;  // Bool constants 0-15 of each stage, as XenosRecomp's shaders read them.
+  uint32_t depth_control;
+  uint32_t fetch_constants;  // Index of this draw's 32 fetch constants in BakedList::fetch_data.
   uint64_t mask;  // Low half: tiles. High half: which pass this draw belongs to.
   uint32_t first_constant_write;
   uint32_t constant_writes;
@@ -40,6 +44,7 @@ struct BakedList {
   std::vector<BakedDraw> draws;
   std::vector<BakedConstantWrite> constant_writes;
   std::vector<uint32_t> constant_data;
+  std::vector<uint32_t> fetch_data;
 };
 
 struct DecodeStats {

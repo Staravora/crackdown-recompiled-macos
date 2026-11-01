@@ -1,5 +1,10 @@
+#import <AppKit/AppKit.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
+#import <ImageIO/ImageIO.h>
 #import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <dispatch/dispatch.h>
 
 #include <algorithm>
@@ -7,6 +12,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <map>
+#include <vector>
 
 #include "metal_device.h"
 
@@ -15,88 +22,173 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-constexpr NSUInteger kGuestBuffer = 0;
-constexpr NSUInteger kConstantBuffer = 1;
+constexpr NSUInteger kPushConstants = 8;
+constexpr NSUInteger kGuestBuffer = 9;
+constexpr NSUInteger kFetchBuffer = 10;
+constexpr NSUInteger kElementsBuffer = 11;
 constexpr NSUInteger kTargetWidth = 1280;
 constexpr NSUInteger kTargetHeight = 720;
+constexpr size_t kElementsBytes = 1 << 20;
+constexpr int kDescriptorHeaps = 4;
 
-// Every vertex lands outside the clip volume, so these draws cost recording and no pixels.
-const char* kPlaceholderSource = R"(
+constexpr uint32_t kDepthEnable = 1 << 1;
+constexpr uint32_t kDepthWrite = 1 << 2;
+constexpr uint32_t kDepthFunctionShift = 4;
+
+// Grey clay: light from the slope of the depth, since there are no normals or textures to go on yet.
+const char* kClaySource = R"(
 #include <metal_stdlib>
 using namespace metal;
-constant int kVariant [[function_constant(0)]];
-struct VertexOut { float4 position [[position]]; };
-vertex VertexOut placeholder_vertex(constant float4* constants [[buffer(1)]]) {
-  VertexOut out;
-  out.position = float4(2.0, 2.0, 2.0, 1.0) + constants[0] * 0.0;
-  return out;
-}
-fragment float4 placeholder_fragment(constant float4* constants [[buffer(1)]]) {
-  return constants[0] * (1.0 + float(kVariant) * 0.0001);
+fragment float4 clay_fragment(float4 position [[position]]) {
+  float distance = 1.0 / position.w;
+  float3 normal = normalize(float3(-dfdx(distance), -dfdy(distance), 0.02));
+  float light = 0.25 + 0.75 * saturate(dot(normal, normalize(float3(0.3, 0.6, 0.75))));
+  return float4(float3(light), 1.0);
 }
 )";
+
+struct PushConstants {
+  uint64_t vertex;
+  uint64_t pixel;
+  uint64_t shared;
+};
 
 uint64_t Since(Clock::time_point start) {
   return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
 }
 
+MTLCompareFunction CompareFunction(uint32_t xenos) {
+  // Xenos numbers these as Metal's in the same order: never, less, equal, less-equal, greater, not-equal,
+  // greater-equal, always. Metal's enum runs never, less, equal, less-equal, greater, not-equal, greater-equal, always.
+  return MTLCompareFunction(xenos & 7);
+}
+
+void WritePng(const std::filesystem::path& path, const void* pixels, size_t width, size_t height) {
+  CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+  CGContextRef context = CGBitmapContextCreate(const_cast<void*>(pixels), width, height, 8, width * 4, space,
+                                               CGBitmapInfo(kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst));
+  CGImageRef image = CGBitmapContextCreateImage(context);
+  NSURL* url = [NSURL fileURLWithPath:@(path.c_str())];
+  CGImageDestinationRef destination =
+      CGImageDestinationCreateWithURL((__bridge CFURLRef)url, (__bridge CFStringRef)UTTypePNG.identifier, 1, nullptr);
+  if (destination && image) {
+    CGImageDestinationAddImage(destination, image, nullptr);
+    CGImageDestinationFinalize(destination);
+  }
+  if (destination) {
+    CFRelease(destination);
+  }
+  CGImageRelease(image);
+  CGContextRelease(context);
+  CGColorSpaceRelease(space);
+}
+
 class MetalDeviceImpl final : public MetalDevice {
  public:
-  bool Initialize(uint8_t* guest_memory, size_t guest_bytes, size_t constant_bytes) {
+  bool Initialize(uint8_t* guest_memory, size_t guest_bytes, size_t frame_bytes) {
     device_ = MTLCreateSystemDefaultDevice();
     if (!device_) {
       return false;
     }
     queue_ = [device_ newCommandQueue];
     guest_memory_ = guest_memory;
-    guest_ = [device_ newBufferWithBytesNoCopy:guest_memory
-                                        length:guest_bytes
-                                       options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked
-                                   deallocator:nil];
-    for (size_t i = 0; i < constants_.size(); ++i) {
-      constants_[i] = [device_ newBufferWithLength:constant_bytes
-                                           options:MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined |
-                                                   MTLResourceHazardTrackingModeUntracked];
+    const MTLResourceOptions untracked = MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked;
+    guest_ = [device_ newBufferWithBytesNoCopy:guest_memory length:guest_bytes options:untracked deallocator:nil];
+    for (size_t i = 0; i < frames_.size(); ++i) {
+      frames_[i] = [device_ newBufferWithLength:frame_bytes options:untracked | MTLResourceCPUCacheModeWriteCombined];
     }
+    elements_ = [device_ newBufferWithLength:kElementsBytes options:untracked];
 
-    MTLTextureDescriptor* target = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                                      width:kTargetWidth
-                                                                                     height:kTargetHeight
-                                                                                  mipmapped:NO];
-    target.usage = MTLTextureUsageRenderTarget;
-    target.storageMode = MTLStorageModePrivate;
-    target_ = [device_ newTextureWithDescriptor:target];
+    MTLTextureDescriptor* color = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                     width:kTargetWidth
+                                                                                    height:kTargetHeight
+                                                                                 mipmapped:NO];
+    color.usage = MTLTextureUsageRenderTarget;
+    color.storageMode = MTLStorageModePrivate;
+    color_ = [device_ newTextureWithDescriptor:color];
+    MTLTextureDescriptor* depth = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                                                     width:kTargetWidth
+                                                                                    height:kTargetHeight
+                                                                                 mipmapped:NO];
+    depth.usage = MTLTextureUsageRenderTarget;
+    depth.storageMode = MTLStorageModePrivate;
+    depth_ = [device_ newTextureWithDescriptor:depth];
 
     NSError* error = nil;
-    id<MTLLibrary> library = [device_ newLibraryWithSource:@(kPlaceholderSource) options:nil error:&error];
+    id<MTLLibrary> library = [device_ newLibraryWithSource:@(kClaySource) options:nil error:&error];
     if (!library) {
       return false;
     }
-    id<MTLFunction> vertex = [library newFunctionWithName:@"placeholder_vertex"];
-    for (uint32_t i = 0; i < kPipelines; ++i) {
-      int variant = int(i);
-      MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
-      [values setConstantValue:&variant type:MTLDataTypeInt atIndex:0];
-      id<MTLFunction> fragment = [library newFunctionWithName:@"placeholder_fragment" constantValues:values error:&error];
-      if (!fragment) {
-        return false;
-      }
-      MTLRenderPipelineDescriptor* pipeline = [MTLRenderPipelineDescriptor new];
-      pipeline.vertexFunction = vertex;
-      pipeline.fragmentFunction = fragment;
-      pipeline.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-      pipelines_[i] = [device_ newRenderPipelineStateWithDescriptor:pipeline error:&error];
-      if (!pipelines_[i]) {
-        return false;
-      }
-    }
-    slots_ = dispatch_semaphore_create(kFramesInFlight);
-    return true;
+    clay_ = [library newFunctionWithName:@"clay_fragment"];
+    return CreateDescriptorHeaps() && (slots_ = dispatch_semaphore_create(kFramesInFlight)) != nil;
   }
 
   bool guest_memory_wrapped() const override { return guest_ != nil; }
 
-  MetalFrameTiming RecordFrame(const std::function<void(uint8_t* constants)>& encode) override {
+  void ShowWindow() override {
+    CAMetalLayer* layer = [CAMetalLayer layer];
+    layer.device = device_;
+    layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    layer.framebufferOnly = NO;
+    layer.drawableSize = CGSizeMake(kTargetWidth, kTargetHeight);
+    layer.displaySyncEnabled = NO;
+    layer.contentsGravity = kCAGravityResizeAspect;
+    layer_ = layer;
+    // AppKit is the main thread's. orderFront leaves the keyboard with the game.
+    dispatch_async(dispatch_get_main_queue(), ^{
+      NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(60, 60, 640, 360)
+                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskResizable |
+                                                               NSWindowStyleMaskMiniaturizable
+                                                       backing:NSBackingStoreBuffered
+                                                         defer:NO];
+      window.title = @"Crackdown: Metal shadow";
+      window.releasedWhenClosed = NO;
+      window.contentView.layer = layer;
+      window.contentView.wantsLayer = YES;
+      [window orderFront:nil];
+      window_ = window;
+    });
+  }
+
+  int AddVertexShader(const std::filesystem::path& path, const MetalPullElement* elements, size_t count,
+                      std::string& error) override {
+    @autoreleasepool {
+      const size_t bytes = count * sizeof(MetalPullElement);
+      if (elements_used_ + bytes > kElementsBytes) {
+        error = "no room for vertex elements";
+        return -1;
+      }
+      NSError* failure = nil;
+      id<MTLLibrary> library = [device_ newLibraryWithURL:[NSURL fileURLWithPath:@(path.c_str())] error:&failure];
+      if (!library) {
+        error = failure.localizedDescription.UTF8String;
+        return -1;
+      }
+      MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
+      id<MTLFunction> vertex = [library newFunctionWithName:@"shaderMain" constantValues:values error:&failure];
+      if (!vertex) {
+        error = failure.localizedDescription.UTF8String;
+        return -1;
+      }
+      MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
+      descriptor.vertexFunction = vertex;
+      descriptor.fragmentFunction = clay_;
+      descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+      descriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+      id<MTLRenderPipelineState> pipeline = [device_ newRenderPipelineStateWithDescriptor:descriptor error:&failure];
+      if (!pipeline) {
+        error = failure.localizedDescription.UTF8String;
+        return -1;
+      }
+      std::memcpy(static_cast<uint8_t*>(elements_.contents) + elements_used_, elements, bytes);
+      pipelines_.push_back({pipeline, elements_used_});
+      elements_used_ += bytes;
+      return int(pipelines_.size()) - 1;
+    }
+  }
+
+  MetalFrameTiming RecordFrame(const std::function<void(uint8_t* frame)>& encode,
+                               const std::filesystem::path& capture) override {
     MetalFrameTiming timing;
     @autoreleasepool {
       const Clock::time_point wait_start = Clock::now();
@@ -106,25 +198,62 @@ class MetalDeviceImpl final : public MetalDevice {
       const Clock::time_point encode_start = Clock::now();
       id<MTLCommandBuffer> buffer = [queue_ commandBufferWithUnretainedReferences];
       MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
-      pass.colorAttachments[0].texture = target_;
+      pass.colorAttachments[0].texture = color_;
       pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-      pass.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+      pass.colorAttachments[0].clearColor = MTLClearColorMake(0.08, 0.1, 0.14, 1.0);
+      pass.colorAttachments[0].storeAction = capture.empty() && !layer_ ? MTLStoreActionDontCare : MTLStoreActionStore;
+      pass.depthAttachment.texture = depth_;
+      pass.depthAttachment.loadAction = MTLLoadActionClear;
+      // The game uses reversed depth: nearer is greater, cleared to 0.
+      pass.depthAttachment.clearDepth = 0.0;
+      pass.depthAttachment.storeAction = MTLStoreActionDontCare;
       encoder_ = [buffer renderCommandEncoderWithDescriptor:pass];
 
-      id<MTLBuffer> constants = constants_[slot_];
+      frame_ = frames_[slot_];
       slot_ = (slot_ + 1) % kFramesInFlight;
+      frame_address_ = frame_.gpuAddress;
+      for (int i = 0; i < kDescriptorHeaps; ++i) {
+        [encoder_ setVertexBuffer:heaps_[i] offset:0 atIndex:i];
+      }
       [encoder_ setVertexBuffer:guest_ offset:0 atIndex:kGuestBuffer];
-      [encoder_ setVertexBuffer:constants offset:0 atIndex:kConstantBuffer];
-      [encoder_ setFragmentBuffer:constants offset:0 atIndex:kConstantBuffer];
-      current_pipeline_ = UINT32_MAX;
-      encode(static_cast<uint8_t*>(constants.contents));
+      [encoder_ setVertexBuffer:frame_ offset:0 atIndex:kFetchBuffer];
+      [encoder_ setVertexBuffer:elements_ offset:0 atIndex:kElementsBuffer];
+      [encoder_ useResource:dummy_ usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
+      [encoder_ setCullMode:MTLCullModeNone];
+      current_pipeline_ = -1;
+      current_depth_ = UINT32_MAX;
+      encode(static_cast<uint8_t*>(frame_.contents));
       [encoder_ endEncoding];
       encoder_ = nil;
+
+      id<MTLBuffer> readback = nil;
+      if (!capture.empty()) {
+        readback = [device_ newBufferWithLength:kTargetWidth * kTargetHeight * 4 options:MTLResourceStorageModeShared];
+        id<MTLBlitCommandEncoder> blit = [buffer blitCommandEncoder];
+        [blit copyFromTexture:color_
+                     sourceSlice:0
+                     sourceLevel:0
+                    sourceOrigin:MTLOriginMake(0, 0, 0)
+                      sourceSize:MTLSizeMake(kTargetWidth, kTargetHeight, 1)
+                        toBuffer:readback
+               destinationOffset:0
+          destinationBytesPerRow:kTargetWidth * 4
+        destinationBytesPerImage:kTargetWidth * kTargetHeight * 4];
+        [blit endEncoding];
+      }
+
+      if (id<CAMetalDrawable> drawable = layer_ ? [layer_ nextDrawable] : nil) {
+        id<MTLBlitCommandEncoder> blit = [buffer blitCommandEncoder];
+        [blit copyFromTexture:color_ toTexture:drawable.texture];
+        [blit endEncoding];
+        [buffer presentDrawable:drawable];
+      }
 
       dispatch_semaphore_t slots = slots_;
       [buffer addCompletedHandler:^(id<MTLCommandBuffer> done) {
         if (done.status == MTLCommandBufferStatusError) {
           errors_.fetch_add(1, std::memory_order_relaxed);
+          last_error_ = done.error;
         }
         const uint64_t gpu_ns = uint64_t(std::max(0.0, done.GPUEndTime - done.GPUStartTime) * 1e9);
         gpu_ns_.fetch_add(gpu_ns, std::memory_order_relaxed);
@@ -136,18 +265,39 @@ class MetalDeviceImpl final : public MetalDevice {
       }];
       [buffer commit];
       timing.encode_ns = Since(encode_start);
+      if (readback) {
+        [buffer waitUntilCompleted];
+        WritePng(capture, readback.contents, kTargetWidth, kTargetHeight);
+      }
     }
     return timing;
   }
 
-  void Draw(uint32_t pipeline, size_t vertex_constants, size_t fragment_constants) override {
-    if (pipeline != current_pipeline_) {
-      [encoder_ setRenderPipelineState:pipelines_[pipeline]];
-      current_pipeline_ = pipeline;
+  void Draw(const MetalDraw& draw) override {
+    if (draw.vertex_shader != current_pipeline_) {
+      const Pipeline& pipeline = pipelines_[size_t(draw.vertex_shader)];
+      [encoder_ setRenderPipelineState:pipeline.state];
+      [encoder_ setVertexBufferOffset:pipeline.elements atIndex:kElementsBuffer];
+      current_pipeline_ = draw.vertex_shader;
     }
-    [encoder_ setVertexBufferOffset:vertex_constants atIndex:kConstantBuffer];
-    [encoder_ setFragmentBufferOffset:fragment_constants atIndex:kConstantBuffer];
-    [encoder_ drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    if (draw.depth_control != current_depth_) {
+      [encoder_ setDepthStencilState:DepthState(draw.depth_control)];
+      current_depth_ = draw.depth_control;
+    }
+    const PushConstants push = {frame_address_ + draw.vertex_constants, frame_address_ + draw.vertex_constants,
+                                frame_address_ + draw.shared_constants};
+    [encoder_ setVertexBytes:&push length:sizeof(push) atIndex:kPushConstants];
+    [encoder_ setVertexBufferOffset:draw.fetch_constants atIndex:kFetchBuffer];
+    const MTLPrimitiveType type =
+        draw.primitive == MetalPrimitive::kTriangleStrip ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle;
+    [encoder_ drawIndexedPrimitives:type
+                         indexCount:draw.index_count
+                          indexType:draw.wide_indices ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16
+                        indexBuffer:frame_
+                  indexBufferOffset:draw.indices
+                      instanceCount:1
+                         baseVertex:draw.base_vertex
+                       baseInstance:0];
   }
 
   bool MatchesGuestMemory(uint32_t address, uint32_t bytes) override {
@@ -173,17 +323,85 @@ class MetalDeviceImpl final : public MetalDevice {
   }
 
  private:
+  struct Pipeline {
+    id<MTLRenderPipelineState> state;
+    size_t elements;
+  };
+
+  // The shaders index tables of resource IDs. Until textures arrive every slot holds one dummy, because a few vertex
+  // shaders read a map and an empty table would fault the GPU.
+  bool CreateDescriptorHeaps() {
+    MTLTextureDescriptor* two_d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                     width:1
+                                                                                    height:1
+                                                                                 mipmapped:NO];
+    two_d.storageMode = MTLStorageModeShared;
+    dummy_ = [device_ newTextureWithDescriptor:two_d];
+    MTLTextureDescriptor* three_d = [MTLTextureDescriptor new];
+    three_d.textureType = MTLTextureType3D;
+    three_d.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    three_d.storageMode = MTLStorageModeShared;
+    dummy_3d_ = [device_ newTextureWithDescriptor:three_d];
+    MTLTextureDescriptor* cube = [MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                       size:1
+                                                                                  mipmapped:NO];
+    cube.storageMode = MTLStorageModeShared;
+    dummy_cube_ = [device_ newTextureWithDescriptor:cube];
+    MTLSamplerDescriptor* sampler = [MTLSamplerDescriptor new];
+    sampler.supportArgumentBuffers = YES;
+    sampler_ = [device_ newSamplerStateWithDescriptor:sampler];
+    const std::array<MTLResourceID, kDescriptorHeaps> ids = {dummy_.gpuResourceID, dummy_3d_.gpuResourceID,
+                                                             dummy_cube_.gpuResourceID, sampler_.gpuResourceID};
+    for (int i = 0; i < kDescriptorHeaps; ++i) {
+      heaps_[i] = [device_ newBufferWithLength:sizeof(MTLResourceID) * 64 options:MTLResourceStorageModeShared];
+      auto* slots = static_cast<MTLResourceID*>(heaps_[i].contents);
+      std::fill_n(slots, 64, ids[size_t(i)]);
+    }
+    return true;
+  }
+
+  id<MTLDepthStencilState> DepthState(uint32_t control) {
+    const uint32_t key = control & (kDepthEnable | kDepthWrite | (7u << kDepthFunctionShift));
+    auto found = depth_states_.find(key);
+    if (found != depth_states_.end()) {
+      return found->second;
+    }
+    MTLDepthStencilDescriptor* descriptor = [MTLDepthStencilDescriptor new];
+    descriptor.depthCompareFunction =
+        (key & kDepthEnable) ? CompareFunction(key >> kDepthFunctionShift) : MTLCompareFunctionAlways;
+    descriptor.depthWriteEnabled = (key & kDepthEnable) && (key & kDepthWrite);
+    id<MTLDepthStencilState> state = [device_ newDepthStencilStateWithDescriptor:descriptor];
+    depth_states_[key] = state;
+    return state;
+  }
+
   id<MTLDevice> device_ = nil;
   id<MTLCommandQueue> queue_ = nil;
   id<MTLBuffer> guest_ = nil;
-  id<MTLTexture> target_ = nil;
+  id<MTLBuffer> elements_ = nil;
+  id<MTLBuffer> frame_ = nil;
+  id<MTLTexture> color_ = nil;
+  id<MTLTexture> depth_ = nil;
+  id<MTLTexture> dummy_ = nil;
+  id<MTLTexture> dummy_3d_ = nil;
+  id<MTLTexture> dummy_cube_ = nil;
+  id<MTLSamplerState> sampler_ = nil;
+  id<MTLFunction> clay_ = nil;
   id<MTLRenderCommandEncoder> encoder_ = nil;
-  std::array<id<MTLBuffer>, kFramesInFlight> constants_{};
-  std::array<id<MTLRenderPipelineState>, kPipelines> pipelines_{};
+  CAMetalLayer* layer_ = nil;
+  NSWindow* window_ = nil;
+  NSError* last_error_ = nil;
+  std::array<id<MTLBuffer>, kFramesInFlight> frames_{};
+  std::array<id<MTLBuffer>, kDescriptorHeaps> heaps_{};
+  std::vector<Pipeline> pipelines_;
+  std::map<uint32_t, id<MTLDepthStencilState>> depth_states_;
   dispatch_semaphore_t slots_ = nil;
   uint8_t* guest_memory_ = nullptr;
+  uint64_t frame_address_ = 0;
+  size_t elements_used_ = 0;
   uint32_t slot_ = 0;
-  uint32_t current_pipeline_ = UINT32_MAX;
+  int current_pipeline_ = -1;
+  uint32_t current_depth_ = UINT32_MAX;
   std::atomic<uint64_t> completed_{0};
   std::atomic<uint64_t> errors_{0};
   std::atomic<uint64_t> gpu_ns_{0};
@@ -192,10 +410,10 @@ class MetalDeviceImpl final : public MetalDevice {
 
 }  // namespace
 
-std::unique_ptr<MetalDevice> MetalDevice::Create(uint8_t* guest_memory, size_t guest_bytes, size_t constant_bytes) {
+std::unique_ptr<MetalDevice> MetalDevice::Create(uint8_t* guest_memory, size_t guest_bytes, size_t frame_bytes) {
   auto device = std::make_unique<MetalDeviceImpl>();
   @autoreleasepool {
-    if (!device->Initialize(guest_memory, guest_bytes, constant_bytes)) {
+    if (!device->Initialize(guest_memory, guest_bytes, frame_bytes)) {
       return nullptr;
     }
   }

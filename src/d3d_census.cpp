@@ -27,6 +27,7 @@
 
 #include "guest_hooks.h"
 #include "native/native_probe.h"
+#include "native/shadow.h"
 #include "native/texture_probe.h"
 
 REXCVAR_DEFINE_BOOL(crackdown_d3d_census, false, "Crackdown",
@@ -632,6 +633,7 @@ void CensusClear(PPCContext& ctx, uint8_t* base, GuestFunction original) {
 
 void CensusResolve(PPCContext& ctx, uint8_t* base, GuestFunction original) {
   native::textures::OnResolve(ctx.r6.u32);
+  native::shadow::OnResolve();
   if (!census::Counting()) {
     return original(ctx, base);
   }

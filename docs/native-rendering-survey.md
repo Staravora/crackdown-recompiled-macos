@@ -247,6 +247,37 @@ Texture sizes are estimates, since the SDK's layout code isn't reachable from th
 
 **This understates a real renderer.** Recording at about 0.3 microseconds a draw is cheaper than the 1.4 in the encoding test because these draws change much less: 16 placeholder pipelines, one pass, no textures, depth, scissor or viewport changes. They produce no pixels and put almost no load on the GPU. Direct draws aren't captured, so this is roughly the baked 40-60% of a frame. What it does prove is the plumbing: Metal runs inside the game next to MoltenVK, the thread keeps up, and the hand-over costs the game nothing measurable. Only the rooftop has been run, not a drive.
 
+## First picture (2026-10-31)
+
+Shadow mode now draws the frame's main scene with the game's real vertex shaders, live camera and live geometry, in grey with one plain pixel shader, off screen or in a window with `--crackdown_native_shadow_window=true`. There are no textures, no real pixel shaders and no direct draws yet.
+
+**Shipped vertex shaders hold blanks.** 155 of the 218 have format 0, stride 0 and slot 95 in every vertex fetch, because D3D patches those into a copy of the shader when it binds it. So the layout can only be read from live ucode. `tools/shader-trial/pull_vertices.py` gives each shader one `pullElement` call per vertex element, and `src/native/shadow.cpp` builds the table from the live ucode at the addresses `manifest.txt` lists. Live shaders are matched by a SHA-256 with the patched fields blanked, which leaves 191 distinct shaders out of 218. Every live shader on the rooftop matched: 32-40 per run, 0 missing, 0 failed.
+
+**Vertices are pulled from guest memory on the GPU; indices are copied.** A vertex descriptor can't read big-endian data, and `pullElement` reads through the no-copy wrap and swaps in the shader, following the emulator's decoding. Indices go through a per-frame byte-swapped copy so the GPU keeps its post-transform cache and primitive restart. That settles the Phase 2 vertex question for now, without a comparison of the alternatives. Fetch constants and all 256 vertex constants are copied per draw, which is wasteful and simple.
+
+**The game uses reversed depth:** `RB_DEPTHCONTROL` is `0x00708767`, greater-or-equal, so depth clears to 0. The first run cleared to 1 and drew nothing.
+
+**Only one stretch of the frame is drawn.** Targets aren't tracked yet, so frames are cut at each `Resolve` and only the stretch with the most draws is recorded, which is the main scene here. That's about 660 of 1,830 baked draws. Culling is off, and the viewport is assumed to be the full 1280x720.
+
+| Rooftop, per frame, three runs | |
+| --- | --- |
+| Drawn | about 665 draws, 633,000 indices |
+| Render thread, recording, p50 / p95 / worst | 0.70-0.72 / 1.07-1.14 / 8.5 ms |
+| Copying indices | 0.14 ms |
+| GPU | 1.30-1.36 ms, worst 3.9 ms, 0 errors |
+| Dropped frames | 0 |
+
+| Benchmark, interleaved | Average FPS | Median frame | Peak memory |
+| --- | --- | --- | --- |
+| Off | 25.59, 23.55, 24.37 | 39.0, 41.8, 40.9 ms | 2,547-2,605 MB |
+| On | 23.18, 22.82, 23.84 | 43.0, 43.5, 41.9 ms | 2,785-2,798 MB |
+
+So shadow mode now costs about 1 FPS, or 2 ms on the median frame, and 220 MB, mostly 192 MB of frame arenas. It runs on top of the emulator, so that's its load added to the frame and says nothing about a takeover.
+
+**The GPU time flatters it.** Vertex work for those 633,000 indices is real, but the pixel shader is trivial, there's a single target, and two thirds of the baked draws and every direct draw are missing.
+
+**Not checked:** nobody has compared the picture with the emulator's. It reads as the rooftop from the benchmark's camera, but correct geometry isn't proved. The band across the bottom of the frame hasn't been identified.
+
 ## Shader trial (2026-10-31)
 
 Phase 1 ran XenosRecomp's Metal branch ([PR 22](https://github.com/hedge-dev/XenosRecomp/pull/22), commit `4906992`) over every shipped shader, first as it stands, then with this project's patch (`tools/shader-trial/xenosrecomp-crackdown.patch`).
@@ -587,7 +618,7 @@ The output helps the emulator too: the per-shader gap shows how much cost is sti
 
 ### Phase 2: Native vertical slice (6-10 sessions)
 
-**Started:** the [baked buffer decoder](#baked-buffer-decoder-2026-10-31) runs live behind a setting, the [texture change test](#texture-change-test-2026-10-31) passed, and [shadow mode](#shadow-mode-2026-10-31) records baked draws in Metal with placeholders. Next: real pass structure, translated shaders, a debug window to compare with, then textures and direct draws.
+**Started:** the [baked buffer decoder](#baked-buffer-decoder-2026-10-31) runs live behind a setting, the [texture change test](#texture-change-test-2026-10-31) passed, and [shadow mode](#shadow-mode-2026-10-31) draws [the main scene in grey](#first-picture-2026-10-31) with real vertex shaders. Next: compare it with the emulator, track render targets so every pass draws, then real pixel shaders, textures and direct draws.
 
 - Metal device, render thread and command queue. Choose plume's Metal backend or direct Metal with a small spike; direct is likely simpler for one game on one API.
 - Shadow-device reader, texture path (reusing SDK untile and format code), no-copy guest memory, vertex pulling or copy-and-swap decided by a spike.

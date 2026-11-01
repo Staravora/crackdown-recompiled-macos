@@ -280,7 +280,8 @@ class CrackdownApp : public rex::ReXApp {
         crackdown::benchmark::Install(input, runtime()->virtual_membase(), LogsDir(user_data_root()));
         crackdown::native::textures::Install(runtime()->memory(), runtime()->virtual_membase(),
                                              LogsDir(user_data_root()));
-        crackdown::native::shadow::Install(runtime()->memory(), LogsDir(user_data_root()));
+        crackdown::native::shadow::Install(runtime()->memory(), user_data_root() / "native-shaders",
+                                           LogsDir(user_data_root()));
       }
     }
     if (window()) {

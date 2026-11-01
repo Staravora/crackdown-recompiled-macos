@@ -287,7 +287,7 @@ void OnRunCommandBuffer(uint32_t device, uint32_t buffer, uint32_t predication, 
   }
 
   if (shadow::Enabled()) {
-    CopyDeviceConstants(device, base, kDeviceVertexConstants, kCameraConstants, 0);
+    CopyDeviceConstants(device, base, kDeviceVertexConstants, kConstantsPerStage, 0);
     shadow::Capture(entry.lists, predication, g_device_constants.data());
   }
   if (!timed) {
