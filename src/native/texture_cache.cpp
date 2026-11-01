@@ -31,6 +31,10 @@ constexpr uint32_t kPhysicalMask = 0x1FFFFFFF;
 // handler, so nothing here can take a lock.
 std::unique_ptr<std::atomic<uint32_t>[]> g_page_versions;
 
+// Where a resolve landed that's too large for readback_resolve_max_bytes, by first page.
+std::unique_ptr<std::atomic<bool>[]> g_resolved_elsewhere;
+constexpr uint32_t kReadbackBytes = 262144;
+
 struct Range {
   uint32_t start = 0;
   uint32_t bytes = 0;
@@ -188,6 +192,7 @@ MetalAddressMode AddressModeOf(xenos::ClampMode clamp) {
 TextureCache::TextureCache(MetalDevice& device, rex::memory::Memory* memory, const uint8_t* guest_memory, size_t guest_bytes)
     : device_(device), memory_(memory), guest_memory_(guest_memory), guest_bytes_(guest_bytes) {
   g_page_versions = std::make_unique<std::atomic<uint32_t>[]>(kPages);
+  g_resolved_elsewhere = std::make_unique<std::atomic<bool>[]>(kPages);
   memory_->RegisterPhysicalMemoryInvalidationCallback(OnPagesChanged, nullptr);
 }
 
@@ -195,10 +200,28 @@ void TextureCache::MarkResolved(const uint32_t* fetch_dwords) {
   xenos::xe_gpu_texture_fetch_t fetch;
   std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
   if (fetch.type == xenos::FetchConstantType::kTexture && FormatInfo::Get(xenos::TextureFormat(uint32_t(fetch.format)))) {
-    for (const Range& range : RangesOf(fetch)) {
+    const std::array<Range, 2> ranges = RangesOf(fetch);
+    for (const Range& range : ranges) {
       MarkChanged(range);
     }
+    if (g_resolved_elsewhere && ranges[0].bytes > kReadbackBytes) {
+      g_resolved_elsewhere[ranges[0].start >> kPageShift].store(true, std::memory_order_relaxed);
+    }
   }
+}
+
+bool TextureCache::NeedsNativeResolve(const uint32_t* fetch_dwords) {
+  xenos::xe_gpu_texture_fetch_t fetch;
+  std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
+  if (fetch.type != xenos::FetchConstantType::kTexture) {
+    return false;
+  }
+  const xenos::TextureFormat format = xenos::TextureFormat(uint32_t(fetch.format));
+  if (format == xenos::TextureFormat::k_24_8 || format == xenos::TextureFormat::k_24_8_FLOAT) {
+    return true;
+  }
+  return g_resolved_elsewhere && g_resolved_elsewhere[(uint32_t(fetch.base_address) << 12 & kPhysicalMask) >> kPageShift].load(
+                                     std::memory_order_relaxed);
 }
 
 int TextureCache::FindTexture(const uint32_t* fetch) {

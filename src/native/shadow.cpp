@@ -25,6 +25,7 @@
 #include <fmt/format.h>
 
 #include <rex/cvar.h>
+#include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 
 #include "../updater/sha256.h"
@@ -36,8 +37,13 @@ REXCVAR_DEFINE_BOOL(crackdown_native_shadow, false, "Crackdown",
 
 REXCVAR_DEFINE_BOOL(crackdown_native_shadow_window, false, "Crackdown", "Show shadow mode's picture in a window of its own");
 
+REXCVAR_DEFINE_BOOL(crackdown_native_shadow_debug, false, "Crackdown",
+                    "Poll metal-debug.txt in the logs folder, so a running game can be examined from outside");
+
 namespace crackdown::native::shadow {
 namespace {
+
+namespace xenos = rex::graphics::xenos;
 
 using Clock = std::chrono::steady_clock;
 
@@ -82,6 +88,7 @@ constexpr uint32_t kBlendFactorZero = 0;
 constexpr uint32_t kBlendFactorOne = 1;
 constexpr uint32_t kColorMaskFirstTarget = 0xF;
 constexpr uint32_t kAlphaTestEnable = 1 << 3;
+constexpr uint32_t kCullBothFaces = 3;
 constexpr uint32_t kIndexEndianShift = 30;
 constexpr uint32_t kIndexEndian16 = 1;
 constexpr uint32_t kIndexEndian32 = 2;
@@ -114,6 +121,7 @@ struct Totals {
   uint64_t other_index_order_draws = 0;
   uint64_t transparent_draws = 0;
   uint64_t shaded_draws = 0;
+  uint64_t needs_resolve_draws = 0;
   uint64_t pixel_shaders_found = 0;
   uint64_t pixel_shaders_missing = 0;
   uint64_t no_color_draws = 0;
@@ -391,7 +399,8 @@ std::map<TargetKey, int> g_targets;
 MetalViewport ViewportOf(const BakedDraw& draw) {
   const std::array<float, 6> v = std::bit_cast<std::array<float, 6>>(draw.viewport);
   const float width = std::abs(v[0]) * 2.0f, height = std::abs(v[2]) * 2.0f;
-  return {v[1] - width / 2.0f, v[3] - height / 2.0f, width, height};
+  // Depth comes out as offset + scale * z, which sky objects use to keep to the far end of the range.
+  return {v[1] - width / 2.0f, v[3] - height / 2.0f, width, height, v[5], v[5] + v[4]};
 }
 
 int TargetOf(MetalDevice& device, const Run& run) {
@@ -438,7 +447,16 @@ double ClearDepthFor(const BakedDraw& draw) {
   return ((draw.depth_control >> 4) & 7) >= 4 ? 0.0 : 1.0;
 }
 
+// Live switches for examining a running game, set from metal-debug.txt: skip_blended, ids (each draw flat, in a colour
+// that gives its number), skip_ps=<address>, and dump=<name>, which writes live-<name>.png and .txt beside it.
+bool g_debug_skip_blended = false;
+bool g_debug_ids = false;
+int g_debug_skip_ps = 0;
+std::ofstream* g_dump = nullptr;
+int g_debug_id = 0;
+
 void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
+  g_debug_id = 0;
   g_textures->BeginFrame();
   size_t used = 0, indices_used = 0;
   int current_target = -1;
@@ -457,15 +475,38 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         }
         ++g_totals.draws;
         ApplyLiterals(draw);
+        // Culling both faces leaves nothing to draw, and Metal has no way to say so.
+        if ((draw.mode_control & kCullBothFaces) == kCullBothFaces) {
+          continue;
+        }
         const bool alpha_test = (draw.color_control & kAlphaTestEnable) != 0;
         g_totals.alpha_tested_draws += alpha_test;
-        const PixelShader& pixel = run.targets.color ? FindPixelShader(device, draw) : g_no_pixel_shader;
+        const PixelShader& found_pixel = run.targets.color ? FindPixelShader(device, draw) : g_no_pixel_shader;
+        if (g_debug_skip_blended && run.targets.color && IsBlended(draw)) {
+          continue;
+        }
+        if (g_debug_skip_ps && draw.pixel_shader == uint32_t(g_debug_skip_ps)) {
+          continue;
+        }
+        const PixelShader& pixel = g_debug_ids ? g_no_pixel_shader : found_pixel;
+        // A blend over what's on screen is only as good as what it reads, and without these it washes out the frame.
+        if (pixel.handle >= 0 && IsBlended(draw)) {
+          const uint32_t* blended_fetch = list.fetch_data.data() + size_t(draw.fetch_constants) * 192;
+          bool needs_resolve = false;
+          for (const PixelSlot& slot : pixel.slots) {
+            needs_resolve |= TextureCache::NeedsNativeResolve(blended_fetch + size_t(slot.slot) * kFetchConstantDwords);
+          }
+          if (needs_resolve) {
+            ++g_totals.needs_resolve_draws;
+            continue;
+          }
+        }
         if (!WritesDepth(draw) && run.targets.color) {
           if (WritesNoColor(draw)) {
             ++g_totals.no_color_draws;
             continue;
           }
-          if (IsBlended(draw) && pixel.handle < 0) {
+          if (IsBlended(draw) && pixel.handle < 0 && !g_debug_ids) {
             ++g_totals.transparent_draws;
             continue;
           }
@@ -512,11 +553,37 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         MetalDraw out;
         out.vertex_shader = shader;
         out.pixel_shader = pixel.handle;
+        if (g_debug_ids && run.targets.color) {
+          out.debug_id = g_debug_id;
+        }
+        if (g_dump) {
+          const uint32_t* f = list.fetch_data.data() + size_t(draw.fetch_constants) * 192;
+          std::string slots;
+          const auto word = [](uint32_t value) { return std::bit_cast<float>(value); };
+          std::string pc;
+          for (int i = 0; i < 12; ++i) {
+            pc += fmt::format(" {:.3f}", word(g_constants[1024 + i]));
+          }
+          *g_dump << "PC" << pc << "\n";
+          for (const PixelSlot& slot : found_pixel.slots) {
+            xenos::xe_gpu_texture_fetch_t fetch;
+            std::memcpy(&fetch, f + size_t(slot.slot) * 6, sizeof(fetch));
+            slots += fmt::format(" {}k{}:f{}:{}x{}:{:05X}", slot.slot, slot.kind, uint32_t(fetch.format), uint32_t(fetch.size_2d.width) + 1,
+                                 uint32_t(fetch.size_2d.height) + 1, uint32_t(fetch.base_address));
+          }
+          *g_dump << fmt::format("{} {} vs {} ps {:08X} {} prim {} n {} tgt {} depth {:08X} blend {:08X} cc {:08X} mask {:X} bools {:08X} vp {} {} slots{}\n", g_debug_id, run.pass_select == ~0u ? "D" : "B",
+                                 draw.vertex_shader_dwords, draw.pixel_shader, draw.pixel_shader_dwords, primitive, index_count, target, draw.depth_control, draw.blend_control, draw.color_control,
+                                 draw.color_mask, draw.booleans, viewport.width, viewport.height, slots);
+        }
+        ++g_debug_id;
         out.blend_control = draw.blend_control;
         out.color_mask = draw.color_mask;
         out.alpha_test = alpha_test;
         out.viewport = viewport;
         out.depth_control = draw.depth_control;
+        out.stencil_front = draw.stencil_front;
+        out.stencil_back = draw.stencil_back;
+        out.mode_control = draw.mode_control;
         out.primitive = primitive == kPrimitiveTriangleStrip ? MetalPrimitive::kTriangleStrip : MetalPrimitive::kTriangleList;
         out.vertex_constants = used;
         out.pixel_constants = used + kPixelConstantsOffset;
@@ -630,7 +697,7 @@ void Report(const MetalDevice& device) {
   std::ofstream out(g_path);
   out << fmt::format(
       R"({{"guest_frames":{},"frames":{},"dropped":{},"draws_per_frame":{:.1f},"skipped_draws_per_frame":{:.1f},"no_room":{},)"
-      R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"no_target_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},"other_index_order_draws_per_frame":{:.1f},"transparent_draws_per_frame":{:.1f},"no_color_draws_per_frame":{:.1f},"alpha_tested_draws_per_frame":{:.1f},"shaded_draws_per_frame":{:.1f},"pixel_shaders_found":{},"pixel_shaders_missing":{},"textures_loaded":{},"textures_skipped":{},"textures_reloaded":{},"reloaded_mb":{:.1f},"textures_unchanged":{},"direct_draws_per_frame":{:.1f},"ring_desyncs":{},"passes_per_frame":{:.1f},"targets":{},)"
+      R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"no_target_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},"other_index_order_draws_per_frame":{:.1f},"transparent_draws_per_frame":{:.1f},"no_color_draws_per_frame":{:.1f},"alpha_tested_draws_per_frame":{:.1f},"shaded_draws_per_frame":{:.1f},"needs_resolve_draws_per_frame":{:.1f},"pixel_shaders_found":{},"pixel_shaders_missing":{},"textures_loaded":{},"textures_skipped":{},"textures_reloaded":{},"reloaded_mb":{:.1f},"textures_unchanged":{},"direct_draws_per_frame":{:.1f},"ring_desyncs":{},"passes_per_frame":{:.1f},"targets":{},)"
       R"("shaders_found":{},"shaders_missing":{},"shaders_failed":{},"index_copy_ms_per_frame":{:.3f},)"
       R"("capture_ms_per_frame":{:.4f},"wait_ms_per_frame":{:.3f},"encode_ms_p50":{:.3f},"encode_ms_p95":{:.3f},"encode_ms_max":{:.3f},)"
       R"("gpu_frames":{},"gpu_errors":{},"gpu_ms_per_frame":{:.3f},"gpu_ms_worst":{:.3f},)"
@@ -639,7 +706,7 @@ void Report(const MetalDevice& device) {
       g_totals.recorded_draws / frames, g_totals.recorded_indices / frames, g_totals.no_shader_draws / frames,
       g_totals.no_target_draws / frames, g_totals.other_primitive_draws / frames, g_totals.other_index_order_draws / frames,
       g_totals.transparent_draws / frames, g_totals.no_color_draws / frames, g_totals.alpha_tested_draws / frames,
-      g_totals.shaded_draws / frames, g_totals.pixel_shaders_found, g_totals.pixel_shaders_missing, g_textures->textures_loaded(),
+      g_totals.shaded_draws / frames, g_totals.needs_resolve_draws / frames, g_totals.pixel_shaders_found, g_totals.pixel_shaders_missing, g_textures->textures_loaded(),
       g_textures->textures_skipped(), g_textures->textures_reloaded(), g_textures->reloaded_bytes() / 1e6, g_textures->textures_unchanged(), direct_draws / double(std::max<uint64_t>(guest_frames, 1)), ring_desyncs,
       g_totals.passes / frames, g_targets.size(), g_totals.shaders_found, g_totals.shaders_missing, g_totals.shaders_failed,
       g_totals.index_copy_ns / 1e6 / frames,
@@ -685,8 +752,40 @@ void RenderThread() {
       capture = g_path;
       capture.replace_extension(".png");
     }
+    std::unique_ptr<std::ofstream> dump;
+    if (g_frame_number % 30 == 0 && REXCVAR_GET(crackdown_native_shadow_debug)) {
+      const std::filesystem::path control = g_path.parent_path() / "metal-debug.txt";
+      std::ifstream in(control);
+      std::string word;
+      bool want_dump = false;
+      std::string name = "live";
+      g_debug_skip_blended = g_debug_ids = false;
+      g_debug_skip_ps = 0;
+      while (in >> word) {
+        g_debug_skip_blended |= word == "skip_blended";
+        g_debug_ids |= word == "ids";
+        if (word.rfind("skip_ps=", 0) == 0) {
+          g_debug_skip_ps = int(std::stoul(word.substr(8), nullptr, 16));
+        }
+        if (word.rfind("dump=", 0) == 0) {
+          name = word.substr(5);
+          want_dump = true;
+        }
+      }
+      in.close();
+      if (want_dump) {
+        std::error_code ignored;
+        std::filesystem::remove(control, ignored);
+        std::ofstream(control) << (g_debug_skip_blended ? "skip_blended " : "") << (g_debug_ids ? "ids " : "")
+                               << (g_debug_skip_ps ? fmt::format("skip_ps={:X} ", g_debug_skip_ps) : "");
+        capture = g_path.parent_path() / ("live-" + name + ".png");
+        dump = std::make_unique<std::ofstream>(g_path.parent_path() / ("live-" + name + ".txt"));
+        g_dump = dump.get();
+      }
+    }
     const MetalFrameTiming timing =
         device->RecordFrame([&](uint8_t* memory) { Encode(*frame, *device, memory); }, capture);
+    g_dump = nullptr;
     frame->runs.clear();
     {
       std::lock_guard lock(g_mutex);

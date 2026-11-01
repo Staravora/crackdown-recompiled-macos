@@ -22,6 +22,10 @@ class TextureCache {
   // For a texture the game has resolved into, given its fetch constant. Any thread.
   static void MarkResolved(const uint32_t* fetch);
 
+  // Whether a fetch constant reads something guest memory doesn't hold: a depth buffer, or a resolve too large for the
+  // emulator to copy back.
+  static bool NeedsNativeResolve(const uint32_t* fetch);
+
   // A descriptor for the six dwords of one fetch constant.
   int FindTexture(const uint32_t* fetch);
   int FindSampler(const uint32_t* fetch);

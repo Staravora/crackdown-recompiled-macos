@@ -390,7 +390,18 @@ Frame rate is about 22 FPS with shadow mode on and the window closed, in one run
 
 **Texture updates.** A texture reloads when it's next bound after its memory changes. A per-page version counter is bumped by the emulator's page watch, and also by `Resolve`, whose writes the watch doesn't see, again a frame later because the emulator does them late. Host pages are 16 KB, 4 guest pages, so a write beside a texture looks like a write to it: on the rooftop that's about 40 false alarms a frame, and reloading them took recording from 5 to 21 ms. A hash of the raw memory now rules those out first, and recording settled at 7.2 ms. No texture really changed on the still rooftop, so a real reload hasn't been seen to work in a drive.
 
-**Bruce saw the picture wash out at sunset,** changing with the view, with trees staying normal. Translated shaders read loop constants from a table at offset 512 of the shared constants, and each draw's block stopped at 512, so a shader with a loop read the next draw's memory as its count, start and step. The shared block now holds the table, filled from the ring or, for baked runs, from the device. The rooftop in daytime still looks right. Whether that was the whole washout needs a drive past sunset.
+**The sunset washout.** At nightfall the picture snapped from a brightness of 73 to 251 in a single step, varied with the view and left trees alone. A last few draws at the end of the frame blend a night effect over everything, and they sample a depth buffer and a large resolved colour target, neither of which guest memory holds, so they blend garbage. Blended draws that need a resolve are now left out and counted: 145 a frame at night. The rooftop then goes smoothly from 73 to 58 through the same moment, with windows lighting up. That's a stopgap: native resolves are what bring these draws back. It hasn't been driven at night yet.
+
+Finding it took four wrong guesses, which are worth recording because each one fixed or ruled out something real:
+
+- **Stale textures:** live updates went in, and it still happened.
+- **Clipping:** the game's main target is 8-bit too.
+- **Loop constants:** a real bug. Shaders read them from offset 512 of the shared constants, each draw's block stopped there, and a looping shader read the next draw's memory. Fixed, and it wasn't this.
+- **630 spheres that appear at the same moment:** they looked like the cause and aren't. Skipping them changes nothing. Chasing them did bring in **stencil, face culling and the viewport's depth range**, all of which were missing and are real.
+
+**How it was caught.** `crackdown_native_shadow_debug` polls `metal-debug.txt` in the logs folder, so a running game can skip blended draws, skip a pixel shader, colour each draw by its number, or dump a draw list and picture, with nobody at the keyboard. A script ran the game to sunset, watched the brightness and fired those captures on the snap. Skipping all blended draws fixed the frame, and comparing draw lists either side of the snap gave the suspects.
+
+**Stencil and culling.** Targets are `Depth32Float_Stencil8`, and stencil clears to 0, which is another guess at what the game clears to. The rooftop's depth test, faces and stencil all still look right, but no test has targeted them.
 
 **Not there yet, roughly in order of what it'll change on screen:**
 
@@ -399,7 +410,8 @@ Frame rate is about 22 FPS with shadow mode on and the window closed, in one run
 - **Vertex shader textures aren't bound,** so the particle shaders that read lookup tables get a dummy.
 - **Non-list draws and ring quads aren't drawn:** about 325 and 340 a frame, which is where the HUD, particles and fullscreen passes are likely to be. So there's no post-processing, bloom or colour grading.
 - **Gamma is approximated with sRGB.** Xenos's own curve differs slightly. The main target is 8-bit in the game too.
-- **No culling, stencil, MSAA or depth bias.**
+- **No MSAA or depth bias.**
+- **Water is missing,** as Bruce noticed. Not looked at yet.
 - **Alpha test ignores the compare function,** and always keeps what's above the reference.
 - **The orb occlusion issue** hasn't been looked at. Now that blending is real, it can be.
 

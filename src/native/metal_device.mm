@@ -52,16 +52,25 @@ constexpr int kTextureHeap = 0;
 constexpr int kSamplerHeap = 3;
 constexpr uint32_t kAlphaTestConstant = 1 << 1;
 
+constexpr uint32_t kStencilEnable = 1 << 0;
 constexpr uint32_t kDepthEnable = 1 << 1;
 constexpr uint32_t kDepthWrite = 1 << 2;
 constexpr uint32_t kDepthFunctionShift = 4;
+constexpr uint32_t kBackFaceEnable = 1 << 7;
+constexpr uint32_t kCullFront = 1 << 0;
+constexpr uint32_t kCullBack = 1 << 1;
+constexpr uint32_t kFrontClockwise = 1 << 2;
+constexpr MTLPixelFormat kDepthFormat = MTLPixelFormatDepth32Float_Stencil8;
 constexpr uint32_t kOpaqueBlend = 0x00010001;
 
 // Grey clay: light from the slope of the depth, since there are no normals or textures to go on yet.
 const char* kClaySource = R"(
 #include <metal_stdlib>
 using namespace metal;
-fragment float4 clay_fragment(float4 position [[position]]) {
+fragment float4 clay_fragment(float4 position [[position]], constant float4& tint [[buffer(4)]]) {
+  if (tint.a > 0.5) {
+    return tint;
+  }
   float distance = 1.0 / position.w;
   float3 normal = normalize(float3(-dfdx(distance), -dfdy(distance), 0.02));
   float light = 0.25 + 0.75 * saturate(dot(normal, normalize(float3(0.3, 0.6, 0.75))));
@@ -83,6 +92,26 @@ MTLCompareFunction CompareFunction(uint32_t xenos) {
   // Xenos numbers these as Metal's in the same order: never, less, equal, less-equal, greater, not-equal,
   // greater-equal, always. Metal's enum runs never, less, equal, less-equal, greater, not-equal, greater-equal, always.
   return MTLCompareFunction(xenos & 7);
+}
+
+MTLStencilOperation StencilOperationOf(uint32_t xenos) {
+  constexpr std::array operations = {MTLStencilOperationKeep,           MTLStencilOperationZero,
+                                     MTLStencilOperationReplace,        MTLStencilOperationIncrementClamp,
+                                     MTLStencilOperationDecrementClamp, MTLStencilOperationInvert,
+                                     MTLStencilOperationIncrementWrap,  MTLStencilOperationDecrementWrap};
+  return operations[xenos & 7];
+}
+
+// Function, fail, depth pass and depth fail, 3 bits each, from `control`, and the masks from `reference_mask`.
+MTLStencilDescriptor* StencilDescriptorOf(uint32_t control, uint32_t reference_mask) {
+  MTLStencilDescriptor* stencil = [MTLStencilDescriptor new];
+  stencil.stencilCompareFunction = MTLCompareFunction(control & 7);
+  stencil.stencilFailureOperation = StencilOperationOf(control >> 3);
+  stencil.depthStencilPassOperation = StencilOperationOf(control >> 6);
+  stencil.depthFailureOperation = StencilOperationOf(control >> 9);
+  stencil.readMask = (reference_mask >> 8) & 0xFF;
+  stencil.writeMask = (reference_mask >> 16) & 0xFF;
+  return stencil;
 }
 
 MTLBlendFactor BlendFactorOf(uint32_t xenos) {
@@ -284,7 +313,8 @@ class MetalDeviceImpl final : public MetalDevice {
       }
       MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
       descriptor.vertexFunction = vertex;
-      descriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+      descriptor.depthAttachmentPixelFormat = kDepthFormat;
+      descriptor.stencilAttachmentPixelFormat = kDepthFormat;
       id<MTLRenderPipelineState> depth_only = [device_ newRenderPipelineStateWithDescriptor:descriptor error:&failure];
       descriptor.fragmentFunction = clay_;
       descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
@@ -460,7 +490,7 @@ class MetalDeviceImpl final : public MetalDevice {
     if (has_color) {
       target.color = NewTarget(MTLPixelFormatBGRA8Unorm, width, height);
     }
-    target.depth = NewTarget(MTLPixelFormatDepth32Float, width, height);
+    target.depth = NewTarget(kDepthFormat, width, height);
     targets_.push_back(target);
     return int(targets_.size()) - 1;
   }
@@ -479,6 +509,10 @@ class MetalDeviceImpl final : public MetalDevice {
     pass.depthAttachment.loadAction = clear ? MTLLoadActionClear : MTLLoadActionLoad;
     pass.depthAttachment.clearDepth = clear_depth;
     pass.depthAttachment.storeAction = MTLStoreActionStore;
+    pass.stencilAttachment.texture = target.depth;
+    pass.stencilAttachment.loadAction = clear ? MTLLoadActionClear : MTLLoadActionLoad;
+    pass.stencilAttachment.clearStencil = 0;
+    pass.stencilAttachment.storeAction = MTLStoreActionStore;
     encoder_ = [buffer_ renderCommandEncoderWithDescriptor:pass];
     for (int i = 0; i < kDescriptorHeaps; ++i) {
       [encoder_ setVertexBuffer:heaps_[i] offset:0 atIndex:i];
@@ -491,11 +525,12 @@ class MetalDeviceImpl final : public MetalDevice {
     [encoder_ useResource:dummy_3d_ usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
     [encoder_ useResource:dummy_cube_ usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
     ++pass_number_;
-    [encoder_ setCullMode:MTLCullModeNone];
     pass_has_color_ = target.color != nil;
     current_pipeline_ = nil;
     current_elements_ = SIZE_MAX;
-    current_depth_ = UINT32_MAX;
+    current_depth_ = {};
+    has_depth_state_ = false;
+    current_mode_ = UINT32_MAX;
     current_viewport_ = {};
   }
 
@@ -527,12 +562,29 @@ class MetalDeviceImpl final : public MetalDevice {
       }
     }
     if (!(draw.viewport == current_viewport_)) {
-      [encoder_ setViewport:{draw.viewport.x, draw.viewport.y, draw.viewport.width, draw.viewport.height, 0.0, 1.0}];
+      [encoder_ setViewport:{draw.viewport.x, draw.viewport.y, draw.viewport.width, draw.viewport.height, draw.viewport.near_depth,
+                             draw.viewport.far_depth}];
       current_viewport_ = draw.viewport;
     }
-    if (draw.depth_control != current_depth_) {
-      [encoder_ setDepthStencilState:DepthState(draw.depth_control)];
-      current_depth_ = draw.depth_control;
+    const DepthKey depth_key = {draw.depth_control, draw.stencil_front & 0xFFFF00, draw.stencil_back & 0xFFFF00};
+    if (!has_depth_state_ || depth_key != current_depth_) {
+      [encoder_ setDepthStencilState:DepthState(depth_key)];
+      current_depth_ = depth_key;
+      has_depth_state_ = true;
+    }
+    if (draw.depth_control & kStencilEnable) {
+      [encoder_ setStencilFrontReferenceValue:draw.stencil_front & 0xFF backReferenceValue:draw.stencil_back & 0xFF];
+    }
+    const uint32_t mode = draw.mode_control & (kCullFront | kCullBack | kFrontClockwise);
+    if (mode != current_mode_) {
+      [encoder_ setCullMode:(mode & kCullFront) ? MTLCullModeFront : (mode & kCullBack) ? MTLCullModeBack : MTLCullModeNone];
+      [encoder_ setFrontFacingWinding:(mode & kFrontClockwise) ? MTLWindingClockwise : MTLWindingCounterClockwise];
+      current_mode_ = mode;
+    }
+    {
+      const float tint[4] = {float((draw.debug_id >> 8) & 0xFF) / 255.0f, float(draw.debug_id & 0xFF) / 255.0f, 0.5f,
+                             draw.debug_id >= 0 ? 1.0f : 0.0f};
+      [encoder_ setFragmentBytes:tint length:sizeof(tint) atIndex:4];
     }
     const PushConstants push = {frame_address_ + draw.vertex_constants, frame_address_ + draw.pixel_constants,
                                 frame_address_ + draw.shared_constants};
@@ -586,6 +638,7 @@ class MetalDeviceImpl final : public MetalDevice {
   };
 
   using ShadedKey = std::tuple<int, int, uint32_t, uint32_t, bool>;
+  using DepthKey = std::array<uint32_t, 3>;
 
   id<MTLRenderPipelineState> ShadedPipeline(const MetalDraw& draw) {
     const ShadedKey key = {draw.vertex_shader, draw.pixel_shader, draw.blend_control, draw.color_mask & 0xF, draw.alpha_test};
@@ -596,7 +649,8 @@ class MetalDeviceImpl final : public MetalDevice {
     MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
     descriptor.vertexFunction = pipelines_[size_t(draw.vertex_shader)].vertex;
     descriptor.fragmentFunction = pixel_shaders_[size_t(draw.pixel_shader)].functions[draw.alpha_test];
-    descriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    descriptor.depthAttachmentPixelFormat = kDepthFormat;
+    descriptor.stencilAttachmentPixelFormat = kDepthFormat;
     MTLRenderPipelineColorAttachmentDescriptor* color = descriptor.colorAttachments[0];
     color.pixelFormat = MTLPixelFormatBGRA8Unorm;
     color.writeMask = ((draw.color_mask & 1) ? MTLColorWriteMaskRed : 0) | ((draw.color_mask & 2) ? MTLColorWriteMaskGreen : 0) |
@@ -673,16 +727,21 @@ class MetalDeviceImpl final : public MetalDevice {
     return true;
   }
 
-  id<MTLDepthStencilState> DepthState(uint32_t control) {
-    const uint32_t key = control & (kDepthEnable | kDepthWrite | (7u << kDepthFunctionShift));
-    auto found = depth_states_.find(key);
+  id<MTLDepthStencilState> DepthState(const DepthKey& key) {
+    const auto found = depth_states_.find(key);
     if (found != depth_states_.end()) {
       return found->second;
     }
+    const uint32_t control = key[0];
     MTLDepthStencilDescriptor* descriptor = [MTLDepthStencilDescriptor new];
     descriptor.depthCompareFunction =
-        (key & kDepthEnable) ? CompareFunction(key >> kDepthFunctionShift) : MTLCompareFunctionAlways;
-    descriptor.depthWriteEnabled = (key & kDepthEnable) && (key & kDepthWrite);
+        (control & kDepthEnable) ? CompareFunction(control >> kDepthFunctionShift) : MTLCompareFunctionAlways;
+    descriptor.depthWriteEnabled = (control & kDepthEnable) && (control & kDepthWrite);
+    if (control & kStencilEnable) {
+      descriptor.frontFaceStencil = StencilDescriptorOf(control >> 8, key[1]);
+      descriptor.backFaceStencil =
+          (control & kBackFaceEnable) ? StencilDescriptorOf(control >> 20, key[2]) : StencilDescriptorOf(control >> 8, key[1]);
+    }
     id<MTLDepthStencilState> state = [device_ newDepthStencilStateWithDescriptor:descriptor];
     depth_states_[key] = state;
     return state;
@@ -717,7 +776,7 @@ class MetalDeviceImpl final : public MetalDevice {
   uint64_t pipeline_failures_ = 0;
   std::string last_pipeline_error_;
   std::vector<Target> targets_;
-  std::map<uint32_t, id<MTLDepthStencilState>> depth_states_;
+  std::map<DepthKey, id<MTLDepthStencilState>> depth_states_;
   dispatch_semaphore_t slots_ = nil;
   uint8_t* guest_memory_ = nullptr;
   uint64_t frame_address_ = 0;
@@ -728,7 +787,9 @@ class MetalDeviceImpl final : public MetalDevice {
   int shown_target_ = -1;
   bool pass_has_color_ = false;
   MetalViewport current_viewport_;
-  uint32_t current_depth_ = UINT32_MAX;
+  DepthKey current_depth_{};
+  bool has_depth_state_ = false;
+  uint32_t current_mode_ = UINT32_MAX;
   std::atomic<bool> layer_ready_{false};
   std::atomic<uint64_t> completed_{0};
   std::atomic<uint64_t> errors_{0};

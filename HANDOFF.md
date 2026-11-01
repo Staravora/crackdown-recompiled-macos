@@ -5,9 +5,12 @@
 - **Added:** `src/native/texture_cache.cpp`, pipelines with real blending and alpha test in `metal_device.mm`, pixel constants per draw, and `tools/shader-trial/build_pixels.py`, which writes `ps_*.metallib` and `pixel-manifest.txt` to `native-shaders`. Rerun it after pulling, or draws stay grey. Bruce's local folder is built.
 - **Texture updates:** a texture reloads when bound after its memory changes, from the page watch and `Resolve`, with a raw hash to rule out false alarms from 16 KB host pages. Not seen working in a drive: nothing changed on the still rooftop.
 - **Big gaps:** resolved targets over 256 KB aren't in guest memory, so they need native resolves. Only 2D loads (so no real-time shadows or environment reflections), no post-processing, HUD or particles. Blended draws now run for real, so Bruce's orb issue can finally be looked at.
-- **Washout at sunset:** Bruce saw it start at sunset, change with the view and leave trees alone. Loop constants were missing: shaders read past the end of the shared block. Fixed, not yet driven past sunset. Stale textures and clipping were wrong guesses.
+- **Washout at sunset:** fixed as a stopgap. A night effect at the end of the frame was blending from a depth buffer and a large resolved target that guest memory doesn't hold, so blended draws that need a resolve are left out, 145 a frame at night. Rooftop brightness now falls smoothly through sunset instead of snapping to white. Native resolves bring those draws back.
+- **Also added on the way:** loop constants, stencil, face culling and the viewport depth range, all real gaps. The 630 spheres that appear at sunset are innocent.
+- **Debugging a running game:** launch with `--crackdown_native_shadow_debug=true` and write `metal-debug.txt` in the logs folder, for example `skip_blended dump=name` or `ids dump=name`. Comments in `src/native/shadow.cpp`. The scripted sunset run is the quickest repeat: bench at the rooftop, about 5 minutes to nightfall.
+- **Water is missing,** which Bruce noticed. Not looked at.
 - **Not verified:** compared by eye on the rooftop only, not driven. Windows, Linux and title update 6 aren't built with this.
-- **Next:** native resolves, then the non-list draws, ring quads and depth and cube textures.
+- **Next:** native resolves, then the non-list draws, ring quads and depth and cube textures, then water and Bruce's orbs.
 
 ## 2026-11-01 — Direct draws in the Metal picture
 - **Result:** shadow mode records about 4,000 draws a frame on the rooftop, 2,716 of them direct, in game order. The player, pedestrians, cars, trees and sky dome appear. 0 GPU errors, 0 ring parse errors, 0 draws a frame with no shader, 3 render targets. Bruce drove several minutes with nothing exploded. Tables in `docs/native-rendering-survey.md`, "Direct draws".

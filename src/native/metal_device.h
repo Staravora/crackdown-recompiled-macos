@@ -77,13 +77,19 @@ struct MetalViewport {
   float y = 0.0f;
   float width = 0.0f;
   float height = 0.0f;
+  float near_depth = 0.0f;
+  float far_depth = 1.0f;
   bool operator==(const MetalViewport&) const = default;
 };
 
 struct MetalDraw {
   int vertex_shader = 0;
   int pixel_shader = -1;  // -1 is plain grey.
+  int debug_id = -1;  // Paints the draw flat, in a colour that gives its number.
   uint32_t depth_control = 0;
+  uint32_t stencil_front = 0;
+  uint32_t stencil_back = 0;
+  uint32_t mode_control = 0;
   uint32_t blend_control = 0;
   uint32_t color_mask = 0;
   bool alpha_test = false;

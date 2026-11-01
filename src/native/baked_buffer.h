@@ -41,6 +41,9 @@ struct BakedDraw {
   uint32_t color_control;
   uint32_t color_mask;
   uint32_t alpha_reference;
+  uint32_t stencil_front;  // Reference, read mask and write mask.
+  uint32_t stencil_back;
+  uint32_t mode_control;  // Culling and winding.
   uint32_t surface_info;
   uint32_t color_info;
   uint32_t depth_info;
