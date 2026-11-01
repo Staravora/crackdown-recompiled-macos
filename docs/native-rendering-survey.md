@@ -390,7 +390,7 @@ Frame rate is about 22 FPS with shadow mode on and the window closed, in one run
 
 **Texture updates.** A texture reloads when it's next bound after its memory changes. A per-page version counter is bumped by the emulator's page watch, and also by `Resolve`, whose writes the watch doesn't see, again a frame later because the emulator does them late. Host pages are 16 KB, 4 guest pages, so a write beside a texture looks like a write to it: on the rooftop that's about 40 false alarms a frame, and reloading them took recording from 5 to 21 ms. A hash of the raw memory now rules those out first, and recording settled at 7.2 ms. No texture really changed on the still rooftop, so a real reload hasn't been seen to work in a drive.
 
-**Bruce saw the picture go white** in a dark stairwell after five minutes of play. Stale textures were the first guess and are unlikely: exposure seems to be worked out on the CPU from the 320x180 targets, and constants are live. The next suspect is that the picture isn't tone mapped yet, because that pass isn't drawn, so a high exposure clips in an 8-bit target. Not proven.
+**Bruce saw the picture go white** in a dark stairwell after five minutes of play, on a build where textures never updated. The cause isn't known. The main target is plain `k_8_8_8_8` in the game too, so it isn't clipping from a missing tone-map pass, and constants are live. That leaves texture contents, such as a lookup texture the CPU rewrites as the time of day moves, or a resolved target that's stale in guest memory. Updates are in now, so a long drive will show which.
 
 **Not there yet, roughly in order of what it'll change on screen:**
 
@@ -398,7 +398,7 @@ Frame rate is about 22 FPS with shadow mode on and the window closed, in one run
 - **Only 2D textures load.** 3D, cube and depth formats read a dummy, and 24-bit depth is what a shadow map is, so real-time shadows and environment reflections are missing.
 - **Vertex shader textures aren't bound,** so the particle shaders that read lookup tables get a dummy.
 - **Non-list draws and ring quads aren't drawn:** about 325 and 340 a frame, which is where the HUD, particles and fullscreen passes are likely to be. So there's no post-processing, bloom or colour grading.
-- **Colour target is 8-bit BGRA,** and gamma is approximated with sRGB. Xenos's own curve differs slightly, and the game's real targets may be other formats.
+- **Gamma is approximated with sRGB.** Xenos's own curve differs slightly. The main target is 8-bit in the game too.
 - **No culling, stencil, MSAA or depth bias.**
 - **Alpha test ignores the compare function,** and always keeps what's above the reference.
 - **The orb occlusion issue** hasn't been looked at. Now that blending is real, it can be.
