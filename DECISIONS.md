@@ -59,3 +59,5 @@
 | 2026-11-01 | Leave D3D's own helper shaders out of extraction. | They have no constant table, so the translator can't read them, and nothing on the game's path has needed them. | active |
 | 2026-11-01 | Run resolve clears in place, as rectangles. | Waiting for the next draw lost them when no draw came, which left normals in the light layer. Rectangles keep one tile's clear off the next tile's rows. | active |
 | 2026-11-01 | Give vertex textures their own table in the shared constants. | The translator numbers them from 0 like pixel textures, and both stages read one table. Moving them in the generator needs no translator change. | active |
+| 2026-11-01 | Fix instruction ordering in the translator patch, not by rewriting its output. | Whether two lines share an instruction is only known to the translator. Text alone can't tell. | active |
+| 2026-11-01 | Handle texel-coordinate fetches in the generator, from the ucode. | It needed no translator rerun, and the flag is per sampler in practice, which `texel_fetch_slots` checks. | active |

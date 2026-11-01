@@ -446,11 +446,13 @@ Results, rooftop, Metal beside the emulator. Encode and GPU are the render threa
 
 Still missing: scissor, stencil-only draws, MSAA. Water isn't traced. Every shader on the rooftop run is matched.
 
-Three things about the Xenos that the translated shaders don't carry, and that took the longest to see:
+Things about the Xenos that the translated shaders didn't carry, and that took the longest to see:
 
 - **Stages join by position.** A vertex shader's output joins the pixel input at the same position, whatever their semantic names say.
 - **Fetches can bias.** A fetch constant can ask for value * 2 - 1 per channel. The normal buffer depends on it.
 - **The display has a gamma ramp.** The game loads 256 entries through the ring, and they're a large part of its look.
+- **An instruction's two halves read old values.** A vector and a scalar op in one instruction both see registers as they stood before it. 745 instructions depend on that.
+- **Fetches can use texel coordinates.** 154 vertex fetches do, with point sampling, to read effect curves.
 
 Binding also sorts a block's vertex fetches by offset and turns off outputs the pixel shader doesn't read, so a live shader can differ from its shipped form by more than its blanked fields.
 

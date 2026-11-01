@@ -1,5 +1,13 @@
 # Session handoff
 
+## 2026-11-01 (evening) — Orbs fixed
+- **Orbs:** confirmed at Bruce's saved spot, matching the emulator: upright discs, icons, rings and beam. The game drew 40 camera-facing billboards in that frame and none reached the screen.
+- **Cause:** a vector and a scalar op in one Xenos instruction both read registers as they stood before it. XenosRecomp wrote the vector result first, so the scalar read the overwritten value. 745 instructions in 238 of 394 shaders. In the billboard shader that zeroed the quad's width. `xenosrecomp-crackdown.patch` now emits the scalar text first, except where it sets `a0`, or `p0` that the vector half reads. **It may also have changed other things that looked different.**
+- **Also fixed:** 154 vertex fetches ask for texel coordinates and point sampling, which the translator ignores, so effect curves read wrong. `use_texel_fetches` in `pull_vertices.py` handles it from the ucode. Blend constants now reach Metal (`0x2105`).
+- **Wrong guesses, for the record:** the one skipped texture is a depth buffer read before its first copy, harmless. Bool flags and size constants were fine. The parameter "textures" are one linear table viewed in four formats, and that's fine too.
+- **Tools:** Free Camera spots are in `user_data/camera-spots.txt`, and `--crackdown_free_camera_start=x,y,z,yaw,pitch` starts there. Bruce's three: orb, ocean, Agency beam. An ID picture is the fastest test: `ids,show=<target>`, then look for draws that never appear.
+- **Don't:** check for a running game with a pattern that also appears in your own command. `grep -c` counted the shell itself and looked like a live game.
+
 ## 2026-11-01 (evening) — Third drive
 - **Pushed** through `92b7d37`, on Bruce's word. Later commits are local.
 - **Bruce's drive:** orbs better but still wrong, spawn effect wrong in both renderers, an orb visible in Metal that the emulator doesn't show. Race markers, Agency spotlights and headlights missing. Shadows occasionally differ.
