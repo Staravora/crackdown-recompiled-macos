@@ -26,6 +26,7 @@ struct MetalPullElement {
   uint32_t packed;
   int32_t offset;
   float scale;
+  uint32_t select;
 };
 
 enum class MetalPrimitive { kTriangleList, kTriangleStrip };

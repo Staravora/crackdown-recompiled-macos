@@ -10,6 +10,15 @@ namespace crackdown::native {
 // The game's precompiled command buffers hold raw GPU packets that no Direct3D hook sees: 41-64% of city draws. Each
 // draw in one carries its complete state, and the census saw none change, so a list is decoded once and replayed from
 // compact records after that. See docs/native-rendering-survey.md.
+// A shader's literal constants, loaded from beside its code. One shader can have more than one block of them.
+struct BakedLiteral {
+  uint32_t address;
+  uint16_t first_dword;  // In the ALU constant file: vertex constants, then pixel.
+  uint16_t dwords;
+};
+
+inline constexpr uint32_t kMaxLiteralsPerDraw = 6;
+
 struct BakedDraw {
   uint32_t pipeline;  // Interned render state, with the shaders.
   uint32_t textures;  // Interned fetch constants.
@@ -17,15 +26,17 @@ struct BakedDraw {
   uint32_t vertex_shader;
   uint32_t vertex_shader_dwords;
   uint32_t pixel_shader;
-  uint32_t literals;  // Guest address of the shader's literal constants.
-  uint16_t literal_register;
-  uint16_t literal_dwords;
+  BakedLiteral literals[kMaxLiteralsPerDraw];
+  uint32_t literal_count;
   uint32_t index_buffer;
   uint32_t index_info;
   uint32_t initiator;
   uint32_t index_offset;
   uint32_t booleans;  // Bool constants 0-15 of each stage, as XenosRecomp's shaders read them.
   uint32_t depth_control;
+  uint32_t blend_control;
+  uint32_t color_control;
+  uint32_t color_mask;
   uint32_t surface_info;
   uint32_t color_info;
   uint32_t depth_info;
@@ -55,12 +66,26 @@ struct DecodeStats {
   uint64_t packets = 0;
   uint64_t unknown_packets = 0;
   uint64_t truncated_packets = 0;
+  uint64_t dropped_literals = 0;
 };
 
 class BakedLibrary {
  public:
+  static constexpr uint32_t kRegisterBase = 0x2000;
+  static constexpr uint32_t kFloatConstantRegister = 0x4000;
+
   // Decodes one list of host-order packets. Keep the result: this is the slow path, and it interns as it goes.
   BakedList Decode(const uint32_t* words, size_t count);
+
+  // Reads one direct draw from the ring into `list`, as its only draw. Unlike a list, the ring holds only what changed,
+  // so state carries over from the call before. Returns false if the words held no draw.
+  bool DecodeNext(const uint32_t* words, size_t count, BakedList& list);
+
+  // Whether the last DecodeNext loaded a vertex shader.
+  bool vertex_shader_loaded() const { return vertex_shader_loaded_; }
+
+  // The vertex constants DecodeNext has seen, as the GPU would hold them.
+  const uint32_t* vertex_constants() const { return registers_.data() + (kFloatConstantRegister - kRegisterBase); }
 
   // The 32 fetch constants of a texture set, six dwords each.
   const uint32_t* texture_set(uint32_t id) const { return texture_set_data_.data() + size_t(id) * 192; }
@@ -75,7 +100,13 @@ class BakedLibrary {
   std::unordered_map<uint64_t, uint32_t> texture_sets_;
   std::unordered_map<uint64_t, uint32_t> dynamic_states_;
   std::vector<uint32_t> texture_set_data_;
+  void DecodeWords(const uint32_t* words, size_t count, BakedList& list, bool intern_textures);
+  void AddLiteral(const uint32_t* data);
+
   std::vector<uint32_t> registers_;
+  BakedDraw state_{};
+  bool literals_open_[2] = {};
+  bool vertex_shader_loaded_ = false;
   DecodeStats stats_;
 };
 

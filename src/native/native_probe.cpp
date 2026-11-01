@@ -33,6 +33,7 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+constexpr uint32_t kDeviceRing = 48;
 constexpr uint32_t kDeviceVertexConstants = 1792;
 constexpr uint32_t kDevicePixelConstants = 5888;
 constexpr uint32_t kDeviceColorTarget = 12160;
@@ -52,6 +53,8 @@ constexpr uint32_t kMaxListDwords = 1 << 16;
 constexpr uint32_t kSampleDwords = 64;
 constexpr uint32_t kAluDwords = 2048;
 constexpr size_t kReportRows = 16;
+constexpr uint32_t kMaxDrawRingBytes = 1 << 20;
+constexpr uint32_t kEveryPass = ~0u;
 
 struct Buffer {
   uint32_t flags = 0;
@@ -87,6 +90,9 @@ std::mutex g_mutex;
 Totals g_totals;
 uint64_t g_frames = 0;
 BakedLibrary g_library;
+BakedLibrary g_ring;
+std::vector<uint32_t> g_ring_words;
+std::shared_ptr<const std::vector<uint8_t>> g_vertex_code;
 std::unordered_map<uint32_t, Buffer> g_buffers;
 std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, uint64_t> g_select;
 
@@ -216,14 +222,15 @@ void Replay(const Buffer& entry, uint32_t pass_select) {
         continue;
       }
       ++g_totals.draws;
-      if (const uint8_t* literals = draw.literal_dwords ? HostOfList(draw.literals, draw.literal_dwords) : nullptr) {
-        const uint32_t first = uint32_t(draw.literal_register) * kDwordsPerConstant;
-        if (first + draw.literal_dwords <= kAluDwords) {
-          std::memcpy(g_constants.data() + first, literals, size_t(draw.literal_dwords) * 4);
-          for (uint32_t i = 0; i < draw.literal_dwords; ++i) {
-            g_constants[first + i] = std::byteswap(g_constants[first + i]);
+      for (uint32_t i = 0; i < draw.literal_count; ++i) {
+        const BakedLiteral& literal = draw.literals[i];
+        const uint8_t* host = HostOfList(literal.address, literal.dwords);
+        if (host && literal.first_dword + uint32_t(literal.dwords) <= kAluDwords) {
+          std::memcpy(g_constants.data() + literal.first_dword, host, size_t(literal.dwords) * 4);
+          for (uint32_t k = 0; k < literal.dwords; ++k) {
+            g_constants[literal.first_dword + k] = std::byteswap(g_constants[literal.first_dword + k]);
           }
-          g_totals.literal_dwords += draw.literal_dwords;
+          g_totals.literal_dwords += literal.dwords;
         }
       }
       g_totals.state_changes += draw.pipeline != g_pipeline;
@@ -327,6 +334,47 @@ void OnRunCommandBuffer(uint32_t device, uint32_t buffer, uint32_t predication, 
   ++g_select[{entry.flags, predication, Load32(base, device + kDeviceBinMaskLow), Load32(base, device + kDeviceBinMaskHigh)}];
   ++entry.runs;
   ++g_totals.runs;
+}
+
+uint32_t BeforeDraw(uint32_t device, const uint8_t* base) {
+  return shadow::Enabled() ? Load32(base, device + kDeviceRing) : 0;
+}
+
+void AfterDraw(uint32_t device, uint32_t ring_before, const uint8_t* base) {
+  if (!ring_before) {
+    return;
+  }
+  const uint32_t ring_after = Load32(base, device + kDeviceRing);
+  if (ring_after <= ring_before || ring_after - ring_before > kMaxDrawRingBytes) {
+    shadow::CountDirectDraw(shadow::DirectDraw::kRingWrapped);
+    return;
+  }
+  const size_t dwords = (ring_after - ring_before) / 4;
+  std::lock_guard lock(g_mutex);
+  g_ring_words.resize(dwords);
+  // The pointer rests on the last word written, not the next free one.
+  std::memcpy(g_ring_words.data(), GuestPointer(base, ring_before + 4), dwords * 4);
+  for (uint32_t& word : g_ring_words) {
+    word = std::byteswap(word);
+  }
+  auto list = std::make_shared<std::vector<BakedList>>(1);
+  if (!g_ring.DecodeNext(g_ring_words.data(), dwords, list->front())) {
+    shadow::CountDirectDraw(shadow::DirectDraw::kNoDrawPacket);
+    return;
+  }
+  shadow::CountDirectDraw(shadow::DirectDraw::kCaptured);
+  const BakedDraw& draw = list->front().draws.front();
+  // A shader bound to a new vertex format is patched into a copy in the ring, which has moved on by the time a frame is
+  // drawn, so the code goes along with the draw.
+  if (g_ring.vertex_shader_loaded()) {
+    if (const uint8_t* code = HostOfList(draw.vertex_shader, draw.vertex_shader_dwords)) {
+      g_vertex_code = std::make_shared<const std::vector<uint8_t>>(code, code + size_t(draw.vertex_shader_dwords) * 4);
+    } else {
+      g_vertex_code = nullptr;
+    }
+  }
+  shadow::Capture(std::move(list), kEveryPass, g_ring.vertex_constants(), Load32(base, device + kDeviceColorTarget),
+                  Load32(base, device + kDeviceDepthTarget), g_vertex_code);
 }
 
 void Write(const std::filesystem::path& path, const std::string& label) {

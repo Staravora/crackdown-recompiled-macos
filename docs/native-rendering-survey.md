@@ -317,6 +317,48 @@ Shadow mode now costs about 2 FPS, 3 ms on the median frame and 260 MB, on top o
 
 **What baked draws leave out, from Bruce's drive with this build.** Some cars draw and some don't. Those that do are complete far away and lose their bodies up close, leaving wheels and trim, and many of the missing vehicles are gang vehicles. Trees, throwable objects, miscellaneous props, people and characters are all missing. Drawing every pass didn't bring these back, so the likely explanation is that they're direct draws: a car's far LOD is baked, and its near body goes through the Direct3D setters so it can dent and come apart. That fits the census, where baked draws are 41-64% of city draws, but no draw has been traced to a specific object yet.
 
+## Direct draws (2026-11-01)
+
+Shadow mode now records direct draws alongside baked ones, in the order the game made them. The player, pedestrians and car bodies appear, which settles the guess in [Every pass](#every-pass-2026-10-31): those were direct draws.
+
+**How they're read: from D3D's ring, not its device.** The hook reads the ring pointer (`device + 48`) either side of `826B9FF8` and `826B9C08`, and the words between hold exactly what changed since the last draw, in the packets the baked decoder already knows. `BakedLibrary::DecodeNext` keeps its registers between calls, so it tracks what the GPU would hold, and D3D sends the whole register set again after each baked buffer, which keeps that right. Nothing about the device's layout had to be worked out beyond the pointer and the two surfaces. A takeover removes the ring, so this is a shadow mode shortcut: the same state has to come from the device then.
+
+**Things that were found the hard way:**
+
+- **The ring pointer rests on the last word written**, not the next free one, so a draw's words start 4 bytes past it. Read without that, spans began with the previous draw's last word and lost their own, and the parser drifted out of step.
+- **A shader bound to a new vertex format is often patched into a copy in the ring.** Those are gone by the time the render thread runs, and they looked like dozens of unknown shaders. Their code now travels with the draw, and they're cached by content.
+- **Binding also rewrites each fetch's destination swizzle**, for example to swap red and blue or to force W to 1. The hash now ignores it, and the translated shaders, which are fixed to the shipped swizzle, get a per-element remap (`select`) built from the shipped and live swizzles. **That changed `manifest.txt` and the metallibs:** rerun `pull_vertices.py` after updating, and old shaders won't work with this build. 177 shaders now, down from 191, since some differed only in swizzle.
+- **One shader can load several blocks of literals,** and the decoder kept only the last, so some baked draws had partly wrong constants. It now keeps up to six, per stage. No difference in the picture was looked for.
+- **A few ring spans hold raw vertices** that aren't in any packet, about 6 a frame. They read as packet type 1, which D3D never writes, so reading stops there. Without that, floats became register writes. Those draws are lost, and their state changes with them until the next full send.
+- **Transparent draws are left out of the grey view.** A blended draw that doesn't write depth comes out as a solid sheet with no pixel shader: a spiky wedge across the player turned out to be one, alpha blended with depth writes off. About 150 a frame.
+
+| Rooftop, per frame, three runs | |
+| --- | --- |
+| Drawn | 3,930-3,980 draws, about 2,350 of them direct, 1.97 million indices, 5 passes, 6-7 targets |
+| Left out as transparent | 142-154 |
+| Direct, no draw packet read | about 6 |
+| Draws with no matching shader | 6 |
+| Render thread, recording, p50 / p95 | 4.4-8.5 / 6.9-11.0 ms |
+| Game thread, capture | 1.0-1.8 ms |
+| GPU | 1.8-2.2 ms, worst 12.5 ms, 0 errors |
+| Dropped frames in a 300-frame window | 0-3 |
+
+| Benchmark, interleaved | Average FPS | Median frame |
+| --- | --- | --- |
+| Off | 28.12, 22.48, 20.05 | 35.3, 39.4, 45.9 ms |
+| On | 22.70, 20.51, 14.06 | 40.9, 42.6, 69.2 ms |
+
+The Air warmed through these runs, so compare each pair rather than the rows: on is 2-6 FPS below the run before it. Recording also slowed from 4.4 to 8.5 ms as it warmed. Peak memory wasn't measured: resident size didn't separate the two.
+
+**Not drawn yet:** about 160 non-indexed and non-strip draws a frame, and everything written straight into the ring (`BeginVertices`, about 340 quads). Fullscreen passes are likely among them, and they'd paint over a grey picture, so they're better added with pixel shaders.
+
+**Other limits:**
+
+- Vertex data is read a frame late from live memory, so a buffer rewritten every frame could tear. Nothing has been seen to do so.
+- Baked shaders are cached by address, so one streamed out and replaced at the same address would stay wrong.
+- The sizes of targets still come from viewports, which is a guess for direct draws. Viewports under 16 pixels are skipped, 1-25 draws a frame, and their cause isn't known.
+- Compared by eye with the emulator's camera only on the rooftop, not side by side. Bruce hasn't driven this build.
+
 ## Free camera (2026-10-31)
 
 A test tool in the cheat menu, under Testing, that flies the game's camera, so both renderers follow it. Session only: it isn't in the launcher. WASD moves, Q and E go down and up, the mouse looks, Shift goes faster, 1-9 jump to saved spots, Shift+1-9 save one to `camera-spots.txt`, and F freezes time. `--crackdown_free_camera_start=x,y,z,yaw,pitch` starts with it on, for scripted runs.
@@ -686,7 +728,7 @@ The output helps the emulator too: the per-shader gap shows how much cost is sti
 
 ### Phase 2: Native vertical slice (6-10 sessions)
 
-**Started:** the [baked buffer decoder](#baked-buffer-decoder-2026-10-31) runs live behind a setting, the [texture change test](#texture-change-test-2026-10-31) passed, and [shadow mode](#shadow-mode-2026-10-31) draws [the main scene in grey](#first-picture-2026-10-31) with real vertex shaders. [Every pass](#every-pass-2026-10-31) now draws to its own target, and a [free camera](#free-camera-2026-10-31) can test any spot. Next: real pixel shaders, textures and direct draws.
+**Started:** the [baked buffer decoder](#baked-buffer-decoder-2026-10-31) runs live behind a setting, the [texture change test](#texture-change-test-2026-10-31) passed, and [shadow mode](#shadow-mode-2026-10-31) draws [the main scene in grey](#first-picture-2026-10-31) with real vertex shaders. [Every pass](#every-pass-2026-10-31) draws to its own target, a [free camera](#free-camera-2026-10-31) can test any spot, and [direct draws](#direct-draws-2026-11-01) are in. Next: real pixel shaders and textures.
 
 - Metal device, render thread and command queue. Choose plume's Metal backend or direct Metal with a small spike; direct is likely simpler for one game on one API.
 - Shadow-device reader, texture path (reusing SDK untile and format code), no-copy guest memory, vertex pulling or copy-and-swap decided by a spike.

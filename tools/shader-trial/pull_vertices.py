@@ -31,7 +31,11 @@ struct PullElement {
     uint packed;  // slot, stride << 8, format << 16, then signed, integer, no-zero and reads at bits 24-27.
     int offset;
     float scale;
+    uint select;  // Where each lane of the result comes from, 3 bits each: x, y, z, w, 0 or 1.
 };
+static inline float pullLane(float4 v, uint select) {
+    return select < 4 ? v[select] : select == 5 ? 1.0 : 0.0;
+}
 static inline uint guestWord(const device uint* guest, uint address, uint endian) {
     uint value = guest[address & 0x07FFFFFF];
     if (endian == 1) {
@@ -144,7 +148,9 @@ static float4 pullElement(const device uint* guest, constant uint* fetch, consta
         default:
             break;
     }
-    return v * element.scale;
+    v *= element.scale;
+    uint select = element.select;
+    return float4(pullLane(v, select & 7), pullLane(v, (select >> 3) & 7), pullLane(v, (select >> 6) & 7), pullLane(v, (select >> 9) & 7));
 }
 """
 
@@ -167,7 +173,7 @@ def masked_code(code):
                 at = (address + i) * 3
                 if (sequence >> (i * 2)) & 1 and at + 2 < len(words) and words[at] & 0x1F == 0:
                     words[at] &= 0xC00FFFFF
-                    words[at + 1] &= 0x80000FFF
+                    words[at + 1] &= 0x80000000
                     words[at + 2] = 0
         pair += 1
     return struct.pack(">%dI" % len(words), *words)
@@ -183,7 +189,9 @@ def elements_of(path):
     elements = []
     for i in range(count):
         value = struct.unpack_from(">I", data, shader_offset + 36 + (field18 + i) * 4)[0]
-        elements.append({"address": value & 0xFFF, "usage": (value >> 12) & 0xF, "index": (value >> 16) & 0xF})
+        address = value & 0xFFF
+        swizzle = struct.unpack_from(">I", code, (address * 3 + 1) * 4)[0] & 0xFFF
+        elements.append({"address": address, "usage": (value >> 12) & 0xF, "index": (value >> 16) & 0xF, "swizzle": swizzle})
     elements.sort(key=lambda e: e["address"])
     return code, elements
 
@@ -243,13 +251,14 @@ def main():
         if key in manifest:
             report["same_masked_key"] += 1
             continue
-        manifest[key] = [element["address"] for element in elements]
+        # The address, then the swizzle the translated shader was built with. Binding rewrites it for the live format.
+        manifest[key] = [value for element in elements for value in (element["address"], element["swizzle"])]
         target = os.path.join(work, f"vs_{key}.metal")
         open(target, "w").write(source)
         jobs.append((target, os.path.join(output, f"vs_{key}.metallib"), os.path.join(work, f"vs_{key}.log")))
     with open(os.path.join(output, "manifest.txt"), "w") as out:
         for key, addresses in sorted(manifest.items()):
-            out.write(" ".join([key] + [str(address) for address in addresses]) + "\n")
+            out.write(" ".join([key] + [str(value) for value in addresses]) + "\n")
     with ThreadPoolExecutor(6) as pool:
         codes = list(pool.map(compile_one, jobs))
     report["compiled"] = codes.count(0)

@@ -20,6 +20,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 
 #include <fmt/format.h>
 
@@ -52,17 +53,28 @@ constexpr size_t kConstantRegionBytes = 32 << 20;
 constexpr size_t kIndexRegionBytes = 32 << 20;
 constexpr size_t kFrameBytes = kConstantRegionBytes + kIndexRegionBytes;
 constexpr size_t kPooledFrames = 3;
-constexpr size_t kRunsPerFrame = 2048;
-constexpr uint32_t kReportFrames = 900;
+constexpr size_t kRunsPerFrame = 4096;
+constexpr uint32_t kReportFrames = 300;
 constexpr uint32_t kCaptureFrames = 300;
 constexpr uint32_t kCheckFrames = 300;
 constexpr uint32_t kCheckBytes = 4096;
 constexpr uint32_t kMaxShaderDwords = 1 << 14;
+constexpr uint32_t kMinTargetSize = 16;
 constexpr uint32_t kMaxTargetSize = 4096;
 
 constexpr uint32_t kSourceAutoIndex = 2;
 constexpr uint32_t kPrimitiveTriangleList = 4;
 constexpr uint32_t kPrimitiveTriangleStrip = 6;
+constexpr uint64_t kHashBasis = 0xCBF29CE484222325ull;
+constexpr uint64_t kHashPrime = 0x100000001B3ull;
+constexpr uint32_t kDepthEnable = 1 << 1;
+constexpr uint32_t kDepthWrite = 1 << 2;
+constexpr uint32_t kBlendDestinationShift = 8;
+constexpr uint32_t kBlendFactorMask = 0x1F;
+constexpr uint32_t kBlendFactorZero = 0;
+constexpr uint32_t kIndexEndianShift = 30;
+constexpr uint32_t kIndexEndian16 = 1;
+constexpr uint32_t kIndexEndian32 = 2;
 
 struct Run {
   std::shared_ptr<const std::vector<BakedList>> lists;
@@ -70,6 +82,7 @@ struct Run {
   bool clear = false;
   uint32_t color_target = 0;
   uint32_t depth_target = 0;
+  std::shared_ptr<const std::vector<uint8_t>> vertex_code;
   std::array<uint32_t, kVertexConstantDwords> constants{};
 };
 
@@ -88,6 +101,8 @@ struct Totals {
   uint64_t no_target_draws = 0;
   uint64_t passes = 0;
   uint64_t other_primitive_draws = 0;
+  uint64_t other_index_order_draws = 0;
+  uint64_t transparent_draws = 0;
   uint64_t index_copy_ns = 0;
   uint64_t shaders_found = 0;
   uint64_t shaders_missing = 0;
@@ -106,6 +121,9 @@ std::deque<std::unique_ptr<Frame>> g_ready;
 uint64_t g_guest_frames = 0;
 uint64_t g_dropped = 0;
 uint64_t g_capture_ns = 0;
+uint64_t g_direct_draws = 0;
+uint64_t g_direct_wrapped = 0;
+uint64_t g_direct_no_draw = 0;
 bool g_clear_pending = false;
 
 // Render thread only from here down.
@@ -116,6 +134,7 @@ std::unordered_map<std::string, std::vector<uint32_t>> g_manifest;
 // By address and size. -1 means looked at and no use.
 std::unordered_map<uint64_t, int> g_vertex_shaders;
 Totals g_totals;
+uint64_t g_frame_number = 0;
 std::vector<uint32_t> g_encode_us;
 std::array<uint32_t, kAluDwords> g_constants{};
 uint32_t g_check_address = 0;
@@ -136,15 +155,17 @@ void ApplyWrites(const BakedList& list, const BakedDraw& draw) {
 }
 
 void ApplyLiterals(const BakedDraw& draw) {
-  const uint32_t first = uint32_t(draw.literal_register) * 4;
-  const uint32_t address = draw.literals & kGuestMask;
-  if (!draw.literal_dwords || first + draw.literal_dwords > kAluDwords ||
-      uint64_t(address) + draw.literal_dwords * 4ull > kGuestBytes) {
-    return;
-  }
-  std::memcpy(g_constants.data() + first, g_guest + address, size_t(draw.literal_dwords) * 4);
-  for (uint32_t i = 0; i < draw.literal_dwords; ++i) {
-    g_constants[first + i] = std::byteswap(g_constants[first + i]);
+  for (uint32_t i = 0; i < draw.literal_count; ++i) {
+    const BakedLiteral& literal = draw.literals[i];
+    const uint32_t address = literal.address & kGuestMask;
+    if (!literal.dwords || literal.first_dword + uint32_t(literal.dwords) > kAluDwords ||
+        uint64_t(address) + literal.dwords * 4ull > kGuestBytes) {
+      continue;
+    }
+    std::memcpy(g_constants.data() + literal.first_dword, g_guest + address, size_t(literal.dwords) * 4);
+    for (uint32_t k = 0; k < literal.dwords; ++k) {
+      g_constants[literal.first_dword + k] = std::byteswap(g_constants[literal.first_dword + k]);
+    }
   }
 }
 
@@ -177,7 +198,7 @@ std::string MaskedKey(const uint8_t* code, uint32_t dwords) {
         const uint32_t at = (address + i) * 3;
         if (((sequence >> (i * 2)) & 1) && at + 2 < dwords && (get(at) & 0x1F) == 0) {
           set(at, get(at) & 0xC00FFFFF);
-          set(at + 1, get(at + 1) & 0x80000FFF);
+          set(at + 1, get(at + 1) & 0x80000000);
           set(at + 2, 0);
         }
       }
@@ -187,11 +208,27 @@ std::string MaskedKey(const uint8_t* code, uint32_t dwords) {
   return trg::update::Sha256Hex(bytes).substr(0, 16);
 }
 
+// Which of the fetched x, y, z, w, 0 or 1 each lane of input should hold, so that a translated shader, which swizzles
+// input the way the shipped ucode did, ends up with what the live ucode's swizzle asks for. Binding rewrites that to suit
+// the format, such as swapping red and blue. A lane nothing reads stays as fetched.
+uint32_t SelectFor(uint32_t shipped, uint32_t live) {
+  std::array<uint32_t, 4> select = {0, 1, 2, 3};
+  for (uint32_t i = 0; i < 4; ++i) {
+    const uint32_t from = (shipped >> (i * 3)) & 7, to = (live >> (i * 3)) & 7;
+    if (from < 4 && (to < 4 || to == 4 || to == 5)) {
+      select[from] = to;
+    }
+  }
+  return select[0] | select[1] << 3 | select[2] << 6 | select[3] << 9;
+}
+
 // What pullElement needs from each fetch, read from the live ucode. A mini fetch shares the full fetch's slot and stride.
-std::vector<MetalPullElement> PullElements(const uint8_t* code, uint32_t dwords, const std::vector<uint32_t>& addresses) {
+// The manifest holds each fetch's address and shipped swizzle.
+std::vector<MetalPullElement> PullElements(const uint8_t* code, uint32_t dwords, const std::vector<uint32_t>& manifest) {
   std::vector<MetalPullElement> elements;
   uint32_t slot = 0, stride = 0;
-  for (const uint32_t address : addresses) {
+  for (size_t entry = 0; entry + 1 < manifest.size(); entry += 2) {
+    const uint32_t address = manifest[entry], shipped = manifest[entry + 1];
     if ((address + 1) * 3 > dwords) {
       return {};
     }
@@ -202,19 +239,26 @@ std::vector<MetalPullElement> PullElements(const uint8_t* code, uint32_t dwords,
     }
     bool reads = false;
     for (uint32_t i = 0; i < 4; ++i) {
-      reads |= (((d1 & 0xFFF) >> (i * 3)) & 7) <= 3;
+      reads |= (((d1 & 0xFFF) >> (i * 3)) & 7) <= 5;
     }
     const uint32_t flags = ((d1 >> 12) & 7) | (uint32_t(reads) << 3);
     const int32_t exponent = (int32_t(d1 << 2) >> 26);
     const int32_t offset = int32_t(d2 << 1) >> 9;
     elements.push_back({slot | (stride << 8) | (((d1 >> 16) & 0x3F) << 16) | (flags << 24), offset,
-                        float(std::ldexp(1.0, exponent))});
+                        float(std::ldexp(1.0, exponent)), SelectFor(shipped, d1 & 0xFFF)});
   }
   return elements;
 }
 
-int FindVertexShader(MetalDevice& device, const BakedDraw& draw) {
-  const uint64_t key = uint64_t(draw.vertex_shader) << 32 | draw.vertex_shader_dwords;
+int FindVertexShader(MetalDevice& device, const BakedDraw& draw, const Run& run) {
+  // By content where the code came with the draw: a copy in the ring has a new address each time it's made.
+  uint64_t key = uint64_t(draw.vertex_shader) << 32 | draw.vertex_shader_dwords;
+  if (run.vertex_code) {
+    key = kHashBasis;
+    for (const uint8_t byte : *run.vertex_code) {
+      key = (key ^ byte) * kHashPrime;
+    }
+  }
   const auto found = g_vertex_shaders.find(key);
   if (found != g_vertex_shaders.end()) {
     return found->second;
@@ -223,7 +267,7 @@ int FindVertexShader(MetalDevice& device, const BakedDraw& draw) {
   const uint32_t address = draw.vertex_shader & kGuestMask;
   if (draw.vertex_shader_dwords && draw.vertex_shader_dwords <= kMaxShaderDwords &&
       uint64_t(address) + draw.vertex_shader_dwords * 4ull <= kGuestBytes) {
-    const uint8_t* code = g_guest + address;
+    const uint8_t* code = run.vertex_code ? run.vertex_code->data() : g_guest + address;
     const std::string masked = MaskedKey(code, draw.vertex_shader_dwords);
     const auto manifest = g_manifest.find(masked);
     if (manifest == g_manifest.end()) {
@@ -256,7 +300,7 @@ bool CopyIndices(const BakedDraw& draw, uint32_t count, bool wide, uint8_t* fram
   used = offset - kConstantRegionBytes + bytes;
   const uint8_t* source = g_guest + address;
   uint8_t* target = frame + offset;
-  // All this game's index buffers are big-endian. Other orders are counted in the report if that ever changes.
+  // All this game's index buffers are big-endian. Other orders are counted in the report in case that ever changes.
   if (wide) {
     for (uint32_t i = 0; i < count; ++i) {
       uint32_t value;
@@ -293,7 +337,8 @@ MetalViewport ViewportOf(const BakedDraw& draw) {
 
 int TargetOf(MetalDevice& device, const Run& run, const MetalViewport& viewport) {
   const TargetKey key = {run.color_target, run.depth_target, uint32_t(viewport.width), uint32_t(viewport.height)};
-  if (!key.width || !key.height || key.width > kMaxTargetSize || key.height > kMaxTargetSize) {
+  if (key.width < kMinTargetSize || key.height < kMinTargetSize || key.width > kMaxTargetSize ||
+      key.height > kMaxTargetSize) {
     return -1;
   }
   const auto found = g_targets.find(key);
@@ -304,6 +349,13 @@ int TargetOf(MetalDevice& device, const Run& run, const MetalViewport& viewport)
   REXLOG_INFO("Native shadow: target {}x{}, colour {:08X}, depth {:08X}", key.width, key.height, key.color, key.depth);
   g_targets[key] = target;
   return target;
+}
+
+// Blending with what's already there, without writing depth.
+bool IsTransparent(const BakedDraw& draw) {
+  const bool writes_depth = (draw.depth_control & kDepthEnable) && (draw.depth_control & kDepthWrite);
+  const uint32_t destination_factor = (draw.blend_control >> kBlendDestinationShift) & kBlendFactorMask;
+  return !writes_depth && destination_factor != kBlendFactorZero;
 }
 
 // A depth test that passes on greater-or-equal means reversed depth, which clears to 0.
@@ -329,19 +381,25 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         }
         ++g_totals.draws;
         ApplyLiterals(draw);
+        // Without pixel shaders these would be solid sheets, not the light and glass they are.
+        if (IsTransparent(draw)) {
+          ++g_totals.transparent_draws;
+          continue;
+        }
         const uint32_t primitive = draw.initiator & 0x3F;
         const uint32_t source = (draw.initiator >> 6) & 3;
         if ((primitive != kPrimitiveTriangleList && primitive != kPrimitiveTriangleStrip) || source == kSourceAutoIndex) {
           ++g_totals.other_primitive_draws;
           continue;
         }
-        const int shader = FindVertexShader(device, draw);
+        const int shader = FindVertexShader(device, draw, run);
         if (shader < 0) {
           ++g_totals.no_shader_draws;
           continue;
         }
         const uint32_t index_count = draw.initiator >> 16;
         const bool wide = (draw.initiator >> 11) & 1;
+        g_totals.other_index_order_draws += (draw.index_info >> kIndexEndianShift) != (wide ? kIndexEndian32 : kIndexEndian16);
         size_t indices = 0;
         const Clock::time_point copy_start = Clock::now();
         const bool copied = CopyIndices(draw, index_count, wide, memory, indices_used, indices);
@@ -430,31 +488,44 @@ uint32_t Percentile(const std::vector<uint32_t>& sorted, double share) {
 void Report(const MetalDevice& device) {
   std::vector<uint32_t> sorted = g_encode_us;
   std::sort(sorted.begin(), sorted.end());
-  uint64_t guest_frames, dropped, capture_ns;
+  uint64_t guest_frames, dropped, capture_ns, direct_draws, direct_wrapped, direct_no_draw;
   {
+    // Each report covers the frames since the last one, so menus and loading don't blur a run.
     std::lock_guard lock(g_mutex);
-    guest_frames = g_guest_frames;
+    guest_frames = std::exchange(g_guest_frames, 0);
     dropped = g_dropped;
-    capture_ns = g_capture_ns;
+    capture_ns = std::exchange(g_capture_ns, 0);
+    direct_draws = std::exchange(g_direct_draws, 0);
+    direct_wrapped = std::exchange(g_direct_wrapped, 0);
+    direct_no_draw = std::exchange(g_direct_no_draw, 0);
   }
   const MetalGpuTotals gpu = device.gpu_totals();
   const double frames = double(std::max<uint64_t>(g_totals.frames, 1));
   std::ofstream out(g_path);
   out << fmt::format(
       R"({{"guest_frames":{},"frames":{},"dropped":{},"draws_per_frame":{:.1f},"skipped_draws_per_frame":{:.1f},"no_room":{},)"
-      R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"no_target_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},"passes_per_frame":{:.1f},"targets":{},)"
+      R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"no_target_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},"other_index_order_draws_per_frame":{:.1f},"transparent_draws_per_frame":{:.1f},"direct_draws_per_frame":{:.1f},"direct_wrapped_per_frame":{:.2f},"direct_no_draw_per_frame":{:.2f},"passes_per_frame":{:.1f},"targets":{},)"
       R"("shaders_found":{},"shaders_missing":{},"shaders_failed":{},"index_copy_ms_per_frame":{:.3f},)"
       R"("capture_ms_per_frame":{:.4f},"wait_ms_per_frame":{:.3f},"encode_ms_p50":{:.3f},"encode_ms_p95":{:.3f},"encode_ms_max":{:.3f},)"
       R"("gpu_frames":{},"gpu_errors":{},"gpu_ms_per_frame":{:.3f},"gpu_ms_worst":{:.3f},)"
       R"("guest_memory_wrapped":{},"guest_checks":{},"guest_matches":{}}})",
       guest_frames, g_totals.frames, dropped, g_totals.draws / frames, g_totals.skipped_draws / frames, g_totals.no_room,
       g_totals.recorded_draws / frames, g_totals.recorded_indices / frames, g_totals.no_shader_draws / frames,
-      g_totals.no_target_draws / frames, g_totals.other_primitive_draws / frames, g_totals.passes / frames, g_targets.size(), g_totals.shaders_found, g_totals.shaders_missing, g_totals.shaders_failed,
+      g_totals.no_target_draws / frames, g_totals.other_primitive_draws / frames, g_totals.other_index_order_draws / frames,
+      g_totals.transparent_draws / frames, direct_draws / double(std::max<uint64_t>(guest_frames, 1)), direct_wrapped / double(std::max<uint64_t>(guest_frames, 1)),
+      direct_no_draw / double(std::max<uint64_t>(guest_frames, 1)),
+      g_totals.passes / frames, g_targets.size(), g_totals.shaders_found, g_totals.shaders_missing, g_totals.shaders_failed,
       g_totals.index_copy_ns / 1e6 / frames,
       capture_ns / 1e6 / double(std::max<uint64_t>(guest_frames, 1)), g_totals.wait_ns / 1e6 / frames,
       Percentile(sorted, 0.5) / 1e3, Percentile(sorted, 0.95) / 1e3, Percentile(sorted, 1.0) / 1e3, gpu.frames, gpu.errors,
       gpu.gpu_ns / 1e6 / double(std::max<uint64_t>(gpu.frames, 1)), gpu.worst_gpu_ns / 1e6,
       device.guest_memory_wrapped() ? "true" : "false", g_totals.guest_checks, g_totals.guest_matches);
+  const Totals kept = g_totals;
+  g_totals = {};
+  g_totals.shaders_found = kept.shaders_found;
+  g_totals.shaders_missing = kept.shaders_missing;
+  g_totals.shaders_failed = kept.shaders_failed;
+  g_encode_us.clear();
 }
 
 void RenderThread() {
@@ -478,8 +549,9 @@ void RenderThread() {
       frame = std::move(g_ready.front());
       g_ready.pop_front();
     }
+    ++g_frame_number;
     std::filesystem::path capture;
-    if ((g_totals.frames + 1) % kCaptureFrames == 0) {
+    if (g_frame_number % kCaptureFrames == 0) {
       capture = g_path;
       capture.replace_extension(".png");
     }
@@ -493,12 +565,12 @@ void RenderThread() {
     ++g_totals.frames;
     g_totals.wait_ns += timing.wait_ns;
     g_encode_us.push_back(uint32_t(timing.encode_ns / 1000));
-    if (g_totals.frames % kCheckFrames == 0 && g_check_bytes) {
+    if (g_frame_number % kCheckFrames == 0 && g_check_bytes) {
       ++g_totals.guest_checks;
       g_totals.guest_matches += device->MatchesGuestMemory(g_check_address, g_check_bytes);
       g_check_bytes = 0;
     }
-    if (g_totals.frames % kReportFrames == 0) {
+    if (g_frame_number % kReportFrames == 0) {
       Report(*device);
     }
   }
@@ -555,8 +627,13 @@ void OnClear() {
   }
 }
 
+void CountDirectDraw(DirectDraw outcome) {
+  std::lock_guard lock(g_mutex);
+  ++(outcome == DirectDraw::kCaptured ? g_direct_draws : outcome == DirectDraw::kRingWrapped ? g_direct_wrapped : g_direct_no_draw);
+}
+
 void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_select, const uint32_t* vertex_constants,
-             uint32_t color_target, uint32_t depth_target) {
+             uint32_t color_target, uint32_t depth_target, std::shared_ptr<const std::vector<uint8_t>> vertex_code) {
   const Clock::time_point start = Clock::now();
   std::lock_guard lock(g_mutex);
   Run& run = g_current->runs.emplace_back();
@@ -566,6 +643,7 @@ void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_
   g_clear_pending = false;
   run.color_target = color_target;
   run.depth_target = depth_target;
+  run.vertex_code = std::move(vertex_code);
   std::memcpy(run.constants.data(), vertex_constants, sizeof(run.constants));
   g_capture_ns += Since(start);
 }

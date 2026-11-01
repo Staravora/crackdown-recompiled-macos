@@ -1,5 +1,16 @@
 # Session handoff
 
+## 2026-11-01 — Direct draws in the Metal picture
+- **Result:** shadow mode records about 3,950 draws a frame on the rooftop, 2,350 of them direct, in game order. The player, pedestrians and car bodies appear. 0 GPU errors, 6 draws a frame with no shader. Costs 2-6 FPS beside the emulator on a warming Air. Tables in `docs/native-rendering-survey.md`, "Direct draws".
+- **How:** `native::probe::BeforeDraw` and `AfterDraw` read D3D's ring either side of the draw call, and `BakedLibrary::DecodeNext` keeps registers between calls. The ring pointer rests on the last word written, so a span starts 4 bytes past it.
+- **Rerun the shaders after pulling this:** `pull_vertices.py` changed the hash and the fetch code, and `manifest.txt` now holds address and swizzle pairs. Binding rewrites each fetch's swizzle, and patched copies of shaders live in the ring, so their code now travels with the draw. Bruce's local `native-shaders` is already rebuilt, 177 shaders.
+- **Baked fix too:** a shader can load several literal blocks, and only the last was kept.
+- **Left out on purpose:** transparent draws (a blended draw with no depth write comes out as a solid sheet, which was the wedge across the player), non-indexed draws, and `BeginVertices` quads. Fullscreen passes are likely in those last two, and they'd cover a grey picture.
+- **Bruce's orbs:** the orb effects still show through things wrongly in the emulator (the older "orb occlusion" entry). He hopes Metal fixes it. Not traced, and grey mode can't show it, since they're transparent. Check it when pixel shaders and blending arrive.
+- **Not verified:** nobody has driven this build. Windows, Linux and the title update 6 guest aren't built with these changes.
+- **Next:** Bruce drives with the window on, then real pixel shaders and textures through the page watch.
+- **To see it:** launch with `--crackdown_native_shadow=true --crackdown_native_shadow_window=true`.
+
 ## 2026-10-31 (late) — Free camera, and the world's detail follows the player
 - **Added:** `src/free_camera.cpp`, in the cheat menu (F10) under Testing, with Free Camera and Freeze Time. Session only, not in the launcher. Keys are in `src/free_camera.h`. Both renderers follow it. `--crackdown_free_camera_start=x,y,z,yaw,pitch` and `--crackdown_free_camera_freeze_after=<frames>` drive it from the command line.
 - **Finding:** Bruce saw things drawing from the player's point of view. Detail and streaming follow the player's position, so the camera now writes its position over `character + 0x140` every update. Full table in `docs/native-rendering-survey.md`, "Free camera".

@@ -607,20 +607,30 @@ void CensusBeginIndexedVertices(PPCContext& ctx, uint8_t* base, GuestFunction or
 
 void CensusDrawVertices(PPCContext& ctx, uint8_t* base, GuestFunction original) {
   native::textures::OnDraw(ctx.r3.u32);
+  const uint32_t device = ctx.r3.u32;
+  const uint32_t ring = native::probe::BeforeDraw(device, base);
   if (!census::Counting()) {
-    return original(ctx, base);
+    original(ctx, base);
+    native::probe::AfterDraw(device, ring, base);
+    return;
   }
   census::CountDraw(census::kVertices, ctx.r6.u32, ctx, base);
   census::RunTimed(ctx, base, original, &census::FrameRow::draw_ns);
+  native::probe::AfterDraw(device, ring, base);
 }
 
 void CensusDrawIndexed(PPCContext& ctx, uint8_t* base, GuestFunction original) {
   native::textures::OnDraw(ctx.r3.u32);
+  const uint32_t device = ctx.r3.u32;
+  const uint32_t ring = native::probe::BeforeDraw(device, base);
   if (!census::Counting()) {
-    return original(ctx, base);
+    original(ctx, base);
+    native::probe::AfterDraw(device, ring, base);
+    return;
   }
   census::CountDraw(census::kIndices, ctx.r7.u32, ctx, base);
   census::RunTimed(ctx, base, original, &census::FrameRow::draw_ns);
+  native::probe::AfterDraw(device, ring, base);
 }
 
 void CensusClear(PPCContext& ctx, uint8_t* base, GuestFunction original) {
