@@ -3,7 +3,7 @@
 #import <Foundation/Foundation.h>
 #import <ImageIO/ImageIO.h>
 #import <Metal/Metal.h>
-#import <QuartzCore/CAMetalLayer.h>
+#import <QuartzCore/QuartzCore.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <dispatch/dispatch.h>
 
@@ -16,6 +16,20 @@
 #include <vector>
 
 #include "metal_device.h"
+
+// A view whose own layer is the Metal one. Handing an ordinary content view a layer shows nothing.
+@interface ShadowView : NSView
+@property(nonatomic, strong) CAMetalLayer* metalLayer;
+@end
+
+@implementation ShadowView
+- (CALayer*)makeBackingLayer {
+  return self.metalLayer;
+}
+- (BOOL)wantsUpdateLayer {
+  return YES;
+}
+@end
 
 namespace crackdown::native {
 namespace {
@@ -126,16 +140,15 @@ class MetalDeviceImpl final : public MetalDevice {
   bool guest_memory_wrapped() const override { return guest_ != nil; }
 
   void ShowWindow() override {
-    CAMetalLayer* layer = [CAMetalLayer layer];
-    layer.device = device_;
-    layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    layer.framebufferOnly = NO;
-    layer.drawableSize = CGSizeMake(kTargetWidth, kTargetHeight);
-    layer.displaySyncEnabled = NO;
-    layer.contentsGravity = kCAGravityResizeAspect;
-    layer_ = layer;
-    // AppKit is the main thread's. orderFront leaves the keyboard with the game.
+    // AppKit and Core Animation are the main thread's: a layer set up on a thread with no run loop never reaches the
+    // screen, and every frame presented to it is dropped. orderFront leaves the keyboard with the game.
+    id<MTLDevice> device = device_;
     dispatch_async(dispatch_get_main_queue(), ^{
+      CAMetalLayer* layer = [CAMetalLayer layer];
+      layer.device = device;
+      layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+      layer.framebufferOnly = NO;
+      layer.drawableSize = CGSizeMake(kTargetWidth, kTargetHeight);
       NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(60, 60, 640, 360)
                                                      styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskResizable |
                                                                NSWindowStyleMaskMiniaturizable
@@ -143,10 +156,17 @@ class MetalDeviceImpl final : public MetalDevice {
                                                          defer:NO];
       window.title = @"Crackdown: Metal shadow";
       window.releasedWhenClosed = NO;
-      window.contentView.layer = layer;
-      window.contentView.wantsLayer = YES;
+      ShadowView* view = [[ShadowView alloc] initWithFrame:window.contentLayoutRect];
+      view.metalLayer = layer;
+      view.wantsLayer = YES;
+      view.layerContentsPlacement = NSViewLayerContentsPlacementScaleProportionallyToFit;
+      window.contentView = view;
+      layer.contentsScale = window.backingScaleFactor;
       [window orderFront:nil];
       window_ = window;
+      [CATransaction flush];
+      layer_ = layer;
+      layer_ready_.store(true, std::memory_order_release);
     });
   }
 
@@ -196,12 +216,14 @@ class MetalDeviceImpl final : public MetalDevice {
       timing.wait_ns = Since(wait_start);
 
       const Clock::time_point encode_start = Clock::now();
-      id<MTLCommandBuffer> buffer = [queue_ commandBufferWithUnretainedReferences];
+      // A drawable has to outlive this autorelease pool, so the window's frames keep their references.
+      CAMetalLayer* layer = layer_ready_.load(std::memory_order_acquire) ? layer_ : nil;
+      id<MTLCommandBuffer> buffer = layer ? [queue_ commandBuffer] : [queue_ commandBufferWithUnretainedReferences];
       MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
       pass.colorAttachments[0].texture = color_;
       pass.colorAttachments[0].loadAction = MTLLoadActionClear;
       pass.colorAttachments[0].clearColor = MTLClearColorMake(0.08, 0.1, 0.14, 1.0);
-      pass.colorAttachments[0].storeAction = capture.empty() && !layer_ ? MTLStoreActionDontCare : MTLStoreActionStore;
+      pass.colorAttachments[0].storeAction = capture.empty() && !layer ? MTLStoreActionDontCare : MTLStoreActionStore;
       pass.depthAttachment.texture = depth_;
       pass.depthAttachment.loadAction = MTLLoadActionClear;
       // The game uses reversed depth: nearer is greater, cleared to 0.
@@ -242,9 +264,18 @@ class MetalDeviceImpl final : public MetalDevice {
         [blit endEncoding];
       }
 
-      if (id<CAMetalDrawable> drawable = layer_ ? [layer_ nextDrawable] : nil) {
+      if (id<CAMetalDrawable> drawable = [layer nextDrawable]) {
         id<MTLBlitCommandEncoder> blit = [buffer blitCommandEncoder];
-        [blit copyFromTexture:color_ toTexture:drawable.texture];
+        [blit copyFromTexture:color_
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(std::min(kTargetWidth, drawable.texture.width),
+                                          std::min(kTargetHeight, drawable.texture.height), 1)
+                    toTexture:drawable.texture
+             destinationSlice:0
+             destinationLevel:0
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
         [blit endEncoding];
         [buffer presentDrawable:drawable];
       }
@@ -402,6 +433,7 @@ class MetalDeviceImpl final : public MetalDevice {
   uint32_t slot_ = 0;
   int current_pipeline_ = -1;
   uint32_t current_depth_ = UINT32_MAX;
+  std::atomic<bool> layer_ready_{false};
   std::atomic<uint64_t> completed_{0};
   std::atomic<uint64_t> errors_{0};
   std::atomic<uint64_t> gpu_ns_{0};

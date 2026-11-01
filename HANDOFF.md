@@ -3,8 +3,9 @@
 ## 2026-10-31 (night) — First Metal picture: the rooftop in grey from live game data
 - **Result:** shadow mode draws the main scene with real vertex shaders, the live camera and live geometry, off screen or in a window with `crackdown_native_shadow_window`. 32-40 live shaders per run, none missing, 0 GPU errors, 0 dropped frames, about 665 draws in 0.7 ms and 1.3 ms of GPU. Costs about 1 FPS and 220 MB on top of the emulator. Detail in `docs/native-rendering-survey.md`, "First picture".
 - **Key finding:** shipped vertex shaders have blank fetches that D3D patches at bind, so layouts come from live ucode. `tools/shader-trial/pull_vertices.py` builds shaders that pull vertices themselves, and `Crackdown Data/user_data/native-shaders` holds the 191 metallibs. That folder isn't in the repo and comes from `translated/`.
-- **Not done:** no textures, real pixel shaders, direct draws or culling, and only the largest stretch between resolves is drawn. Nobody has compared the picture with the emulator yet. Bruce can open both side by side.
-- **Next:** compare, then track render targets so every pass draws, then real pixel shaders and the texture path using the page watch.
+- **Compared by eye:** rooftop and Agency interior match the emulator's camera and geometry in screenshots of both windows. The band across the bottom of the rooftop frame is the ledge, which Bruce confirmed. Bruce hasn't seen the window working yet: his session ran the version that showed nothing.
+- **Not done:** no textures, real pixel shaders, direct draws or culling, and only the largest stretch between resolves is drawn.
+- **Next:** track render targets so every pass draws, then real pixel shaders and the texture path using the page watch.
 - **To see it:** launch with `--crackdown_native_shadow=true --crackdown_native_shadow_window=true`. Neither is in the config, so normal play is unchanged.
 
 ## 2026-10-31 (evening) — Metal device and render thread running in shadow mode

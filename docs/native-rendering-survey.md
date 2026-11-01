@@ -276,7 +276,9 @@ So shadow mode now costs about 1 FPS, or 2 ms on the median frame, and 220 MB, m
 
 **The GPU time flatters it.** Vertex work for those 633,000 indices is real, but the pixel shader is trivial, there's a single target, and two thirds of the baked draws and every direct draw are missing.
 
-**Not checked:** nobody has compared the picture with the emulator's. It reads as the rooftop from the benchmark's camera, but correct geometry isn't proved. The band across the bottom of the frame hasn't been identified.
+**Compared with the emulator on two scenes, by eye.** Screenshots of both windows, taken a moment apart in one benchmark run, show the same camera and geometry on the rooftop and inside the Agency tower: columns, wall slots, the X panel, floor lines, the balcony and the ledge the player stands on, which is the band across the bottom of the rooftop frame. A frame from a street in Bruce's session also shows parked cars, so some cars are baked. The player and HUD are missing, as direct draws. That's two scenes by eye, not a pixel comparison.
+
+**The window needed three fixes.** `CAMetalLayer` has to be created and set up on the main thread: on the render thread its changes sit in a transaction that thread's missing run loop never commits, and the layer displays nothing with every frame reporting `presentedTime` 0. A view has to supply the layer through `makeBackingLayer`, and keeping the picture's shape takes `layerContentsPlacement`, because AppKit overrides `contentsGravity`. After the fix, 9 of the first 100 frames weren't shown and none of the next 100 were.
 
 ## Shader trial (2026-10-31)
 
