@@ -1,10 +1,15 @@
 # Session handoff
 
-## 2026-11-01 (evening) — Orbs fixed
+## 2026-11-01 (evening) — Orbs and Agency beams fixed
+- **Agency beams:** confirmed at Bruce's spot at night, matching the emulator. `1B14D2C0` draws the light cones, and reads depth through a window one tile high, at a different base per tile, 600 pages apart. That missed the whole-picture copy, so the washout stopgap held the draws back as `needs_resolve`, 2 a frame. The number was in every night report. `FindResolved` in `texture_cache.cpp` maps the window onto the whole picture. `build_pixels.py` writes `screen-shaders.txt`, 65 shaders that address textures by pixel position, and those read joined-up textures even when drawn for one tile.
+- **Ocean:** Bruce's streaks are gone at his spot at dusk, colours close. **Still different:** the emulator's water has fine ripples and Metal's is smoother. The ripple textures, `1D343` and `1D353`, come from 128x128 passes that weren't in the frames looked at. Not traced.
+- **Red herrings on the way:** `vs 126` is an overlay on the character, `vs 192` is deferred light cubes, `vs 57` fades with age, so skid marks or similar, and `vs 60` is bullet tracers. The loose-matched shaders are occlusion queries with outputs stripped, so nothing's rewired.
+- **Test harness:** a parked free camera leaves the player to be shot, so `Regenerate` shows up after a few minutes. Harmless.
 - **Orbs:** confirmed at Bruce's saved spot, matching the emulator: upright discs, icons, rings and beam. The game drew 40 camera-facing billboards in that frame and none reached the screen.
 - **Cause:** a vector and a scalar op in one Xenos instruction both read registers as they stood before it. XenosRecomp wrote the vector result first, so the scalar read the overwritten value. 745 instructions in 238 of 394 shaders. In the billboard shader that zeroed the quad's width. `xenosrecomp-crackdown.patch` now emits the scalar text first, except where it sets `a0`, or `p0` that the vector half reads. **It may also have changed other things that looked different.**
 - **Also fixed:** 154 vertex fetches ask for texel coordinates and point sampling, which the translator ignores, so effect curves read wrong. `use_texel_fetches` in `pull_vertices.py` handles it from the ucode. Blend constants now reach Metal (`0x2105`).
 - **Wrong guesses, for the record:** the one skipped texture is a depth buffer read before its first copy, harmless. Bool flags and size constants were fine. The parameter "textures" are one linear table viewed in four formats, and that's fine too.
+- **Rerun `run-trial.sh`, then `pull_vertices.py` and `build_pixels.py`, after pulling this.** Bruce's local copies are rebuilt.
 - **Tools:** Free Camera spots are in `user_data/camera-spots.txt`, and `--crackdown_free_camera_start=x,y,z,yaw,pitch` starts there. Bruce's three: orb, ocean, Agency beam. An ID picture is the fastest test: `ids,show=<target>`, then look for draws that never appear.
 - **Don't:** check for a running game with a pattern that also appears in your own command. `grep -c` counted the shell itself and looked like a live game.
 
