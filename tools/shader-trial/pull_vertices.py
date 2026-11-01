@@ -16,6 +16,10 @@ The Xenos joins a vertex shader's outputs to a pixel shader's inputs by position
 names in their tables needn't agree: the depth pass writes its normal as TEXCOORD0 and reads it as
 TEXCOORD1. relink makes Metal do the same.
 
+Effects read their curves from small textures with coordinates in texels and point sampling, which a
+fetch instruction can ask for and the translator ignores. use_texel_fetches finds those instructions
+in the ucode and sends their calls to a helper that does it.
+
 Vertex shaders read textures too, from fetch constants 16 to 19, and the constant table numbers those
 from 0, the same as a pixel shader's. Both stages share one table, so vertex textures move to a table
 of their own, and vertex-textures.txt says which each shader reads.
@@ -331,6 +335,45 @@ def vertex_texture_slots(source):
                    if kind == "Texture2D" and f"{name}_Texture2DDescriptorIndex," in body})
 
 
+TEXEL_FETCH = """
+float4 tfetch2DTexels(constant Texture2DDescriptorHeap* textureHeap,
+                      constant SamplerDescriptorHeap* samplerHeap,
+                      uint resourceDescriptorIndex,
+                      uint samplerDescriptorIndex,
+                      float2 texCoord, float2 offset, float lod = 0.0)
+{
+    texture2d<float> texture = textureHeap[resourceDescriptorIndex].tex;
+    int2 size = int2(getTexture2DDimensions(texture));
+    return texture.read(uint2(clamp(int2(floor(texCoord + offset)), int2(0), size - 1)), 0);
+}
+
+"""
+FETCH_CALL = re.compile(r"tfetch2D(?:Lod)?\((\s*#ifdef __air__\s*g_Texture2DDescriptorHeap,\s*g_SamplerDescriptorHeap,\s*#endif\s*(\w+?)_Texture2DDescriptorIndex)")
+FIRST_VERTEX_FETCH = 16
+
+
+def texel_fetch_slots(words):
+    """The vertex samplers read in texels, as a fetch instruction's coordinate flag says."""
+    slots, others = set(), set()
+    for block in exec_blocks(words):
+        for at, fetch in block:
+            word0 = words[at * 3]
+            if fetch and word0 & 0x1F == 1:
+                (slots if (word0 >> 25) & 1 else others).add(((word0 >> 20) & 0x1F) - FIRST_VERTEX_FETCH)
+    if slots & others:
+        raise ValueError("a sampler read both ways")
+    return slots
+
+
+def use_texel_fetches(source, slots):
+    if not slots:
+        return source
+    names = {name for _, name, kind, offset in VERTEX_TEXTURE.findall(source) if kind == "Texture2D" and int(offset) // 4 in slots}
+    source = FETCH_CALL.sub(lambda found: ("tfetch2DTexels(" if found.group(2) in names else found.group(0)[:found.group(0).index("(") + 1]) + found.group(1), source)
+    a = "float4 tfetch2DLod(constant Texture2DDescriptorHeap* textureHeap,"
+    return source.replace(a, TEXEL_FETCH + a, 1)
+
+
 def compile_one(job):
     source, target, log = job
     done = subprocess.run(["xcrun", "-sdk", "macosx", "metal", "-D__air__=1", source, "-o", target],
@@ -367,6 +410,7 @@ def main():
         # the register it fetches to, which is how to find it if binding has moved it.
         manifest[key] = [value for element in elements for value in (element["address"], element["swizzle"], element["dest"])]
         texture_slots[key] = vertex_texture_slots(original)
+        source = use_texel_fetches(source, texel_fetch_slots(list(struct.unpack(f">{len(code) // 4}I", code))))
         source = move_vertex_textures(source)
         target = os.path.join(work, f"vs_{key}.metal")
         open(target, "w").write(source)

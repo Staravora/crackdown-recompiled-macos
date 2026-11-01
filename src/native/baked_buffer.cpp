@@ -20,6 +20,7 @@ constexpr uint32_t kStencilBack = 0x210C;
 constexpr uint32_t kStencilFront = 0x210D;
 constexpr uint32_t kMode = 0x2205;
 constexpr uint32_t kViewportControl = 0x2206;
+constexpr uint32_t kBlendConstant = 0x2105;
 constexpr uint32_t kGammaIndex = 0x1922;
 constexpr uint32_t kGammaColor = 0x1925;
 constexpr uint32_t kPolygonOffset = 0x2380;
@@ -290,6 +291,7 @@ size_t BakedLibrary::DecodeWords(const uint32_t* words, size_t count, BakedList&
         draw.mode_control = reg(kMode);
         draw.viewport_control = reg(kViewportControl);
         draw.edram_mode = reg(kModeControl) & 7;
+        std::copy_n(&reg(kBlendConstant), 4, draw.blend_constant);
         std::copy_n(&reg(kPolygonOffset), 4, draw.polygon_offset);
         draw.surface_info = reg(kSurfaceInfo);
         draw.color_info = reg(kColorInfo);

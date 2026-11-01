@@ -734,6 +734,7 @@ class MetalDeviceImpl final : public MetalDevice {
     current_mode_ = UINT32_MAX;
     current_viewport_ = {};
     current_bias_slope_ = 0.0f;
+    std::fill_n(current_blend_constant_, 4, 0.0f);
   }
 
   void ShowTarget(int target, bool gamma) override {
@@ -801,6 +802,10 @@ class MetalDeviceImpl final : public MetalDevice {
     if (scissor != current_scissor_) {
       [encoder_ setScissorRect:{0, scissor.first, pass_width_, scissor.second - scissor.first}];
       current_scissor_ = scissor;
+    }
+    if (pass_has_color_ && std::memcmp(draw.blend_constant, current_blend_constant_, sizeof(current_blend_constant_)) != 0) {
+      [encoder_ setBlendColorRed:draw.blend_constant[0] green:draw.blend_constant[1] blue:draw.blend_constant[2] alpha:draw.blend_constant[3]];
+      std::memcpy(current_blend_constant_, draw.blend_constant, sizeof(current_blend_constant_));
     }
     if (draw.depth_bias_slope != current_bias_slope_) {
       [encoder_ setDepthBias:0.0f slopeScale:draw.depth_bias_slope clamp:0.0f];
@@ -1114,6 +1119,7 @@ class MetalDeviceImpl final : public MetalDevice {
   bool has_depth_state_ = false;
   uint32_t current_mode_ = UINT32_MAX;
   float current_bias_slope_ = 0.0f;
+  float current_blend_constant_[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   std::atomic<bool> layer_ready_{false};
   std::atomic<uint64_t> completed_{0};
   std::atomic<uint64_t> errors_{0};

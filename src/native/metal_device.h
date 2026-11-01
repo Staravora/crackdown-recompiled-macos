@@ -132,6 +132,7 @@ struct MetalDraw {
   uint32_t scissor_top = 0;  // Rows of the target it can touch, across its whole width.
   uint32_t scissor_bottom = UINT32_MAX;
   uint32_t blend_control = 0;
+  float blend_constant[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   uint32_t color_mask = 0;
   bool alpha_test = false;
   const int* textures = nullptr;  // Descriptors the pixel shader reads.

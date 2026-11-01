@@ -951,6 +951,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         }
         ++g_debug_id;
         out.blend_control = draw.blend_control;
+        std::memcpy(out.blend_constant, draw.blend_constant, sizeof(out.blend_constant));
         out.color_mask = WritesNoColor(draw) ? 0 : draw.color_mask;
         out.alpha_test = alpha_test;
         // Tiles overlap by a few rows, and a quad drawn for one tile would blend twice on those.

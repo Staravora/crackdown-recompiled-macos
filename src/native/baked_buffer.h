@@ -47,6 +47,7 @@ struct BakedDraw {
   uint32_t mode_control;  // Culling and winding.
   uint32_t viewport_control;  // Which of the viewport's terms apply.
   uint32_t edram_mode;  // What the draw does to the render targets, which can be depth alone or nothing.
+  uint32_t blend_constant[4];  // As floats.
   uint32_t polygon_offset[4];  // Front scale and offset, then back, as floats.
   uint32_t surface_info;
   uint32_t color_info;
