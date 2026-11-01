@@ -108,6 +108,9 @@ constexpr uint32_t kResolveClearDepth = 1 << 9;
 constexpr int32_t kSecondTileTop = 480;
 constexpr uint32_t kFirstTileMask = 0x3;
 constexpr uint32_t kSecondTileMask = 0xC;
+constexpr uint32_t kHalfPictureWidth = 640;
+constexpr uint32_t kHalfTileHeight = 242;
+constexpr int32_t kHalfSecondTileHeight = 120;
 
 using FetchConstant = std::array<uint32_t, kFetchConstantDwords>;
 
@@ -500,6 +503,7 @@ struct TargetKey {
   uint32_t depth;
   uint32_t width;
   uint32_t height;
+  int tile;
   auto operator<=>(const TargetKey&) const = default;
 };
 std::map<TargetKey, int> g_targets;
@@ -511,9 +515,20 @@ MetalViewport ViewportOf(const BakedDraw& draw) {
   return {v[1] - width / 2.0f, v[3] - height / 2.0f, width, height, v[5], v[5] + v[4]};
 }
 
-int TargetOf(MetalDevice& device, const Run& run) {
+// The half-size tint layer is the one surface drawn in each tile's place in turn. Sharing a target, the second tile lands
+// on top of the first, so each has its own.
+bool HalfSizeTiles(const Targets& targets) {
+  return targets.width == kHalfPictureWidth && targets.height == kHalfTileHeight;
+}
+
+int TileOf(const BakedDraw& draw) {
+  const uint32_t tiles = uint32_t(draw.mask);
+  return tiles == kFirstTileMask ? 0 : tiles == kSecondTileMask ? 1 : -1;
+}
+
+int TargetOf(MetalDevice& device, const Run& run, int tile) {
   const Targets& targets = run.targets;
-  const TargetKey key = {targets.color, targets.depth, targets.width, targets.height};
+  const TargetKey key = {targets.color, targets.depth, targets.width, targets.height, HalfSizeTiles(targets) ? std::max(tile, 0) : -1};
   if (!key.width || !key.height || key.width > kMaxTargetSize || key.height > kMaxTargetSize) {
     return -1;
   }
@@ -579,7 +594,8 @@ void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& draw
   std::memcpy(&fetch, run.dest.data(), sizeof(fetch));
   const uint32_t source = copy.flags & kResolveSourceMask;
   const bool depth = source == kResolveDepth;
-  const auto found = g_targets.find({run.targets.color, run.targets.depth, run.targets.width, run.targets.height});
+  const int tile = HalfSizeTiles(run.targets) ? (copy.has_rect && copy.rect[3] <= kHalfSecondTileHeight ? 1 : 0) : -1;
+  const auto found = g_targets.find({run.targets.color, run.targets.depth, run.targets.width, run.targets.height, tile});
   const int target = found == g_targets.end() ? -1 : found->second;
   const int resolve = copy.texture && !g_debug_no_resolves && target >= 0 && drawn.contains(target) && (depth || (source == 0 && run.targets.color))
                           ? g_textures->ResolveInto(run.dest.data())
@@ -741,7 +757,8 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         const bool screen_space = !(draw.viewport_control & kViewportScaleX);
         const MetalViewport viewport =
             screen_space ? MetalViewport{0.0f, 0.0f, float(run.targets.width), float(run.targets.height), 0.0f, 1.0f} : ViewportOf(draw);
-        const int target = InsideTarget(viewport, run.targets) ? TargetOf(device, run) : -1;
+        const int tile = TileOf(draw);
+        const int target = InsideTarget(viewport, run.targets) ? TargetOf(device, run, tile) : -1;
         if (target < 0) {
           ++g_totals.no_target_draws;
           continue;
@@ -791,8 +808,8 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
             slots += fmt::format(" {}k{}:f{}:{}x{}:{:05X}", slot.slot, slot.kind, uint32_t(fetch.format), uint32_t(fetch.size_2d.width) + 1,
                                  uint32_t(fetch.size_2d.height) + 1, uint32_t(fetch.base_address));
           }
-          *g_dump << fmt::format("{} {} vs {} ps {:08X} {} prim {} n {} tgt {} mode {:X} poly {:.6f} {:.6f} depth {:08X} st {:06X} blend {:08X} cc {:08X} mask {:X} bools {:08X} vp {} {} slots{}\n", g_debug_id, run.pass_select == ~0u ? "D" : "B",
-                                 draw.vertex_shader_dwords, draw.pixel_shader, draw.pixel_shader_dwords, primitive, index_count, target, draw.mode_control, std::bit_cast<float>(draw.polygon_offset[0]), std::bit_cast<float>(draw.polygon_offset[1]), draw.depth_control, draw.stencil_front, draw.blend_control, draw.color_control,
+          *g_dump << fmt::format("{} {} vs {} ps {:08X} {} prim {} n {} tgt {} tiles {:X} vp0 {} {} mode {:X} poly {:.6f} {:.6f} depth {:08X} st {:06X} blend {:08X} cc {:08X} mask {:X} bools {:08X} vp {} {} slots{}\n", g_debug_id, run.pass_select == ~0u ? "D" : "B",
+                                 draw.vertex_shader_dwords, draw.pixel_shader, draw.pixel_shader_dwords, primitive, index_count, target, uint32_t(draw.mask), viewport.x, viewport.y, draw.mode_control, std::bit_cast<float>(draw.polygon_offset[0]), std::bit_cast<float>(draw.polygon_offset[1]), draw.depth_control, draw.stencil_front, draw.blend_control, draw.color_control,
                                  draw.color_mask, draw.booleans, viewport.width, viewport.height, slots);
         }
         ++g_debug_id;
@@ -844,8 +861,6 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
             const uint32_t* fetch = fetch_constants + size_t(slot.slot) * kFetchConstantDwords;
             // 3D means a stack of depth maps. The tables start out pointing at the dummies.
             if (slot.slot < textures.size()) {
-              const uint32_t tiles = uint32_t(draw.mask);
-              const int tile = tiles == kFirstTileMask ? 0 : tiles == kSecondTileMask ? 1 : -1;
               const int texture = slot.kind == 1 ? g_textures->FindStack(fetch) : g_textures->FindTexture(fetch, tile);
               textures[texture_count++] = texture;
               std::memcpy(shared + kTextureTableOffsets[slot.kind] + slot.slot * 4, &texture, sizeof(texture));
