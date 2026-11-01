@@ -368,8 +368,8 @@ uint32_t SelectFor(uint32_t shipped, uint32_t live) {
   return select[0] | select[1] << 3 | select[2] << 6 | select[3] << 9;
 }
 
-// What pullElement needs from each fetch, read from the live ucode. A mini fetch shares the full fetch's slot and stride,
-// in live order, and binding can have moved a fetch, so an element finds its own by the register it fetches to. The
+// What pullElement needs from each fetch, read from the live ucode. A mini fetch shares the last full fetch's slot and
+// stride, even one in an earlier block, and binding can have moved a fetch, so an element finds its own by the register it fetches to. The
 // manifest holds each fetch's address, shipped swizzle and that register.
 std::vector<MetalPullElement> PullElements(const uint8_t* code, uint32_t dwords, const std::vector<uint32_t>& manifest) {
   struct Fetch {
@@ -379,8 +379,8 @@ std::vector<MetalPullElement> PullElements(const uint8_t* code, uint32_t dwords,
   };
   const std::vector<uint32_t> words = WordsOf(code, dwords);
   std::vector<Fetch> fetches;
+  uint32_t slot = 0, stride = 0;
   for (const std::vector<uint32_t>& block : FetchBlocks(words)) {
-    uint32_t slot = 0, stride = 0;
     for (const uint32_t at : block) {
       const uint32_t d0 = words[at * 3], d1 = words[at * 3 + 1], d2 = words[at * 3 + 2];
       if (!((d1 >> 30) & 1)) {
