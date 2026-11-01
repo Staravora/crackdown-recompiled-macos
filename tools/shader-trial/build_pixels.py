@@ -11,6 +11,12 @@ translated/ is the hash of their live code too.
 Scene shaders read the shadow mask at pixel position / (1280, 484), the size of one tile, which is
 right on the Xenos, where positions restart at each tile. Here one pass draws the whole picture and
 the mask is joined up to match, so that constant becomes 1 / 720.
+
+A fetch constant can ask for a channel to come back as value * 2 - 1, which no Metal format does and
+the translator doesn't do. The normal buffer depends on it. So the top four bits of a texture's
+descriptor say which channels want it, and the 2D fetches apply it.
+
+Inputs are joined to vertex outputs by position, as pull_vertices.py describes.
 """
 import glob
 import json
@@ -21,11 +27,21 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
+from pull_vertices import relink
+
 KINDS = {"Texture2D": 0, "Texture3D": 64, "TextureCube": 128}
 DEFINE = re.compile(r"#define (\w+?)_(Texture2D|Texture3D|TextureCube)DescriptorIndex \(\*\(reinterpret_cast<device uint\*>"
                     r"\(g_PushConstants\.SharedConstants \+ (\d+)\)\)\)")
 
 
+BIAS = """static inline float4 biased(float4 value, uint descriptor) {
+    return select(value, value * 2.0 - 1.0, bool4((descriptor & (1u << 28)) != 0, (descriptor & (1u << 29)) != 0,
+                                                  (descriptor & (1u << 30)) != 0, (descriptor & (1u << 31)) != 0));
+}
+
+"""
+FETCH_2D = re.compile(r"return (texture\.sample\(sampler, texCoord \+ offset / \(float2\)getTexture2DDimensions\(texture\)[^;]*\));")
+INPUT = re.compile(r"float4 r(\d+) = input\.i(TexCoord|Color|Normal)(\d+);")
 ONE_OVER_TILE_HEIGHT = "0x3B0767AB"
 ONE_OVER_PICTURE_HEIGHT = f"0x{struct.unpack('<I', struct.pack('<f', 1 / 720))[0]:08X}"
 
@@ -38,6 +54,17 @@ def slots_of(source):
         if f"{name}_{kind}DescriptorIndex" in body:
             slots.add(((int(offset) - KINDS[kind]) // 4, list(KINDS).index(kind)))
     return sorted(slots)
+
+
+def patched(source):
+    source = source.replace(ONE_OVER_TILE_HEIGHT, ONE_OVER_PICTURE_HEIGHT)
+    source = source.replace("texture2d<float> texture = textureHeap[resourceDescriptorIndex].tex;",
+                            "texture2d<float> texture = textureHeap[resourceDescriptorIndex & 0x0FFFFFFF].tex;")
+    source = FETCH_2D.sub(r"return biased(\1, resourceDescriptorIndex);", source)
+    a = "uint2 getTexture2DDimensions(texture2d<float> texture)"
+    source = source.replace(a, BIAS + a, 1)
+    inputs = sorted((int(register), name.upper() + index) for register, name, index in INPUT.findall(source))
+    return relink(source, [name for _, name in inputs])
 
 
 def compile_one(job):
@@ -59,7 +86,7 @@ def main():
         slots = slots_of(source)
         manifest.append(" ".join([name[3:]] + [f"{slot} {kind}" for slot, kind in slots]))
         target = os.path.join(work, name + ".metal")
-        open(target, "w").write(source.replace(ONE_OVER_TILE_HEIGHT, ONE_OVER_PICTURE_HEIGHT))
+        open(target, "w").write(patched(source))
         jobs.append((target, os.path.join(output, name + ".metallib")))
     with open(os.path.join(output, "pixel-manifest.txt"), "w") as out:
         out.write("\n".join(manifest) + "\n")

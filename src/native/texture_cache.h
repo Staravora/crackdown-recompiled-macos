@@ -31,6 +31,9 @@ class TextureCache {
   // own. Everything else draws across both, and reads them joined up at their real height, which tile -1 stands for.
   static bool HoldsOneTile(const uint32_t* fetch);
 
+  // Which channels the fetch constant wants as value * 2 - 1, one bit each after its swizzle.
+  static uint32_t BiasedChannels(const uint32_t* fetch);
+
   // Where to copy a resolve to, given the destination's fetch constant, or -1 if it's not a format that can be copied.
   int ResolveInto(const uint32_t* fetch, int tile = -1);
   void ForgetResolve(const uint32_t* fetch);

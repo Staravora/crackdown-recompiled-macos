@@ -254,6 +254,20 @@ bool TextureCache::HoldsOneTile(const uint32_t* fetch_dwords) {
   return DecodedHoldsOneTile(fetch);
 }
 
+uint32_t TextureCache::BiasedChannels(const uint32_t* fetch_dwords) {
+  xenos::xe_gpu_texture_fetch_t fetch;
+  std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
+  const std::array<xenos::TextureSign, 4> signs = {fetch.sign_x, fetch.sign_y, fetch.sign_z, fetch.sign_w};
+  uint32_t channels = 0;
+  for (uint32_t i = 0; i < 4; ++i) {
+    const uint32_t from = (fetch.swizzle >> (i * 3)) & 7;
+    if (from < 4 && signs[from] == xenos::TextureSign::kUnsignedBiased) {
+      channels |= 1 << i;
+    }
+  }
+  return channels;
+}
+
 int TextureCache::ResolveInto(const uint32_t* fetch_dwords, int tile) {
   xenos::xe_gpu_texture_fetch_t fetch;
   std::memcpy(&fetch, fetch_dwords, sizeof(fetch));

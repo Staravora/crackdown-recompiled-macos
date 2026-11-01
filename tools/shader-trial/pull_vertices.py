@@ -11,6 +11,10 @@ manifest.txt says where to read. XenosRecomp drops r0's value, which is the vert
 so that's put back: some shaders work out a quad's corners from it. It drops a fetch's index register
 as well, and some shaders fetch with the index divided by four, which is one vertex to a quad. So
 each fetch uses the register its ucode names, once the shader has got to it.
+
+The Xenos joins a vertex shader's outputs to a pixel shader's inputs by position, and the semantic
+names in their tables needn't agree: the depth pass writes its normal as TEXCOORD0 and reads it as
+TEXCOORD1. relink makes Metal do the same.
 """
 import glob
 import hashlib
@@ -255,6 +259,29 @@ def rewrite(source, elements):
     return source.replace(a, "#ifdef __air__" + SCREEN_DEFINES + PREAMBLE + "#endif\n" + a)
 
 
+INTERPOLATOR_NAMES = {5: "TEXCOORD", 10: "COLOR", 3: "NORMAL"}
+ALL_INTERPOLATORS = [f"TEXCOORD{i}" for i in range(16)] + ["COLOR0", "COLOR1", "COLOR2", "NORMAL0"]
+
+
+def interpolators_of(path):
+    """The name of each interpolator of a shipped vertex shader, in position order."""
+    data = open(path, "rb").read()
+    shader_offset = struct.unpack_from(">I", data, 24)[0]
+    count = (struct.unpack_from(">I", data, shader_offset + 20)[0] >> 5) & 0x1F
+    field18, elements = struct.unpack_from(">II", data, shader_offset + 24)
+    names = []
+    for i in range(count):
+        value = struct.unpack_from(">I", data, shader_offset + 36 + (field18 + elements + i) * 4)[0]
+        names.append(f"{INTERPOLATOR_NAMES[(value >> 4) & 0xF]}{value & 0xF}")
+    return names
+
+
+def relink(source, names):
+    """Gives each interpolator a Metal name from its position. The rest take what's left, as both stages must declare the same set."""
+    order = names + [name for name in ALL_INTERPOLATORS if name not in names]
+    return re.sub(r"\[\[user\((\w+)\)\]\]", lambda found: f"[[user(SLOT{order.index(found.group(1))})]]", source)
+
+
 def compile_one(job):
     source, target, log = job
     done = subprocess.run(["xcrun", "-sdk", "macosx", "metal", "-D__air__=1", source, "-o", target],
@@ -275,7 +302,7 @@ def main():
         name = os.path.basename(path)[:-6]
         try:
             code, elements = elements_of(os.path.join(extracted, name + ".bin"))
-            source = rewrite(open(path).read(), elements)
+            source = relink(rewrite(open(path).read(), elements), interpolators_of(os.path.join(extracted, name + ".bin")))
         except (ValueError, struct.error, KeyError) as error:
             report["bad"][name] = str(error)
             continue

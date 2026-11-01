@@ -108,6 +108,7 @@ constexpr uint32_t kResolveClearDepth = 1 << 9;
 constexpr int32_t kSecondTileTop = 480;
 constexpr uint32_t kFirstTileMask = 0x3;
 constexpr uint32_t kSecondTileMask = 0xC;
+constexpr uint32_t kBiasShift = 28;
 constexpr uint32_t kHalfPictureWidth = 640;
 constexpr uint32_t kHalfTileHeight = 242;
 constexpr int32_t kHalfSecondTileHeight = 120;
@@ -807,8 +808,8 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
           for (const PixelSlot& slot : found_pixel.slots) {
             xenos::xe_gpu_texture_fetch_t fetch;
             std::memcpy(&fetch, f + size_t(slot.slot) * 6, sizeof(fetch));
-            slots += fmt::format(" {}k{}:f{}:{}x{}:{:05X}", slot.slot, slot.kind, uint32_t(fetch.format), uint32_t(fetch.size_2d.width) + 1,
-                                 uint32_t(fetch.size_2d.height) + 1, uint32_t(fetch.base_address));
+            slots += fmt::format(" {}k{}:f{}:{}x{}:{:05X}:s{}{}{}{}", slot.slot, slot.kind, uint32_t(fetch.format), uint32_t(fetch.size_2d.width) + 1,
+                                 uint32_t(fetch.size_2d.height) + 1, uint32_t(fetch.base_address), uint32_t(fetch.sign_x), uint32_t(fetch.sign_y), uint32_t(fetch.sign_z), uint32_t(fetch.sign_w));
           }
           *g_dump << fmt::format("{} {} vs {} ps {:08X} {} prim {} n {} tgt {} tiles {:X} vp0 {} {} mode {:X} poly {:.6f} {:.6f} depth {:08X} st {:06X} blend {:08X} cc {:08X} mask {:X} bools {:08X} vp {} {} slots{}\n", g_debug_id, run.pass_select == ~0u ? "D" : "B",
                                  draw.vertex_shader_dwords, draw.pixel_shader, draw.pixel_shader_dwords, primitive, index_count, target, uint32_t(draw.mask), viewport.x, viewport.y, draw.mode_control, std::bit_cast<float>(draw.polygon_offset[0]), std::bit_cast<float>(draw.polygon_offset[1]), draw.depth_control, draw.stencil_front, draw.blend_control, draw.color_control,
@@ -865,7 +866,8 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
             if (slot.slot < textures.size()) {
               const int texture = slot.kind == 1 ? g_textures->FindStack(fetch) : g_textures->FindTexture(fetch, tile);
               textures[texture_count++] = texture;
-              std::memcpy(shared + kTextureTableOffsets[slot.kind] + slot.slot * 4, &texture, sizeof(texture));
+              const uint32_t entry = uint32_t(texture) | (slot.kind == 0 ? TextureCache::BiasedChannels(fetch) << kBiasShift : 0);
+              std::memcpy(shared + kTextureTableOffsets[slot.kind] + slot.slot * 4, &entry, sizeof(entry));
             }
             const int sampler = g_textures->FindSampler(fetch);
             std::memcpy(shared + kSamplerTableOffset + slot.slot * 4, &sampler, sizeof(sampler));
