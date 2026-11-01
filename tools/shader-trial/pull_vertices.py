@@ -9,7 +9,8 @@ fills in when it binds them, so the live ucode is the only source. So each shade
 pullElement call per vertex element, and the game hands it a table built from the live ucode, which
 manifest.txt says where to read. Fetches indexed by anything but r0 aren't handled. XenosRecomp drops
 r0's value too, which is the vertex index on the Xenos, so that's put back: some shaders work out a
-quad's corners from it.
+quad's corners from it, and a shader that divides it before fetching has one vertex to a quad, so the
+fetch waits until then.
 """
 import glob
 import hashlib
@@ -218,11 +219,19 @@ def rewrite(source, elements):
     a = "\tInterpolators output = Interpolators{};\n"
     if source.count(a) != 1:
         raise ValueError("no output line")
-    body = ["\tVertexShaderInput input = VertexShaderInput{};"]
+    start = source.index(a) + len(a)
+    first_read = re.compile(r"\binput\.i").search(source, start)
+    index_changed = first_read and re.search(r"^\s*r0(\.[xyzw]+)? = ", source[start:first_read.start()], re.M)
+    index = "uint(floor(r0.x))" if index_changed else "vertex_id"
+    pulls = []
     for i, element in enumerate(elements):
         name = f"i{USAGES[element['usage']]}{element['index']}"
-        body.append(f"\tinput.{name} = as_type<decltype(input.{name})>(pullElement(g_Guest, g_Fetch, g_Elements[{i}], vertex_id));")
-    source = source.replace(a, a + "\n".join(body) + "\n")
+        pulls.append(f"\tinput.{name} = as_type<decltype(input.{name})>(pullElement(g_Guest, g_Fetch, g_Elements[{i}], {index}));\n")
+    pulls = "#ifdef __air__\n" + "".join(pulls) + "#endif\n"
+    if first_read:
+        line = source.rindex("\n", 0, first_read.start()) + 1
+        source = source[:line] + pulls + source[line:]
+    source = source.replace(a, a + "\tVertexShaderInput input = VertexShaderInput{};\n")
     a = "\toutput.oPos.xy += g_HalfPixelOffset * output.oPos.w;\n"
     if source.count(a) != 1:
         raise ValueError("no position line")

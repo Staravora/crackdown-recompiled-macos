@@ -543,7 +543,7 @@ bool g_debug_skip_blended = false;
 bool g_debug_ids = false;
 bool g_debug_no_resolves = false;
 int g_debug_show = -1;
-int g_debug_skip_ps = 0;
+std::set<uint32_t> g_debug_skip_ps;
 std::ofstream* g_dump = nullptr;
 int g_debug_id = 0;
 
@@ -634,7 +634,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         if (g_debug_skip_blended && run.targets.color && IsBlended(draw)) {
           continue;
         }
-        if (g_debug_skip_ps && draw.pixel_shader == uint32_t(g_debug_skip_ps)) {
+        if (g_debug_skip_ps.contains(draw.pixel_shader)) {
           continue;
         }
         const PixelShader& pixel = g_debug_ids ? g_no_pixel_shader : found_pixel;
@@ -769,6 +769,26 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
             vertices += fmt::format(" {:.4f}", std::bit_cast<float>(Word(g_guest + base, i)));
           }
           *g_dump << fmt::format("V {:08X} {:08X} offset {} mask {:X} vte {:X}:{}\n", f[190], f[191], draw.index_offset, draw.mask, draw.viewport_control, vertices);
+        }
+        if (g_dump && primitive == kPrimitiveQuadList && !automatic) {
+          std::string first;
+          for (uint32_t i = 0; i < 24; ++i) {
+            first += fmt::format(" {}", GuestIndex(g_guest + (draw.index_buffer & kGuestMask), wide, i));
+          }
+          const uint32_t* f = list.fetch_data.data() + size_t(draw.fetch_constants) * 192;
+          std::string vertices;
+          for (uint32_t i = 0; i < 12; ++i) {
+            vertices += fmt::format(" {:08X}", Word(g_guest + (f[190] & ~3u & kGuestMask), i));
+          }
+          std::string c;
+          for (uint32_t i = 16; i < 64; ++i) {
+            c += fmt::format(" {:.3f}", std::bit_cast<float>(g_constants[i]));
+          }
+          c += fmt::format(" lits {}", draw.literal_count);
+          for (uint32_t i = 0; i < draw.literal_count; ++i) {
+            c += fmt::format(" [{:08X} {} {}]", draw.literals[i].address, draw.literals[i].first_dword, draw.literals[i].dwords);
+          }
+          *g_dump << fmt::format("I {:08X} {:08X} wide {} offset {} fetch {:08X} {:08X}:{} |{} |{}\n", draw.index_buffer, draw.index_info, wide, draw.index_offset, f[190], f[191], first, vertices, c);
         }
         ++g_debug_id;
         out.blend_control = draw.blend_control;
@@ -954,7 +974,7 @@ void RenderThread() {
       std::string name = "live";
       g_debug_skip_blended = g_debug_ids = g_debug_no_resolves = false;
       g_debug_show = -1;
-      g_debug_skip_ps = 0;
+      g_debug_skip_ps.clear();
       while (in >> word) {
         g_debug_skip_blended |= word == "skip_blended";
         g_debug_ids |= word == "ids";
@@ -963,7 +983,7 @@ void RenderThread() {
           g_debug_show = std::stoi(word.substr(5));
         }
         if (word.rfind("skip_ps=", 0) == 0) {
-          g_debug_skip_ps = int(std::stoul(word.substr(8), nullptr, 16));
+          g_debug_skip_ps.insert(uint32_t(std::stoul(word.substr(8), nullptr, 16)));
         }
         if (word.rfind("dump=", 0) == 0) {
           name = word.substr(5);
@@ -977,7 +997,10 @@ void RenderThread() {
         std::ofstream(control) << (g_debug_skip_blended ? "skip_blended " : "") << (g_debug_ids ? "ids " : "")
                                << (g_debug_no_resolves ? "no_resolves " : "")
                                << (g_debug_show >= 0 ? fmt::format("show={} ", g_debug_show) : "")
-                               << (g_debug_skip_ps ? fmt::format("skip_ps={:X} ", g_debug_skip_ps) : "");
+;
+        for (const uint32_t skip : g_debug_skip_ps) {
+          std::ofstream(control, std::ios::app) << fmt::format("skip_ps={:X} ", skip);
+        }
         capture = g_path.parent_path() / ("live-" + name + ".png");
         dump = std::make_unique<std::ofstream>(g_path.parent_path() / ("live-" + name + ".txt"));
         g_dump = dump.get();
