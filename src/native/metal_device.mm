@@ -52,6 +52,8 @@ constexpr size_t kMaxSamplers = 64;
 constexpr int kTextureHeap = 0;
 constexpr int kStackHeap = 1;
 constexpr int kCubeHeap = 2;
+constexpr NSUInteger kGammaEntries = 256;
+constexpr uint32_t kGammaMask = 0x3FF;
 constexpr int kSamplerHeap = 3;
 constexpr uint32_t kAlphaTestConstant = 1 << 1;
 
@@ -70,6 +72,15 @@ constexpr uint32_t kOpaqueBlend = 0x00010001;
 const char* kClaySource = R"(
 #include <metal_stdlib>
 using namespace metal;
+vertex float4 display_vertex(uint id [[vertex_id]]) {
+  float2 corner = float2((id << 1) & 2, id & 2);
+  return float4(corner * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+}
+fragment float4 display_fragment(float4 position [[position]], texture2d<float> source [[texture(0)]],
+                                 texture1d<float> ramp [[texture(1)]]) {
+  uint3 color = uint3(source.read(uint2(position.xy)).rgb * 255.0 + 0.5);
+  return float4(ramp.read(color.r).r, ramp.read(color.g).g, ramp.read(color.b).b, 1.0);
+}
 fragment float4 clay_fragment(float4 position [[position]], constant float4& tint [[buffer(4)]]) {
   if (tint.a > 0.5) {
     return tint;
@@ -258,6 +269,20 @@ class MetalDeviceImpl final : public MetalDevice {
       return false;
     }
     clay_ = [library newFunctionWithName:@"clay_fragment"];
+    MTLRenderPipelineDescriptor* display = [MTLRenderPipelineDescriptor new];
+    display.vertexFunction = [library newFunctionWithName:@"display_vertex"];
+    display.fragmentFunction = [library newFunctionWithName:@"display_fragment"];
+    display.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    display_pipeline_ = [device_ newRenderPipelineStateWithDescriptor:display error:&error];
+    MTLTextureDescriptor* ramp = [MTLTextureDescriptor new];
+    ramp.textureType = MTLTextureType1D;
+    ramp.pixelFormat = MTLPixelFormatRGBA16Unorm;
+    ramp.width = kGammaEntries;
+    ramp.storageMode = MTLStorageModeShared;
+    gamma_ramp_ = [device_ newTextureWithDescriptor:ramp];
+    if (!display_pipeline_ || !gamma_ramp_) {
+      return false;
+    }
     return CreateDescriptorHeaps() && (slots_ = dispatch_semaphore_create(kFramesInFlight)) != nil;
   }
 
@@ -541,6 +566,9 @@ class MetalDeviceImpl final : public MetalDevice {
       buffer_ = nil;
 
       id<MTLTexture> shown = shown_target_ >= 0 ? targets_[size_t(shown_target_)].color : nil;
+      if (shown && shown_gamma_ && gamma_ramp_set_) {
+        shown = ThroughGammaRamp(buffer, shown);
+      }
       const MTLSize size = MTLSizeMake(shown.width, shown.height, 1);
       id<MTLBuffer> readback = nil;
       if (!capture.empty() && shown) {
@@ -655,7 +683,24 @@ class MetalDeviceImpl final : public MetalDevice {
     current_bias_slope_ = 0.0f;
   }
 
-  void ShowTarget(int target) override { shown_target_ = target; }
+  void ShowTarget(int target, bool gamma) override {
+    shown_target_ = target;
+    shown_gamma_ = gamma;
+  }
+
+  void SetGammaRamp(const uint32_t* ramp) override {
+    std::array<uint16_t, kGammaEntries * 4> pixels;
+    for (size_t i = 0; i < kGammaEntries; ++i) {
+      const uint32_t entry = ramp[i];
+      const auto widen = [](uint32_t value) { return uint16_t((value & kGammaMask) * 0xFFFF / kGammaMask); };
+      pixels[i * 4] = widen(entry >> 20);
+      pixels[i * 4 + 1] = widen(entry >> 10);
+      pixels[i * 4 + 2] = widen(entry);
+      pixels[i * 4 + 3] = 0xFFFF;
+    }
+    [gamma_ramp_ replaceRegion:MTLRegionMake1D(0, kGammaEntries) mipmapLevel:0 withBytes:pixels.data() bytesPerRow:0];
+    gamma_ramp_set_ = true;
+  }
 
   void CaptureAlpha(bool alpha) override { capture_alpha_ = alpha; }
 
@@ -813,7 +858,7 @@ class MetalDeviceImpl final : public MetalDevice {
                                                                                           width:width
                                                                                          height:height
                                                                                       mipmapped:NO];
-    descriptor.usage = MTLTextureUsageRenderTarget;
+    descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     descriptor.storageMode = MTLStorageModePrivate;
     return [device_ newTextureWithDescriptor:descriptor];
   }
@@ -821,6 +866,23 @@ class MetalDeviceImpl final : public MetalDevice {
   void EndPass() {
     [encoder_ endEncoding];
     encoder_ = nil;
+  }
+
+  id<MTLTexture> ThroughGammaRamp(id<MTLCommandBuffer> buffer, id<MTLTexture> source) {
+    if (display_.width != source.width || display_.height != source.height) {
+      display_ = NewTarget(MTLPixelFormatBGRA8Unorm, uint32_t(source.width), uint32_t(source.height));
+    }
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = display_;
+    pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> encoder = [buffer renderCommandEncoderWithDescriptor:pass];
+    [encoder setRenderPipelineState:display_pipeline_];
+    [encoder setFragmentTexture:source atIndex:0];
+    [encoder setFragmentTexture:gamma_ramp_ atIndex:1];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder endEncoding];
+    return display_;
   }
 
   void ReserveDepthCopy(NSUInteger bytes) {
@@ -924,6 +986,9 @@ class MetalDeviceImpl final : public MetalDevice {
   id<MTLTexture> dummy_cube_ = nil;
   id<MTLSamplerState> sampler_ = nil;
   id<MTLFunction> clay_ = nil;
+  id<MTLRenderPipelineState> display_pipeline_ = nil;
+  id<MTLTexture> gamma_ramp_ = nil;
+  id<MTLTexture> display_ = nil;
   id<MTLCommandBuffer> buffer_ = nil;
   id<MTLRenderCommandEncoder> encoder_ = nil;
   CAMetalLayer* layer_ = nil;
@@ -955,6 +1020,8 @@ class MetalDeviceImpl final : public MetalDevice {
   size_t current_elements_ = SIZE_MAX;
   int shown_target_ = -1;
   bool capture_alpha_ = false;
+  bool shown_gamma_ = false;
+  bool gamma_ramp_set_ = false;
   bool pass_has_color_ = false;
   MetalViewport current_viewport_;
   DepthKey current_depth_{};

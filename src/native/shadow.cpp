@@ -176,6 +176,8 @@ uint64_t g_ring_desyncs = 0;
 std::vector<FetchConstant> g_resolved_this_frame;
 std::vector<FetchConstant> g_resolved_last_frame;
 bool g_clear_pending = false;
+std::array<uint32_t, BakedLibrary::kGammaEntries> g_gamma_ramp{};
+bool g_gamma_ramp_new = false;
 
 // Render thread only from here down.
 uint8_t* g_guest = nullptr;
@@ -888,7 +890,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
   }
   const int shown = g_debug_show >= 0 ? g_debug_show : last_color_target;
   if (shown >= 0) {
-    device.ShowTarget(shown);
+    device.ShowTarget(shown, g_debug_show < 0);
   }
 }
 
@@ -992,6 +994,10 @@ void RenderThread() {
       g_wake.wait(lock, [] { return !g_ready.empty(); });
       frame = std::move(g_ready.front());
       g_ready.pop_front();
+      if (g_gamma_ramp_new) {
+        device->SetGammaRamp(g_gamma_ramp.data());
+        g_gamma_ramp_new = false;
+      }
     }
     ++g_frame_number;
     std::filesystem::path capture;
@@ -1153,6 +1159,12 @@ void OnResolve(const ResolveCopy& copy, const Targets& targets, const uint8_t* b
   run.resolve = copy;
   run.dest = fetch;
   run.targets = targets;
+}
+
+void SetGammaRamp(const uint32_t* ramp) {
+  std::lock_guard lock(g_mutex);
+  std::copy_n(ramp, g_gamma_ramp.size(), g_gamma_ramp.begin());
+  g_gamma_ramp_new = true;
 }
 
 void SetRingDesyncs(uint64_t desyncs) {

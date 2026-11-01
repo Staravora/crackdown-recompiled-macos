@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <unordered_map>
@@ -82,6 +83,7 @@ struct DecodeStats {
 class BakedLibrary {
  public:
   static constexpr uint32_t kRegisterBase = 0x2000;
+  static constexpr size_t kGammaEntries = 256;
   static constexpr uint32_t kFloatConstantRegister = 0x4000;
   static constexpr uint32_t kLoopConstantRegister = 0x4908;
 
@@ -105,6 +107,9 @@ class BakedLibrary {
   const uint32_t* float_constants() const { return registers_.data() + (kFloatConstantRegister - kRegisterBase); }
 
   // The 32 loop constants, the same way.
+  // The display's 256-entry gamma ramp, as 10-bit blue, green and red, and a count that moves when it changes.
+  const uint32_t* gamma_ramp() const { return gamma_ramp_.data(); }
+  uint64_t gamma_writes() const { return gamma_writes_; }
   const uint32_t* loop_constants() const { return registers_.data() + (kLoopConstantRegister - kRegisterBase); }
 
   // The 32 fetch constants of a texture set, six dwords each.
@@ -127,6 +132,9 @@ class BakedLibrary {
   void LoadConstants(const uint32_t* data, const uint8_t* physical_memory);
 
   std::vector<uint32_t> registers_;
+  std::array<uint32_t, kGammaEntries> gamma_ramp_{};
+  uint32_t gamma_index_ = 0;
+  uint64_t gamma_writes_ = 0;
   BakedDraw state_{};
   bool literals_open_[2] = {};
   bool vertex_shader_loaded_ = false;

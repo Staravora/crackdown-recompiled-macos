@@ -58,6 +58,7 @@ void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_
 void CountDirectDraw();
 void OnResolve(const ResolveCopy& copy, const Targets& targets, const uint8_t* base);
 void SetRingDesyncs(uint64_t desyncs);
+void SetGammaRamp(const uint32_t* ramp);
 #else
 inline bool Enabled() {
   return false;
@@ -70,6 +71,7 @@ inline void Capture(std::shared_ptr<const std::vector<BakedList>>, uint32_t, con
 inline void CountDirectDraw() {}
 inline void OnResolve(const ResolveCopy&, const Targets&, const uint8_t*) {}
 inline void SetRingDesyncs(uint64_t) {}
+inline void SetGammaRamp(const uint32_t*) {}
 #endif
 
 }  // namespace crackdown::native::shadow

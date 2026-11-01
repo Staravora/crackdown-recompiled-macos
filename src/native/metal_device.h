@@ -188,8 +188,12 @@ class MetalDevice {
   virtual void CopyTarget(const MetalCopy& copy) = 0;
   virtual void CopyDepthToStack(int target, int stack, uint32_t slice) = 0;
 
-  // Which colour target this frame's window and capture show.
-  virtual void ShowTarget(int target) = 0;
+  // Which colour target this frame's window and capture show, and whether it goes through the gamma ramp on the way, as
+  // the Xenos's display does.
+  virtual void ShowTarget(int target, bool gamma) = 0;
+
+  // The 256 entries of the ramp, as 10-bit blue, green and red.
+  virtual void SetGammaRamp(const uint32_t* ramp) = 0;
 
   // Puts alpha in the colour channels of captures, for looking at what a target keeps there.
   virtual void CaptureAlpha(bool alpha) = 0;

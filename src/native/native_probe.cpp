@@ -106,6 +106,7 @@ std::vector<uint32_t> g_ring_words;
 std::shared_ptr<const std::vector<uint8_t>> g_vertex_code;
 uint32_t g_ring_segment = 0;
 uint32_t g_ring_read = 0;
+uint64_t g_gamma_writes = 0;
 std::unordered_map<uint32_t, Buffer> g_buffers;
 std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, uint64_t> g_select;
 
@@ -240,6 +241,10 @@ void ReadRing(uint32_t device, const uint8_t* base) {
                                         });
   g_ring_read += uint32_t(used) * 4;
   shadow::SetRingDesyncs(g_ring.stats().ring_desyncs);
+  if (g_ring.gamma_writes() != g_gamma_writes) {
+    g_gamma_writes = g_ring.gamma_writes();
+    shadow::SetGammaRamp(g_ring.gamma_ramp());
+  }
 }
 
 // Copies the words out and decodes the copy. Pointers inside a list are never followed: doing that from a game hook is
