@@ -118,10 +118,9 @@ struct Run {
   std::shared_ptr<const std::vector<BakedList>> lists;
   uint32_t pass_select = 0;
   bool clear = false;
-  std::array<uint32_t, 4> clear_args{};
-  float clear_z = 0.0f;
   Targets targets;
   std::shared_ptr<const std::vector<uint8_t>> vertex_code;
+  std::shared_ptr<const VertexCode> list_code;
   std::array<uint32_t, kAluDwords> constants{};
   std::array<uint32_t, kLoopConstants> loops{};
 };
@@ -174,8 +173,6 @@ uint64_t g_ring_desyncs = 0;
 std::vector<FetchConstant> g_resolved_this_frame;
 std::vector<FetchConstant> g_resolved_last_frame;
 bool g_clear_pending = false;
-std::array<uint32_t, 4> g_clear_args{};
-float g_clear_z = 0.0f;
 
 // Render thread only from here down.
 uint8_t* g_guest = nullptr;
@@ -315,23 +312,34 @@ std::vector<MetalPullElement> PullElements(const uint8_t* code, uint32_t dwords,
 }
 
 int FindVertexShader(MetalDevice& device, const BakedDraw& draw, const Run& run) {
-  // By content where the code came with the draw: a copy in the ring has a new address each time it's made.
-  uint64_t key = uint64_t(draw.vertex_shader) << 32 | draw.vertex_shader_dwords;
+  const uint32_t address = draw.vertex_shader & kGuestMask;
+  if (!draw.vertex_shader_dwords || draw.vertex_shader_dwords > kMaxShaderDwords ||
+      uint64_t(address) + draw.vertex_shader_dwords * 4ull > kGuestBytes) {
+    return -1;
+  }
+  // By content: a copy in the ring has a new address each time it's made, and binding rewrites the code at an address to
+  // suit a new vertex format.
+  const uint8_t* code = g_guest + address;
   if (run.vertex_code) {
-    key = kHashBasis;
-    for (const uint8_t byte : *run.vertex_code) {
-      key = (key ^ byte) * kHashPrime;
+    code = run.vertex_code->data();
+  } else if (run.list_code) {
+    const auto copied = run.list_code->find(uint64_t(draw.vertex_shader) << 32 | draw.vertex_shader_dwords);
+    if (copied != run.list_code->end()) {
+      code = copied->second.data();
     }
+  }
+  uint64_t key = kHashBasis ^ draw.vertex_shader_dwords;
+  for (uint32_t i = 0; i + 1 < draw.vertex_shader_dwords; i += 2) {
+    uint64_t pair;
+    std::memcpy(&pair, code + size_t(i) * 4, sizeof(pair));
+    key = (key ^ pair) * kHashPrime;
   }
   const auto found = g_vertex_shaders.find(key);
   if (found != g_vertex_shaders.end()) {
     return found->second;
   }
   int handle = -1;
-  const uint32_t address = draw.vertex_shader & kGuestMask;
-  if (draw.vertex_shader_dwords && draw.vertex_shader_dwords <= kMaxShaderDwords &&
-      uint64_t(address) + draw.vertex_shader_dwords * 4ull <= kGuestBytes) {
-    const uint8_t* code = run.vertex_code ? run.vertex_code->data() : g_guest + address;
+  {
     const std::string masked = MaskedKey(code, draw.vertex_shader_dwords);
     const auto manifest = g_manifest.find(masked);
     if (manifest == g_manifest.end()) {
@@ -707,20 +715,6 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         if (primitive != kPrimitiveTriangleList && primitive != kPrimitiveTriangleStrip && primitive != kPrimitiveTriangleFan &&
             primitive != kPrimitiveQuadList) {
           ++g_totals.other_primitive_draws;
-          if (g_dump) {
-            const uint32_t* f = list.fetch_data.data() + size_t(draw.fetch_constants) * 192;
-            std::string slots;
-            for (const PixelSlot& slot : found_pixel.slots) {
-              xenos::xe_gpu_texture_fetch_t fetch;
-              std::memcpy(&fetch, f + size_t(slot.slot) * 6, sizeof(fetch));
-              slots += fmt::format(" {}k{}:f{}:{}x{}:{:05X}", slot.slot, slot.kind, uint32_t(fetch.format), uint32_t(fetch.size_2d.width) + 1,
-                                   uint32_t(fetch.size_2d.height) + 1, uint32_t(fetch.base_address));
-            }
-            const MetalViewport v = ViewportOf(draw);
-            *g_dump << fmt::format("S {} {} prim {} src {} n {} vs {:08X} {} ps {:08X} {} ps_handle {} col {:08X} dep {:08X} {}x{} depth {:08X} blend {:08X} mask {:X} vp {} {} {} {} slots{}\n", g_debug_id,
-                                   run.pass_select == ~0u ? "D" : "B", primitive, source, draw.initiator >> 16, draw.vertex_shader, draw.vertex_shader_dwords, draw.pixel_shader, draw.pixel_shader_dwords,
-                                   pixel.handle, run.targets.color, run.targets.depth, run.targets.width, run.targets.height, draw.depth_control, draw.blend_control, draw.color_mask, v.x, v.y, v.width, v.height, slots);
-          }
           continue;
         }
         const int shader = FindVertexShader(device, draw, run);
@@ -791,19 +785,6 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
             pc += fmt::format(" {:.3f}", word(g_constants[1024 + i]));
           }
           *g_dump << "PC" << pc << "\n";
-          if (draw.pixel_shader_dwords >= 300 && draw.pixel_shader_dwords <= 330 && index_count == 4) {
-            std::string more;
-            for (int i = 0; i < 256; ++i) {
-              const float* v = reinterpret_cast<const float*>(&g_constants[1024 + i * 4]);
-              if (v[0] || v[1] || v[2] || v[3]) {
-                more += fmt::format(" c{}=({:.4f} {:.4f} {:.4f} {:.4f})", i, v[0], v[1], v[2], v[3]);
-              }
-            }
-            *g_dump << "PX" << more << "\n";
-          }
-          if (run_cleared || clear) {
-            *g_dump << fmt::format("C {:X} {:X} {:08X} {:X} z {} tgt {} {:08X} {:08X}\n", run.clear_args[0], run.clear_args[1], run.clear_args[2], run.clear_args[3], run.clear_z, target, run.targets.color, run.targets.depth);
-          }
           for (const PixelSlot& slot : found_pixel.slots) {
             xenos::xe_gpu_texture_fetch_t fetch;
             std::memcpy(&fetch, f + size_t(slot.slot) * 6, sizeof(fetch));
@@ -813,35 +794,6 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
           *g_dump << fmt::format("{} {} vs {} ps {:08X} {} prim {} n {} tgt {} mode {:X} poly {:.6f} {:.6f} depth {:08X} st {:06X} blend {:08X} cc {:08X} mask {:X} bools {:08X} vp {} {} slots{}\n", g_debug_id, run.pass_select == ~0u ? "D" : "B",
                                  draw.vertex_shader_dwords, draw.pixel_shader, draw.pixel_shader_dwords, primitive, index_count, target, draw.mode_control, std::bit_cast<float>(draw.polygon_offset[0]), std::bit_cast<float>(draw.polygon_offset[1]), draw.depth_control, draw.stencil_front, draw.blend_control, draw.color_control,
                                  draw.color_mask, draw.booleans, viewport.width, viewport.height, slots);
-        }
-        if (g_dump && index_count <= 4 && automatic) {
-          const uint32_t* f = list.fetch_data.data() + size_t(draw.fetch_constants) * 192;
-          const uint32_t base = (f[190] & ~3u) & kGuestMask;
-          std::string vertices;
-          for (uint32_t i = 0; i < 28 && base + (i + 1) * 4 <= kGuestBytes; ++i) {
-            vertices += fmt::format(" {:.4f}", std::bit_cast<float>(Word(g_guest + base, i)));
-          }
-          *g_dump << fmt::format("V {:08X} {:08X} offset {} mask {:X} vte {:X}:{}\n", f[190], f[191], draw.index_offset, draw.mask, draw.viewport_control, vertices);
-        }
-        if (g_dump && primitive == kPrimitiveQuadList && !automatic) {
-          std::string first;
-          for (uint32_t i = 0; i < 24; ++i) {
-            first += fmt::format(" {}", GuestIndex(g_guest + (draw.index_buffer & kGuestMask), wide, i));
-          }
-          const uint32_t* f = list.fetch_data.data() + size_t(draw.fetch_constants) * 192;
-          std::string vertices;
-          for (uint32_t i = 0; i < 12; ++i) {
-            vertices += fmt::format(" {:08X}", Word(g_guest + (f[190] & ~3u & kGuestMask), i));
-          }
-          std::string c;
-          for (uint32_t i = 16; i < 64; ++i) {
-            c += fmt::format(" {:.3f}", std::bit_cast<float>(g_constants[i]));
-          }
-          c += fmt::format(" lits {}", draw.literal_count);
-          for (uint32_t i = 0; i < draw.literal_count; ++i) {
-            c += fmt::format(" [{:08X} {} {}]", draw.literals[i].address, draw.literals[i].first_dword, draw.literals[i].dwords);
-          }
-          *g_dump << fmt::format("I {:08X} {:08X} wide {} offset {} fetch {:08X} {:08X}:{} |{} |{}\n", draw.index_buffer, draw.index_info, wide, draw.index_offset, f[190], f[191], first, vertices, c);
         }
         ++g_debug_id;
         out.blend_control = draw.blend_control;
@@ -1153,12 +1105,10 @@ void OnGuestFrame() {
   g_wake.notify_one();
 }
 
-void OnClear(uint32_t flags, uint32_t rect, uint32_t color, uint32_t stencil, float depth) {
+void OnClear() {
   if (Enabled()) {
     std::lock_guard lock(g_mutex);
     g_clear_pending = true;
-    g_clear_args = {flags, rect, color, stencil};
-    g_clear_z = depth;
   }
 }
 
@@ -1196,18 +1146,18 @@ void SetRingDesyncs(uint64_t desyncs) {
 }
 
 void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_select, const uint32_t* float_constants,
-             const uint32_t* loop_constants, const Targets& targets, std::shared_ptr<const std::vector<uint8_t>> vertex_code) {
+             const uint32_t* loop_constants, const Targets& targets, std::shared_ptr<const std::vector<uint8_t>> vertex_code,
+             std::shared_ptr<const VertexCode> list_code) {
   const Clock::time_point start = Clock::now();
   std::lock_guard lock(g_mutex);
   Run& run = g_current->runs.emplace_back();
   run.lists = std::move(lists);
   run.pass_select = pass_select;
   run.clear = g_clear_pending;
-  run.clear_args = g_clear_args;
-  run.clear_z = g_clear_z;
   g_clear_pending = false;
   run.targets = targets;
   run.vertex_code = std::move(vertex_code);
+  run.list_code = std::move(list_code);
   std::memcpy(run.constants.data(), float_constants, sizeof(run.constants));
   std::memcpy(run.loops.data(), loop_constants, sizeof(run.loops));
   g_capture_ns += Since(start);

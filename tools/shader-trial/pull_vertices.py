@@ -7,10 +7,10 @@ XenosRecomp leaves vertex input to a Metal vertex descriptor, which can't read b
 shader's fetch formats aren't known here either: most shipped shaders hold blanks that the game's D3D
 fills in when it binds them, so the live ucode is the only source. So each shader gets one
 pullElement call per vertex element, and the game hands it a table built from the live ucode, which
-manifest.txt says where to read. Fetches indexed by anything but r0 aren't handled. XenosRecomp drops
-r0's value too, which is the vertex index on the Xenos, so that's put back: some shaders work out a
-quad's corners from it, and a shader that divides it before fetching has one vertex to a quad, so the
-fetch waits until then.
+manifest.txt says where to read. XenosRecomp drops r0's value, which is the vertex index on the Xenos,
+so that's put back: some shaders work out a quad's corners from it. It drops a fetch's index register
+as well, and some shaders fetch with the index divided by four, which is one vertex to a quad. So
+each fetch uses the register its ucode names, once the shader has got to it.
 """
 import glob
 import hashlib
@@ -199,9 +199,15 @@ def elements_of(path):
     for i in range(count):
         value = struct.unpack_from(">I", data, shader_offset + 36 + (field18 + i) * 4)[0]
         address = value & 0xFFF
-        swizzle = struct.unpack_from(">I", code, (address * 3 + 1) * 4)[0] & 0xFFF
-        elements.append({"address": address, "usage": (value >> 12) & 0xF, "index": (value >> 16) & 0xF, "swizzle": swizzle})
+        word0, word1 = struct.unpack_from(">II", code, address * 3 * 4)
+        elements.append({"address": address, "usage": (value >> 12) & 0xF, "index": (value >> 16) & 0xF, "swizzle": word1 & 0xFFF,
+                         "register": (word0 >> 5) & 0x3F, "component": word0 >> 30, "rounded": (word1 >> 15) & 1,
+                         "mini": (word1 >> 30) & 1})
     elements.sort(key=lambda e: e["address"])
+    # A mini fetch has no index of its own.
+    for previous, element in zip(elements, elements[1:]):
+        if element["mini"]:
+            element.update({key: previous[key] for key in ("register", "component", "rounded")})
     return code, elements
 
 
@@ -222,11 +228,12 @@ def rewrite(source, elements):
         raise ValueError("no output line")
     start = source.index(a) + len(a)
     first_read = re.compile(r"\binput\.i").search(source, start)
-    index_changed = first_read and re.search(r"^\s*r0(\.[xyzw]+)? = ", source[start:first_read.start()], re.M)
-    index = "uint(floor(r0.x))" if index_changed else "vertex_id"
+    r0_changed = first_read and re.search(r"^\s*r0(\.[xyzw]+)? = ", source[start:first_read.start()], re.M)
     pulls = []
     for i, element in enumerate(elements):
         name = f"i{USAGES[element['usage']]}{element['index']}"
+        component = f"r{element['register']}.{'xyzw'[element['component']]}"
+        index = "vertex_id" if component == "r0.x" and not r0_changed else f"uint(floor({component}{' + 0.5' if element['rounded'] else ''}))"
         pulls.append(f"\tinput.{name} = as_type<decltype(input.{name})>(pullElement(g_Guest, g_Fetch, g_Elements[{i}], {index}));\n")
     pulls = "#ifdef __air__\n" + "".join(pulls) + "#endif\n"
     if first_read:

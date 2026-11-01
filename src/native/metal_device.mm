@@ -825,6 +825,10 @@ class MetalDeviceImpl final : public MetalDevice {
 
   void ReserveDepthCopy(NSUInteger bytes) {
     if (depth_copy_.length < bytes) {
+      // A frame in flight may still be using it, and frames don't keep what they use alive.
+      if (depth_copy_) {
+        retired_buffers_.push_back(depth_copy_);
+      }
       depth_copy_ = [device_ newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
     }
   }
@@ -913,6 +917,7 @@ class MetalDeviceImpl final : public MetalDevice {
   id<MTLBuffer> guest_ = nil;
   id<MTLBuffer> elements_ = nil;
   id<MTLBuffer> depth_copy_ = nil;
+  std::vector<id<MTLBuffer>> retired_buffers_;
   id<MTLBuffer> frame_ = nil;
   id<MTLTexture> dummy_ = nil;
   id<MTLTexture> dummy_3d_ = nil;

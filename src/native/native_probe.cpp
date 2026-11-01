@@ -71,6 +71,7 @@ struct Buffer {
   // Shared with shadow frames still in flight, so a list that's decoded again doesn't pull them out from under the
   // render thread.
   std::shared_ptr<const std::vector<BakedList>> lists = std::make_shared<const std::vector<BakedList>>();
+  std::vector<std::pair<uint32_t, uint32_t>> vertex_shaders;  // Address and dwords, once each.
   const uint8_t* sample_host = nullptr;
   uint32_t sample_dwords = 0;
   uint32_t sample = 0;
@@ -293,6 +294,14 @@ void ReadLists(Buffer& entry, std::vector<BakedList>& decoded, uint32_t buffer, 
 void DecodeBuffer(Buffer& entry, uint32_t buffer, const uint8_t* base) {
   auto decoded = std::make_shared<std::vector<BakedList>>();
   ReadLists(entry, *decoded, buffer, base);
+  entry.vertex_shaders.clear();
+  for (const BakedList& list : *decoded) {
+    for (const BakedDraw& draw : list.draws) {
+      entry.vertex_shaders.emplace_back(draw.vertex_shader, draw.vertex_shader_dwords);
+    }
+  }
+  std::sort(entry.vertex_shaders.begin(), entry.vertex_shaders.end());
+  entry.vertex_shaders.erase(std::unique(entry.vertex_shaders.begin(), entry.vertex_shaders.end()), entry.vertex_shaders.end());
   entry.lists = std::move(decoded);
 }
 
@@ -398,7 +407,14 @@ void OnRunCommandBuffer(uint32_t device, uint32_t buffer, uint32_t predication, 
     for (uint32_t& loop : loops) {
       loop = std::byteswap(loop);
     }
-    shadow::Capture(entry.lists, predication, g_device_constants.data(), loops.data(), TargetsOf(device, base));
+    auto list_code = std::make_shared<shadow::VertexCode>();
+    for (const auto& [address, dwords] : entry.vertex_shaders) {
+      if (const uint8_t* code = HostOfList(address, dwords)) {
+        (*list_code)[uint64_t(address) << 32 | dwords].assign(code, code + size_t(dwords) * 4);
+      }
+    }
+    shadow::Capture(entry.lists, predication, g_device_constants.data(), loops.data(), TargetsOf(device, base), nullptr,
+                    std::move(list_code));
   }
   if (!timed) {
     return;

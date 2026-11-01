@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include <rex/system/xmemory.h>
@@ -40,15 +41,20 @@ struct ResolveCopy {
   uint32_t clear_stencil = 0;
 };
 
+// The vertex shaders a run of baked lists uses, by address and size, as they stood when it ran. Binding rewrites a shader
+// where it sits to suit a new vertex format, so what's there a frame later may be for some other draw.
+using VertexCode = std::unordered_map<uint64_t, std::vector<uint8_t>>;
+
 #if defined(__APPLE__)
 bool Enabled();
 void Install(rex::memory::Memory* memory, const std::filesystem::path& shader_dir, const std::filesystem::path& output_dir);
 void OnGuestFrame();
-void OnClear(uint32_t flags, uint32_t rect, uint32_t color, uint32_t stencil, float depth);
+void OnClear();
 // vertex_code holds a direct draw's vertex shader, whose copy in guest memory may not last until the frame is drawn.
 void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_select, const uint32_t* float_constants,
              const uint32_t* loop_constants, const Targets& targets,
-             std::shared_ptr<const std::vector<uint8_t>> vertex_code = nullptr);
+             std::shared_ptr<const std::vector<uint8_t>> vertex_code = nullptr,
+             std::shared_ptr<const VertexCode> list_code = nullptr);
 void CountDirectDraw();
 void OnResolve(const ResolveCopy& copy, const Targets& targets, const uint8_t* base);
 void SetRingDesyncs(uint64_t desyncs);
@@ -58,9 +64,9 @@ inline bool Enabled() {
 }
 inline void Install(rex::memory::Memory*, const std::filesystem::path&, const std::filesystem::path&) {}
 inline void OnGuestFrame() {}
-inline void OnClear(uint32_t, uint32_t, uint32_t, uint32_t, float) {}
+inline void OnClear() {}
 inline void Capture(std::shared_ptr<const std::vector<BakedList>>, uint32_t, const uint32_t*, const uint32_t*, const Targets&,
-                    std::shared_ptr<const std::vector<uint8_t>> = nullptr) {}
+                    std::shared_ptr<const std::vector<uint8_t>> = nullptr, std::shared_ptr<const VertexCode> = nullptr) {}
 inline void CountDirectDraw() {}
 inline void OnResolve(const ResolveCopy&, const Targets&, const uint8_t*) {}
 inline void SetRingDesyncs(uint64_t) {}

@@ -415,6 +415,37 @@ Finding it took four wrong guesses, which are worth recording because each one f
 - **Alpha test ignores the compare function,** and always keeps what's above the reference.
 - **The orb occlusion issue** hasn't been looked at. Now that blending is real, it can be.
 
+## The whole frame (2026-11-01)
+
+With resolves copying Metal's own targets, shadow mode draws the game's complete frame. This is the frame, read from the live draw and resolve stream on the rooftop. Texture names come from the translated shaders.
+
+| Stage | Target | What happens |
+|---|---|---|
+| Shadow maps | 1024x1024 depth | Two passes, each resolved into a slice of one 2-deep depth stack, read as a 3D texture. |
+| Depth and normals | Main 1280x720 | About 1,500 baked draws. Depth is resolved to 1280x720, and colour, which holds normals, to a 1280x484 texture per tile. |
+| Shadow projection | Main | One screen-space quad per tile reads depth, normals, the stack and a noise texture, and blends with max. Alpha is the mask. Resolved and cleared into the same 1280x484 memory, as `ShadowMap`. |
+| Half-resolution | 640x242 | One quad per tile. Depth and colour resolve to 640x242 and 640x120, one per tile. |
+| Scene | Main | Colour pass of about 1,600 draws, reading `ShadowMap` at pixel position / (1280, 484). Clutter, lights, trees, particles and the night effects follow. |
+| Scene resolve | Main | Depth and colour to 1280x720, clearing both. |
+| Low-res effects | 512x288 | Depth downsample, particles, resolved at 512x288. |
+| Post | Final 1280x720 | Copy out, 320x180 downsample and blur (one the CPU reads back), then the final composite with depth. |
+| HUD | Final | Text, meters, reticle, minimap. |
+| Present | Final | Resolved to the front buffer. |
+
+The game reuses texture memory within a frame, so one address can be 640x242 and then 1280x720, and 1280x484 and then 512x288.
+
+Results, rooftop, Metal beside the emulator. Encode and GPU are the render thread's, and the copy is on the game's thread.
+
+| | Day | Night |
+|---|---:|---:|
+| Draws recorded | 3,600 to 4,200 | 4,550 |
+| Copies from targets | 23 | 23 |
+| Encode, p50 | 5 to 8 ms | 8.8 ms |
+| GPU per frame | 3 ms | 8.6 ms |
+| Shader code copy per frame | 1 to 2.3 ms | not measured |
+
+Still missing: 8 shaders the translated set doesn't have (100 to 200 HUD draws), scissor, stencil-only draws, the second tile's half-resolution draws, gamma, MSAA. Water isn't traced.
+
 ## Free camera (2026-10-31)
 
 A test tool in the cheat menu, under Testing, that flies the game's camera, so both renderers follow it. Session only: it isn't in the launcher. WASD moves, Q and E go down and up, the mouse looks, Shift goes faster, 1-9 jump to saved spots, Shift+1-9 save one to `camera-spots.txt`, and F freezes time. `--crackdown_free_camera_start=x,y,z,yaw,pitch` starts with it on, for scripted runs.
