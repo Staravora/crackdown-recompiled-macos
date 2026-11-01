@@ -637,7 +637,7 @@ void RingSegmentEnd(PPCContext& ctx, uint8_t* base, GuestFunction original) {
 }
 
 void CensusClear(PPCContext& ctx, uint8_t* base, GuestFunction original) {
-  native::shadow::OnClear();
+  native::shadow::OnClear(ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, float(ctx.f1.f64));
   if (census::Counting()) {
     std::lock_guard lock(census::g_mutex);
     ++census::g_row.clears;
@@ -645,10 +645,12 @@ void CensusClear(PPCContext& ctx, uint8_t* base, GuestFunction original) {
   original(ctx, base);
 }
 
+constexpr uint32_t kResolveStencilOnStack = 92;
+
 void CensusResolve(PPCContext& ctx, uint8_t* base, GuestFunction original) {
   native::textures::OnResolve(ctx.r6.u32);
   native::probe::OnResolve(ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r10.u32,
-                           float(ctx.f1.f64), base);
+                           float(ctx.f1.f64), census::Load32(base, ctx.r1.u32 + kResolveStencilOnStack), base);
   if (!census::Counting()) {
     return original(ctx, base);
   }

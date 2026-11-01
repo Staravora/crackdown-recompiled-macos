@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -409,7 +410,7 @@ class MetalDeviceImpl final : public MetalDevice {
 
   int AddResolve(uint32_t width, uint32_t height, uint32_t levels, bool depth) override {
     MTLTextureDescriptor* descriptor =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:depth ? kDepthFormat : MTLPixelFormatBGRA8Unorm
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:depth ? MTLPixelFormatR32Float : MTLPixelFormatBGRA8Unorm
                                                            width:width
                                                           height:height
                                                        mipmapped:NO];
@@ -420,6 +421,9 @@ class MetalDeviceImpl final : public MetalDevice {
     if (!texture) {
       return -1;
     }
+    if (depth) {
+      ReserveDepthCopy(NSUInteger(width) * height * 4);
+    }
     resolves_.push_back(texture);
     return int(resolves_.size()) - 1;
   }
@@ -429,9 +433,9 @@ class MetalDeviceImpl final : public MetalDevice {
       return 0;
     }
     id<MTLTexture> storage = resolves_[size_t(resolve)];
-    const MTLPixelFormat format = storage.pixelFormat == kDepthFormat ? kDepthFormat
-                                  : gamma                             ? MTLPixelFormatRGBA8Unorm_sRGB
-                                                                      : MTLPixelFormatRGBA8Unorm;
+    const MTLPixelFormat format = storage.pixelFormat == MTLPixelFormatR32Float ? MTLPixelFormatR32Float
+                                  : gamma                                       ? MTLPixelFormatRGBA8Unorm_sRGB
+                                                                                : MTLPixelFormatRGBA8Unorm;
     id<MTLTexture> view = [storage newTextureViewWithPixelFormat:format
                                                      textureType:MTLTextureType2D
                                                           levels:NSMakeRange(0, storage.mipmapLevelCount)
@@ -461,13 +465,10 @@ class MetalDeviceImpl final : public MetalDevice {
     descriptor.usage = MTLTextureUsageShaderRead;
     descriptor.storageMode = MTLStorageModePrivate;
     id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
-    const NSUInteger slice_bytes = NSUInteger(width) * height * 4;
     if (!texture) {
       return 0;
     }
-    if (stack_buffer_.length < slice_bytes) {
-      stack_buffer_ = [device_ newBufferWithLength:slice_bytes options:MTLResourceStorageModePrivate];
-    }
+    ReserveDepthCopy(NSUInteger(width) * height * 4);
     const int index = int(next_texture_++);
     textures_.resize(next_texture_);
     textures_[size_t(index)] = texture;
@@ -475,34 +476,12 @@ class MetalDeviceImpl final : public MetalDevice {
     return index;
   }
 
-  // A depth format can't be 3D, and a depth plane only comes apart from stencil by way of a buffer.
   void CopyDepthToStack(int target, int stack, uint32_t slice) override {
     EndPass();
     id<MTLTexture> from = targets_[size_t(target)].depth;
     id<MTLTexture> to = textures_[size_t(stack)];
-    const MTLSize size = MTLSizeMake(std::min(from.width, to.width), std::min(from.height, to.height), 1);
-    const NSUInteger row = size.width * 4;
-    id<MTLBlitCommandEncoder> blit = [buffer_ blitCommandEncoder];
-    [blit copyFromTexture:from
-                     sourceSlice:0
-                     sourceLevel:0
-                    sourceOrigin:MTLOriginMake(0, 0, 0)
-                      sourceSize:size
-                        toBuffer:stack_buffer_
-               destinationOffset:0
-          destinationBytesPerRow:row
-        destinationBytesPerImage:row * size.height
-                         options:MTLBlitOptionDepthFromDepthStencil];
-    [blit copyFromBuffer:stack_buffer_
-               sourceOffset:0
-          sourceBytesPerRow:row
-        sourceBytesPerImage:row * size.height
-                 sourceSize:size
-                  toTexture:to
-           destinationSlice:0
-           destinationLevel:0
-          destinationOrigin:MTLOriginMake(0, 0, slice)];
-    [blit endEncoding];
+    CopyDepth(from, MTLOriginMake(0, 0, 0), MTLSizeMake(std::min(from.width, to.width), std::min(from.height, to.height), 1), to, 0,
+              MTLOriginMake(0, 0, slice));
   }
 
   void CopyTarget(const MetalCopy& copy) override {
@@ -515,6 +494,10 @@ class MetalDeviceImpl final : public MetalDevice {
     const int32_t width = std::min({copy.right, int32_t(from.width), int32_t(std::max(to.width >> copy.level, NSUInteger(1))) - dest_x + left}) - left;
     const int32_t height = std::min({copy.bottom, int32_t(from.height), int32_t(std::max(to.height >> copy.level, NSUInteger(1))) - dest_y + top}) - top;
     if (width <= 0 || height <= 0 || dest_x < 0 || dest_y < 0) {
+      return;
+    }
+    if (copy.depth) {
+      CopyDepth(from, MTLOriginMake(left, top, 0), MTLSizeMake(width, height, 1), to, copy.level, MTLOriginMake(dest_x, dest_y, 0));
       return;
     }
     id<MTLBlitCommandEncoder> blit = [buffer_ blitCommandEncoder];
@@ -589,7 +572,8 @@ class MetalDeviceImpl final : public MetalDevice {
       [buffer addCompletedHandler:^(id<MTLCommandBuffer> done) {
         if (done.status == MTLCommandBufferStatusError) {
           errors_.fetch_add(1, std::memory_order_relaxed);
-          last_error_ = done.error;
+          std::lock_guard lock(error_mutex_);
+          last_error_ = done.error.description.UTF8String;
         }
         const uint64_t gpu_ns = uint64_t(std::max(0.0, done.GPUEndTime - done.GPUStartTime) * 1e9);
         gpu_ns_.fetch_add(gpu_ns, std::memory_order_relaxed);
@@ -603,6 +587,12 @@ class MetalDeviceImpl final : public MetalDevice {
       timing.encode_ns = Since(encode_start);
       if (readback) {
         [buffer waitUntilCompleted];
+        if (capture_alpha_) {
+          auto* pixels = static_cast<uint8_t*>(readback.contents);
+          for (size_t i = 0; i < shown.width * shown.height; ++i) {
+            std::fill_n(pixels + i * 4, 3, pixels[i * 4 + 3]);
+          }
+        }
         WritePng(capture, readback.contents, shown.width, shown.height);
       }
     }
@@ -656,9 +646,13 @@ class MetalDeviceImpl final : public MetalDevice {
     has_depth_state_ = false;
     current_mode_ = UINT32_MAX;
     current_viewport_ = {};
+    current_bias_ = 0.0f;
+    current_bias_slope_ = 0.0f;
   }
 
   void ShowTarget(int target) override { shown_target_ = target; }
+
+  void CaptureAlpha(bool alpha) override { capture_alpha_ = alpha; }
 
   void Draw(const MetalDraw& draw) override {
     const Pipeline& pipeline = pipelines_[size_t(draw.vertex_shader)];
@@ -697,7 +691,13 @@ class MetalDeviceImpl final : public MetalDevice {
       has_depth_state_ = true;
     }
     if (draw.depth_control & kStencilEnable) {
-      [encoder_ setStencilFrontReferenceValue:draw.stencil_front & 0xFF backReferenceValue:draw.stencil_back & 0xFF];
+      const uint32_t back = (draw.depth_control & kBackFaceEnable) ? draw.stencil_back : draw.stencil_front;
+      [encoder_ setStencilFrontReferenceValue:draw.stencil_front & 0xFF backReferenceValue:back & 0xFF];
+    }
+    if (draw.depth_bias != current_bias_ || draw.depth_bias_slope != current_bias_slope_) {
+      [encoder_ setDepthBias:draw.depth_bias slopeScale:draw.depth_bias_slope clamp:0.0f];
+      current_bias_ = draw.depth_bias;
+      current_bias_slope_ = draw.depth_bias_slope;
     }
     const uint32_t mode = draw.mode_control & (kCullFront | kCullBack | kFrontClockwise);
     if (mode != current_mode_) {
@@ -745,7 +745,8 @@ class MetalDeviceImpl final : public MetalDevice {
   }
 
   MetalGpuTotals gpu_totals() const override {
-    return {completed_.load(std::memory_order_relaxed), errors_.load(std::memory_order_relaxed),
+    std::lock_guard lock(error_mutex_);
+    return {completed_.load(std::memory_order_relaxed), errors_.load(std::memory_order_relaxed), last_error_,
             gpu_ns_.load(std::memory_order_relaxed), worst_gpu_ns_.load(std::memory_order_relaxed)};
   }
 
@@ -818,6 +819,38 @@ class MetalDeviceImpl final : public MetalDevice {
     encoder_ = nil;
   }
 
+  void ReserveDepthCopy(NSUInteger bytes) {
+    if (depth_copy_.length < bytes) {
+      depth_copy_ = [device_ newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
+    }
+  }
+
+  // Shaders read depth as a float texture. A depth plane only comes apart from stencil by way of a buffer.
+  void CopyDepth(id<MTLTexture> from, MTLOrigin origin, MTLSize size, id<MTLTexture> to, NSUInteger level, MTLOrigin to_origin) {
+    const NSUInteger row = size.width * 4;
+    id<MTLBlitCommandEncoder> blit = [buffer_ blitCommandEncoder];
+    [blit copyFromTexture:from
+                     sourceSlice:0
+                     sourceLevel:0
+                    sourceOrigin:origin
+                      sourceSize:size
+                        toBuffer:depth_copy_
+               destinationOffset:0
+          destinationBytesPerRow:row
+        destinationBytesPerImage:row * size.height
+                         options:MTLBlitOptionDepthFromDepthStencil];
+    [blit copyFromBuffer:depth_copy_
+               sourceOffset:0
+          sourceBytesPerRow:row
+        sourceBytesPerImage:row * size.height
+                 sourceSize:size
+                  toTexture:to
+           destinationSlice:0
+           destinationLevel:level
+          destinationOrigin:to_origin];
+    [blit endEncoding];
+  }
+
   // The shaders index tables of resource IDs. Until textures arrive every slot holds one dummy, because a few vertex
   // shaders read a map and an empty table would fault the GPU.
   bool CreateDescriptorHeaps() {
@@ -875,7 +908,7 @@ class MetalDeviceImpl final : public MetalDevice {
   id<MTLCommandQueue> queue_ = nil;
   id<MTLBuffer> guest_ = nil;
   id<MTLBuffer> elements_ = nil;
-  id<MTLBuffer> stack_buffer_ = nil;
+  id<MTLBuffer> depth_copy_ = nil;
   id<MTLBuffer> frame_ = nil;
   id<MTLTexture> dummy_ = nil;
   id<MTLTexture> dummy_3d_ = nil;
@@ -886,7 +919,8 @@ class MetalDeviceImpl final : public MetalDevice {
   id<MTLRenderCommandEncoder> encoder_ = nil;
   CAMetalLayer* layer_ = nil;
   NSWindow* window_ = nil;
-  NSError* last_error_ = nil;
+  mutable std::mutex error_mutex_;
+  std::string last_error_;
   std::array<id<MTLBuffer>, kFramesInFlight> frames_{};
   std::array<id<MTLBuffer>, kDescriptorHeaps> heaps_{};
   std::vector<Pipeline> pipelines_;
@@ -911,11 +945,14 @@ class MetalDeviceImpl final : public MetalDevice {
   id<MTLRenderPipelineState> current_pipeline_ = nil;
   size_t current_elements_ = SIZE_MAX;
   int shown_target_ = -1;
+  bool capture_alpha_ = false;
   bool pass_has_color_ = false;
   MetalViewport current_viewport_;
   DepthKey current_depth_{};
   bool has_depth_state_ = false;
   uint32_t current_mode_ = UINT32_MAX;
+  float current_bias_ = 0.0f;
+  float current_bias_slope_ = 0.0f;
   std::atomic<bool> layer_ready_{false};
   std::atomic<uint64_t> completed_{0};
   std::atomic<uint64_t> errors_{0};

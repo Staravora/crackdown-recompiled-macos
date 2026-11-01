@@ -37,13 +37,14 @@ struct ResolveCopy {
   uint32_t level = 0;
   std::array<float, 4> clear_color{};  // For a resolve that clears as well, as flags say.
   float clear_depth = 0.0f;
+  uint32_t clear_stencil = 0;
 };
 
 #if defined(__APPLE__)
 bool Enabled();
 void Install(rex::memory::Memory* memory, const std::filesystem::path& shader_dir, const std::filesystem::path& output_dir);
 void OnGuestFrame();
-void OnClear();
+void OnClear(uint32_t flags, uint32_t rect, uint32_t color, uint32_t stencil, float depth);
 // vertex_code holds a direct draw's vertex shader, whose copy in guest memory may not last until the frame is drawn.
 void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_select, const uint32_t* float_constants,
              const uint32_t* loop_constants, const Targets& targets,
@@ -57,7 +58,7 @@ inline bool Enabled() {
 }
 inline void Install(rex::memory::Memory*, const std::filesystem::path&, const std::filesystem::path&) {}
 inline void OnGuestFrame() {}
-inline void OnClear() {}
+inline void OnClear(uint32_t, uint32_t, uint32_t, uint32_t, float) {}
 inline void Capture(std::shared_ptr<const std::vector<BakedList>>, uint32_t, const uint32_t*, const uint32_t*, const Targets&,
                     std::shared_ptr<const std::vector<uint8_t>> = nullptr) {}
 inline void CountDirectDraw() {}

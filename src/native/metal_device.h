@@ -17,6 +17,7 @@ struct MetalFrameTiming {
 struct MetalGpuTotals {
   uint64_t frames = 0;
   uint64_t errors = 0;
+  std::string last_error;
   uint64_t gpu_ns = 0;
   uint64_t worst_gpu_ns = 0;
 };
@@ -112,6 +113,8 @@ struct MetalDraw {
   uint32_t stencil_front = 0;
   uint32_t stencil_back = 0;
   uint32_t mode_control = 0;
+  float depth_bias = 0.0f;
+  float depth_bias_slope = 0.0f;
   uint32_t blend_control = 0;
   uint32_t color_mask = 0;
   bool alpha_test = false;
@@ -187,6 +190,9 @@ class MetalDevice {
 
   // Which colour target this frame's window and capture show.
   virtual void ShowTarget(int target) = 0;
+
+  // Puts alpha in the colour channels of captures, for looking at what a target keeps there.
+  virtual void CaptureAlpha(bool alpha) = 0;
 
   // Copies a range out through the GPU's view of guest memory and compares it with the CPU's. Waits for the GPU.
   virtual bool MatchesGuestMemory(uint32_t address, uint32_t bytes) = 0;

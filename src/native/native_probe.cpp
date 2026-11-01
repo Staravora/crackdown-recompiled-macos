@@ -448,8 +448,8 @@ void OnRingSegmentEnding(uint32_t device, const uint8_t* base) {
 }
 
 void OnResolve(uint32_t device, uint32_t flags, uint32_t rect, uint32_t texture, uint32_t point, uint32_t level,
-               uint32_t clear_color, float clear_depth, const uint8_t* base) {
-  if (!shadow::Enabled() || !texture) {
+               uint32_t clear_color, float clear_depth, uint32_t clear_stencil, const uint8_t* base) {
+  if (!shadow::Enabled()) {
     return;
   }
   shadow::ResolveCopy copy;
@@ -472,6 +472,7 @@ void OnResolve(uint32_t device, uint32_t flags, uint32_t rect, uint32_t texture,
     }
   }
   copy.clear_depth = clear_depth;
+  copy.clear_stencil = clear_stencil;
   std::lock_guard lock(g_mutex);
   ReadRing(device, base);
   shadow::OnResolve(copy, TargetsOf(device, base), base);

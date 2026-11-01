@@ -95,6 +95,8 @@ constexpr uint32_t kColorMaskFirstTarget = 0xF;
 constexpr uint32_t kAlphaTestEnable = 1 << 3;
 constexpr uint32_t kCullBothFaces = 3;
 constexpr uint32_t kViewportScaleX = 1;
+constexpr uint32_t kPolygonOffsetFront = 1 << 11;
+constexpr uint32_t kPolygonOffsetBack = 1 << 12;
 constexpr uint32_t kIndexEndianShift = 30;
 constexpr uint32_t kIndexEndian16 = 1;
 constexpr uint32_t kIndexEndian32 = 2;
@@ -115,6 +117,8 @@ struct Run {
   std::shared_ptr<const std::vector<BakedList>> lists;
   uint32_t pass_select = 0;
   bool clear = false;
+  std::array<uint32_t, 4> clear_args{};
+  float clear_z = 0.0f;
   Targets targets;
   std::shared_ptr<const std::vector<uint8_t>> vertex_code;
   std::array<uint32_t, kAluDwords> constants{};
@@ -169,6 +173,8 @@ uint64_t g_ring_desyncs = 0;
 std::vector<FetchConstant> g_resolved_this_frame;
 std::vector<FetchConstant> g_resolved_last_frame;
 bool g_clear_pending = false;
+std::array<uint32_t, 4> g_clear_args{};
+float g_clear_z = 0.0f;
 
 // Render thread only from here down.
 uint8_t* g_guest = nullptr;
@@ -540,13 +546,18 @@ double ClearDepthFor(const BakedDraw& draw) {
 }
 
 // Live switches for examining a running game, set from metal-debug.txt: skip_blended, ids (each draw flat, in a colour
-// that gives its number), no_resolves, show=<target>, skip_ps=<address>, and dump=<name>, which writes live-<name>.png and
+// that gives its number), no_resolves, show=<target>, skip_ps=<address>, stop_ps=<address>, which ends the frame at that
+// shader's first draw, alpha, which puts alpha in a capture's colours, and dump=<name>, which writes live-<name>.png and
 // .txt beside it.
 bool g_debug_skip_blended = false;
 bool g_debug_ids = false;
 bool g_debug_no_resolves = false;
 int g_debug_show = -1;
 std::set<uint32_t> g_debug_skip_ps;
+uint32_t g_debug_stop_ps = 0;
+bool g_debug_stopped = false;
+bool g_debug_alpha = false;
+bool g_debug_no_stencil = false;
 std::ofstream* g_dump = nullptr;
 int g_debug_id = 0;
 
@@ -561,14 +572,14 @@ void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& draw
   const bool depth = source == kResolveDepth;
   const auto found = g_targets.find({run.targets.color, run.targets.depth, run.targets.width, run.targets.height});
   const int target = found == g_targets.end() ? -1 : found->second;
-  const int resolve = !g_debug_no_resolves && target >= 0 && drawn.contains(target) && (depth || (source == 0 && run.targets.color))
+  const int resolve = copy.texture && !g_debug_no_resolves && target >= 0 && drawn.contains(target) && (depth || (source == 0 && run.targets.color))
                           ? g_textures->ResolveInto(run.dest.data())
                           : -1;
   if (g_dump) {
-    *g_dump << fmt::format("R {} flags {:X} rect {} {} {} {} {} to {} {} level {} fetch f{} {}x{} {:05X} swizzle {:03X} type {} dim {} mips {} {} tgt {} {:08X} {:08X} {}\n", g_debug_id, copy.flags, copy.has_rect,
+    *g_dump << fmt::format("R {} flags {:X} rect {} {} {} {} {} to {} {} level {} fetch f{} {}x{} {:05X} swizzle {:03X} type {} dim {} mips {} {} clear {} {} tgt {} {:08X} {:08X} {}\n", g_debug_id, copy.flags, copy.has_rect,
                            copy.rect[0], copy.rect[1], copy.rect[2], copy.rect[3], copy.dest_x, copy.dest_y, copy.level, uint32_t(fetch.format), uint32_t(fetch.size_2d.width) + 1,
                            uint32_t(fetch.size_2d.height) + 1, uint32_t(fetch.base_address), uint32_t(fetch.swizzle), uint32_t(fetch.type), uint32_t(fetch.dimension), uint32_t(fetch.mip_address),
-                           uint32_t(fetch.mip_max_level), target, run.targets.color, run.targets.depth, resolve);
+                           uint32_t(fetch.mip_max_level), copy.clear_depth, copy.clear_stencil, target, run.targets.color, run.targets.depth, resolve);
   }
   if (target >= 0 && (copy.flags & kResolveClearColor)) {
     MetalClear& clear = clears[target];
@@ -579,6 +590,9 @@ void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& draw
     MetalClear& clear = clears[target];
     clear.depth = true;
     clear.depth_value = copy.clear_depth;
+  }
+  if (!copy.texture) {
+    return;
   }
   if (resolve < 0) {
     ++g_totals.missed_resolves;
@@ -617,6 +631,8 @@ void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& draw
 
 void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
   g_debug_id = 0;
+  g_debug_stopped = false;
+  device.CaptureAlpha(g_debug_alpha);
   g_textures->BeginFrame();
   size_t used = 0, indices_used = 0;
   int current_target = -1;
@@ -626,7 +642,9 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
   int last_color_target = -1;
   for (const Run& run : frame.runs) {
     if (run.resolve) {
-      ApplyResolve(run, device, cleared, resolve_clears, current_target);
+      if (!g_debug_stopped) {
+        ApplyResolve(run, device, cleared, resolve_clears, current_target);
+      }
       continue;
     }
     std::memcpy(g_constants.data(), run.constants.data(), sizeof(run.constants));
@@ -652,6 +670,10 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
           continue;
         }
         if (g_debug_skip_ps.contains(draw.pixel_shader)) {
+          continue;
+        }
+        g_debug_stopped |= g_debug_stop_ps && draw.pixel_shader == g_debug_stop_ps;
+        if (g_debug_stopped) {
           continue;
         }
         const PixelShader& pixel = g_debug_ids ? g_no_pixel_shader : found_pixel;
@@ -768,14 +790,27 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
             pc += fmt::format(" {:.3f}", word(g_constants[1024 + i]));
           }
           *g_dump << "PC" << pc << "\n";
+          if (draw.pixel_shader_dwords >= 300 && draw.pixel_shader_dwords <= 330 && index_count == 4) {
+            std::string more;
+            for (int i = 0; i < 256; ++i) {
+              const float* v = reinterpret_cast<const float*>(&g_constants[1024 + i * 4]);
+              if (v[0] || v[1] || v[2] || v[3]) {
+                more += fmt::format(" c{}=({:.4f} {:.4f} {:.4f} {:.4f})", i, v[0], v[1], v[2], v[3]);
+              }
+            }
+            *g_dump << "PX" << more << "\n";
+          }
+          if (run_cleared || clear) {
+            *g_dump << fmt::format("C {:X} {:X} {:08X} {:X} z {} tgt {} {:08X} {:08X}\n", run.clear_args[0], run.clear_args[1], run.clear_args[2], run.clear_args[3], run.clear_z, target, run.targets.color, run.targets.depth);
+          }
           for (const PixelSlot& slot : found_pixel.slots) {
             xenos::xe_gpu_texture_fetch_t fetch;
             std::memcpy(&fetch, f + size_t(slot.slot) * 6, sizeof(fetch));
             slots += fmt::format(" {}k{}:f{}:{}x{}:{:05X}", slot.slot, slot.kind, uint32_t(fetch.format), uint32_t(fetch.size_2d.width) + 1,
                                  uint32_t(fetch.size_2d.height) + 1, uint32_t(fetch.base_address));
           }
-          *g_dump << fmt::format("{} {} vs {} ps {:08X} {} prim {} n {} tgt {} depth {:08X} blend {:08X} cc {:08X} mask {:X} bools {:08X} vp {} {} slots{}\n", g_debug_id, run.pass_select == ~0u ? "D" : "B",
-                                 draw.vertex_shader_dwords, draw.pixel_shader, draw.pixel_shader_dwords, primitive, index_count, target, draw.depth_control, draw.blend_control, draw.color_control,
+          *g_dump << fmt::format("{} {} vs {} ps {:08X} {} prim {} n {} tgt {} mode {:X} poly {:.6f} {:.6f} depth {:08X} st {:06X} blend {:08X} cc {:08X} mask {:X} bools {:08X} vp {} {} slots{}\n", g_debug_id, run.pass_select == ~0u ? "D" : "B",
+                                 draw.vertex_shader_dwords, draw.pixel_shader, draw.pixel_shader_dwords, primitive, index_count, target, draw.mode_control, std::bit_cast<float>(draw.polygon_offset[0]), std::bit_cast<float>(draw.polygon_offset[1]), draw.depth_control, draw.stencil_front, draw.blend_control, draw.color_control,
                                  draw.color_mask, draw.booleans, viewport.width, viewport.height, slots);
         }
         if (g_dump && index_count <= 4 && automatic) {
@@ -812,10 +847,16 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         out.color_mask = draw.color_mask;
         out.alpha_test = alpha_test;
         out.viewport = viewport;
-        out.depth_control = draw.depth_control;
+        out.depth_control = g_debug_no_stencil ? draw.depth_control & ~1u : draw.depth_control;
         out.stencil_front = draw.stencil_front;
         out.stencil_back = draw.stencil_back;
         out.mode_control = draw.mode_control;
+        // Offsets are in units of the 24-bit depth buffer's last place, and slopes are per sixteenth of a pixel.
+        if (draw.mode_control & (kPolygonOffsetFront | kPolygonOffsetBack)) {
+          const uint32_t side = (draw.mode_control & kPolygonOffsetFront) ? 0 : 2;
+          out.depth_bias_slope = std::bit_cast<float>(draw.polygon_offset[side]) / 16.0f;
+          out.depth_bias = std::bit_cast<float>(draw.polygon_offset[side + 1]) * float(1 << 24);
+        }
         out.primitive = primitive == kPrimitiveTriangleStrip ? MetalPrimitive::kTriangleStrip : MetalPrimitive::kTriangleList;
         out.vertex_constants = used;
         out.pixel_constants = used + kPixelConstantsOffset;
@@ -925,6 +966,9 @@ void Report(const MetalDevice& device) {
     ring_desyncs = g_ring_desyncs;
   }
   const MetalGpuTotals gpu = device.gpu_totals();
+  if (!gpu.last_error.empty()) {
+    REXLOG_ERROR("Native shadow: GPU error: {}", gpu.last_error);
+  }
   const double frames = double(std::max<uint64_t>(g_totals.frames, 1));
   std::ofstream out(g_path);
   out << fmt::format(
@@ -991,13 +1035,19 @@ void RenderThread() {
       std::string word;
       bool want_dump = false;
       std::string name = "live";
-      g_debug_skip_blended = g_debug_ids = g_debug_no_resolves = false;
+      g_debug_skip_blended = g_debug_ids = g_debug_no_resolves = g_debug_alpha = g_debug_no_stencil = false;
       g_debug_show = -1;
       g_debug_skip_ps.clear();
+      g_debug_stop_ps = 0;
       while (in >> word) {
         g_debug_skip_blended |= word == "skip_blended";
         g_debug_ids |= word == "ids";
         g_debug_no_resolves |= word == "no_resolves";
+        g_debug_alpha |= word == "alpha";
+        g_debug_no_stencil |= word == "no_stencil";
+        if (word.rfind("stop_ps=", 0) == 0) {
+          g_debug_stop_ps = uint32_t(std::stoul(word.substr(8), nullptr, 16));
+        }
         if (word.rfind("show=", 0) == 0) {
           g_debug_show = std::stoi(word.substr(5));
         }
@@ -1014,9 +1064,9 @@ void RenderThread() {
         std::error_code ignored;
         std::filesystem::remove(control, ignored);
         std::ofstream(control) << (g_debug_skip_blended ? "skip_blended " : "") << (g_debug_ids ? "ids " : "")
-                               << (g_debug_no_resolves ? "no_resolves " : "")
+                               << (g_debug_no_resolves ? "no_resolves " : "") << (g_debug_alpha ? "alpha " : "") << (g_debug_no_stencil ? "no_stencil " : "")
                                << (g_debug_show >= 0 ? fmt::format("show={} ", g_debug_show) : "")
-;
+                               << (g_debug_stop_ps ? fmt::format("stop_ps={:X} ", g_debug_stop_ps) : "");
         for (const uint32_t skip : g_debug_skip_ps) {
           std::ofstream(control, std::ios::app) << fmt::format("skip_ps={:X} ", skip);
         }
@@ -1099,10 +1149,12 @@ void OnGuestFrame() {
   g_wake.notify_one();
 }
 
-void OnClear() {
+void OnClear(uint32_t flags, uint32_t rect, uint32_t color, uint32_t stencil, float depth) {
   if (Enabled()) {
     std::lock_guard lock(g_mutex);
     g_clear_pending = true;
+    g_clear_args = {flags, rect, color, stencil};
+    g_clear_z = depth;
   }
 }
 
@@ -1115,15 +1167,19 @@ void OnResolve(const ResolveCopy& copy, const Targets& targets, const uint8_t* b
   if (!Enabled()) {
     return;
   }
-  FetchConstant fetch;
-  std::memcpy(fetch.data(), base + copy.texture + kTextureFetchConstant + rex::memory::detail::PhysicalHostOffset(copy.texture),
-              sizeof(fetch));
-  for (uint32_t& dword : fetch) {
-    dword = std::byteswap(dword);
+  FetchConstant fetch{};
+  if (copy.texture) {
+    std::memcpy(fetch.data(), base + copy.texture + kTextureFetchConstant + rex::memory::detail::PhysicalHostOffset(copy.texture),
+                sizeof(fetch));
+    for (uint32_t& dword : fetch) {
+      dword = std::byteswap(dword);
+    }
+    TextureCache::MarkResolved(fetch.data());
   }
-  TextureCache::MarkResolved(fetch.data());
   std::lock_guard lock(g_mutex);
-  g_resolved_this_frame.push_back(fetch);
+  if (copy.texture) {
+    g_resolved_this_frame.push_back(fetch);
+  }
   Run& run = g_current->runs.emplace_back();
   run.resolve = copy;
   run.dest = fetch;
@@ -1143,6 +1199,8 @@ void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_
   run.lists = std::move(lists);
   run.pass_select = pass_select;
   run.clear = g_clear_pending;
+  run.clear_args = g_clear_args;
+  run.clear_z = g_clear_z;
   g_clear_pending = false;
   run.targets = targets;
   run.vertex_code = std::move(vertex_code);
