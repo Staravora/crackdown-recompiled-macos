@@ -7,6 +7,7 @@
 #include <mutex>
 
 #include "cheat_menu_rules.h"
+#include "free_camera.h"
 
 namespace crackdown::cheats {
 namespace {
@@ -69,7 +70,7 @@ void FilterMenuInput(uint8_t* base, uint32_t user, uint32_t state) {
       }
     }
   }
-  if (verdict.hide_input) {
+  if (verdict.hide_input || free_camera::Active()) {
     std::memset(base + pad, 0, kInputStateGamepadSize);
   }
 }

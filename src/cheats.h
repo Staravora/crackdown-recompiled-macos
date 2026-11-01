@@ -19,9 +19,11 @@ enum class Cheat : uint8_t {
   VehicleSpeed,
   AgilityOrbsOnMap,
   HiddenOrbsOnMap,
+  FreeCamera,
+  FreezeTime,
 };
 
-enum class Section : uint8_t { Player, Weapons, Vehicle, Map };
+enum class Section : uint8_t { Player, Weapons, Vehicle, Map, Testing };
 
 // A toggle is Off or On. A multiplier is Off or one of its listed factors. A map display is Off, the minimap, or the
 // minimap and the world map.
@@ -64,6 +66,8 @@ inline constexpr std::array kCheats = {
               "cheat_agility_orbs_on_map", kMapValues},
     CheatInfo{Cheat::HiddenOrbsOnMap, Section::Map, Kind::MapDisplay, "Hidden Orbs on Map",
               "cheat_hidden_orbs_on_map", kMapValues},
+    CheatInfo{Cheat::FreeCamera, Section::Testing, Kind::Toggle, "Free Camera", "cheat_free_camera", kToggleValues},
+    CheatInfo{Cheat::FreezeTime, Section::Testing, Kind::Toggle, "Freeze Time", "cheat_freeze_time", kToggleValues},
 };
 
 inline constexpr size_t kCheatCount = kCheats.size();
@@ -78,6 +82,8 @@ inline constexpr const char* SectionLabel(Section section) {
       return "VEHICLE";
     case Section::Map:
       return "MAP";
+    case Section::Testing:
+      return "TESTING";
   }
   return "";
 }

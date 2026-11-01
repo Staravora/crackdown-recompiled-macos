@@ -217,6 +217,7 @@ set(CRACKDOWN_SOURCES
     src/native/native_probe.cpp
     src/native/texture_probe.cpp
     src/frame_rate.cpp
+    src/free_camera.cpp
     src/game_files.cpp
     src/glyph_overlay.cpp
     src/gpu_fence_wait.cpp

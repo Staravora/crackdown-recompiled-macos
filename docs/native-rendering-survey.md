@@ -317,6 +317,33 @@ Shadow mode now costs about 2 FPS, 3 ms on the median frame and 260 MB, on top o
 
 **What baked draws leave out, from Bruce's drive with this build.** Some cars draw and some don't. Those that do are complete far away and lose their bodies up close, leaving wheels and trim, and many of the missing vehicles are gang vehicles. Trees, throwable objects, miscellaneous props, people and characters are all missing. Drawing every pass didn't bring these back, so the likely explanation is that they're direct draws: a car's far LOD is baked, and its near body goes through the Direct3D setters so it can dent and come apart. That fits the census, where baked draws are 41-64% of city draws, but no draw has been traced to a specific object yet.
 
+## Free camera (2026-10-31)
+
+A test tool in the cheat menu, under Testing, that flies the game's camera, so both renderers follow it. Session only: it isn't in the launcher. WASD moves, Q and E go down and up, the mouse looks, Shift goes faster, 1-9 jump to saved spots, Shift+1-9 save one to `camera-spots.txt`, and F freezes time. `--crackdown_free_camera_start=x,y,z,yaw,pitch` starts with it on, for scripted runs.
+
+**The world's detail follows the player, not the camera.** With the camera about 480 units from the player at 1000,120,-1100, buildings lost their walls and props. Writing the camera's position over the player's (`character + 0x140`) brought back the full city, in the same view:
+
+| Run | Player's position | Detail at the camera |
+| --- | --- | --- |
+| Camera alone | not touched | low |
+| Three global copies of the player's position overwritten | not touched | low, byte-identical to the row above |
+| Rewritten every update, mid-play | rewritten | full |
+| Rewritten, then restored at simulation start, at the aim update, or at steps 11, 14, 16 or after the simulation | restored | low |
+
+So the write has to stay in place through step 16 of `SimulationUpdate` (`824EC028`, a loop over 61 objects), up to the camera update. That is as far as the search went: **the code that reads it hasn't been found.** The ground check reads it in the same stretch, so a restore that saves the player's height also loses the detail.
+
+What the write does to the player, from a run that turned the camera off after 150 updates:
+
+- **Position on the map:** unchanged. The game's physics puts the real x and z back every update.
+- **Height:** they follow the ground under the camera. From the 39 m ledge they dropped to about -1.5 and stayed there after the camera went off, with no damage.
+- **Not tested:** a camera over tall ground, which would lift the player and could drop them from a height when it goes off.
+
+A write held through the game's spawn moves the player for real, because spawning takes their physics position from this field. Starting with `--crackdown_free_camera_start` does this, so scripted runs stand the player under the camera. Traffic and people near a mid-play camera are untested.
+
+**Freeze Time:** a car in view stayed in place across 20 seconds of captures, where the street changed between captures before freezing. Two other cars appeared in one capture only and didn't move, and that isn't explained.
+
+**Tried and dropped:** skipping the player's own update (`8229B5C0`) doesn't stop the height change, and left the player at their saved position instead of their spawn. A byte-level memory scan found 68 copies of the player's position and 11 of the game camera's, including a struct at `82F5D1C0` holding the camera, the player and a point 50 units ahead of the player. Nothing in the code refers to that struct directly, and the scan isn't kept in the build.
+
 ## Shader trial (2026-10-31)
 
 Phase 1 ran XenosRecomp's Metal branch ([PR 22](https://github.com/hedge-dev/XenosRecomp/pull/22), commit `4906992`) over every shipped shader, first as it stands, then with this project's patch (`tools/shader-trial/xenosrecomp-crackdown.patch`).
@@ -657,7 +684,7 @@ The output helps the emulator too: the per-shader gap shows how much cost is sti
 
 ### Phase 2: Native vertical slice (6-10 sessions)
 
-**Started:** the [baked buffer decoder](#baked-buffer-decoder-2026-10-31) runs live behind a setting, the [texture change test](#texture-change-test-2026-10-31) passed, and [shadow mode](#shadow-mode-2026-10-31) draws [the main scene in grey](#first-picture-2026-10-31) with real vertex shaders. [Every pass](#every-pass-2026-10-31) now draws to its own target. Next: real pixel shaders, textures and direct draws.
+**Started:** the [baked buffer decoder](#baked-buffer-decoder-2026-10-31) runs live behind a setting, the [texture change test](#texture-change-test-2026-10-31) passed, and [shadow mode](#shadow-mode-2026-10-31) draws [the main scene in grey](#first-picture-2026-10-31) with real vertex shaders. [Every pass](#every-pass-2026-10-31) now draws to its own target, and a [free camera](#free-camera-2026-10-31) can test any spot. Next: real pixel shaders, textures and direct draws.
 
 - Metal device, render thread and command queue. Choose plume's Metal backend or direct Metal with a small spike; direct is likely simpler for one game on one API.
 - Shadow-device reader, texture path (reusing SDK untile and format code), no-copy guest memory, vertex pulling or copy-and-swap decided by a spike.

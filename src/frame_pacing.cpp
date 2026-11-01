@@ -26,6 +26,7 @@
 
 #include "frame_pacing.h"
 #include "frame_timing.h"
+#include "free_camera.h"
 #include "glyph_overlay.h"
 #include "guest_hooks.h"
 #include "guest_layout.h"
@@ -243,6 +244,9 @@ void crackdown::hooks::FrameLoop(PPCContext& ctx, uint8_t* base, GuestFunction o
 // on an on-time frame at every rate, so this is a no-op multiply unless a frame ran long or short of its target.
 void crackdown::hooks::SimulationUpdate(PPCContext& ctx, uint8_t* base, GuestFunction original) {
   ctx.f1.f64 = double(float(ctx.f1.f64 * g_step.original_steps));
+  if (crackdown::free_camera::TimeFrozen()) {
+    ctx.f1.f64 *= crackdown::free_camera::kFrozenTimeScale;
+  }
   original(ctx, base);
 }
 

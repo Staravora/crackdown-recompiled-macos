@@ -22,7 +22,10 @@ void TestMenuEntriesFollowTheSpecifiedLayout() {
                             "Vehicle Speed",
                             "MAP",
                             "Agility Orbs on Map",
-                            "Hidden Orbs on Map"};
+                            "Hidden Orbs on Map",
+                            "TESTING",
+                            "Free Camera",
+                            "Freeze Time"};
   CHECK(kMenuEntries.size() == std::size(expected));
   for (size_t i = 0; i < kMenuEntries.size(); ++i) {
     CHECK(std::strcmp(kMenuEntries[i].label, expected[i]) == 0);
@@ -152,7 +155,7 @@ void TestSelectionStopsAtTheEnds() {
   CHECK(MoveSelection(0, -1) == 0);
   CHECK(MoveSelection(0, 1) == 1);
   CHECK(MoveSelection(int(kCheatCount) - 1, 1) == int(kCheatCount) - 1);
-  CHECK(MoveSelection(3, 5) == int(kCheatCount) - 1);
+  CHECK(MoveSelection(3, int(kCheatCount)) == int(kCheatCount) - 1);
 }
 
 void TestMenuScaleFollowsTheDisplayAndFitsTheScreen() {

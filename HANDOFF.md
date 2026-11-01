@@ -1,5 +1,13 @@
 # Session handoff
 
+## 2026-10-31 (late) — Free camera, and the world's detail follows the player
+- **Added:** `src/free_camera.cpp`, in the cheat menu (F10) under Testing, with Free Camera and Freeze Time. Session only, not in the launcher. Keys are in `src/free_camera.h`. Both renderers follow it. `--crackdown_free_camera_start=x,y,z,yaw,pitch` and `--crackdown_free_camera_freeze_after=<frames>` drive it from the command line.
+- **Finding:** Bruce saw things drawing from the player's point of view. Detail and streaming follow the player's position, so the camera now writes its position over `character + 0x140` every update. Full table in `docs/native-rendering-survey.md`, "Free camera".
+- **Side effect, kept:** the player holds their place on the map, but their height follows the ground under the camera and stays there afterwards. From the rooftop ledge they end up on the street below, with no damage. A restore that prevents this also loses the detail, because both reads fall in the same stretch of the simulation. The reader isn't found.
+- **Checked:** full detail with the camera 480 units away, mid-play and from the start flag. Freeze Time held a car in place for 20 seconds. `cheat_menu_tests` and `launcher_pages_tests` pass, after adding the new rows to the layout test.
+- **Not checked:** Bruce hasn't tried the keys, the cheat menu entries or saved spots in this build. Traffic and people near a mid-play camera are unknown, and so is a camera over tall ground. Windows, Linux and the title update 6 guest aren't built; the hook points are shared by name, but `CameraUpdate` and `SimulationUpdate` weren't run there.
+- **Next:** direct draws, now testable from any spot, then pixel shaders and textures through the page watch.
+
 ## 2026-10-31 (night) — Every baked pass drawn to its own target
 - **Added:** each run records the device's colour and depth surfaces, the viewport sets the target's size, and `Clear` plus a target's first use start cleared passes. All 1,830 baked draws go out in 5 Metal passes on 2 targets, a 1024x1024 depth map and the 1280x720 view. `Run::segment` and `OnResolve` are gone. `BakedDraw` gained `surface_info`, `color_info`, `depth_info` and `viewport`.
 - **Result:** rooftop, three rounds: recording 1.1 ms, GPU 2.5 ms, 0 errors, 0 dropped. Costs about 2 FPS, 3 ms and 260 MB on top of the emulator. Table in `docs/native-rendering-survey.md`, "Every pass".

@@ -40,6 +40,7 @@
 #include "guest_fault_log.h"
 #include "hang_watchdog.h"
 #include "benchmark.h"
+#include "free_camera.h"
 #include "native/shadow.h"
 #include "native/texture_probe.h"
 #include "internal_render_scale.h"
@@ -297,6 +298,9 @@ class CrackdownApp : public rex::ReXApp {
       crackdown::CheckWindowDisplay(window()->GetNativeWindowHandle(), REXCVAR_GET(monitor));
       crackdown::StartHangWatchdog(window()->GetNativeWindowHandle(), LogsDir(user_data_root()));
       crackdown::mouse_look::Install(window());
+      if (runtime()) {
+        crackdown::free_camera::Install(window(), runtime()->virtual_membase(), user_data_root());
+      }
     }
     crackdown::mouse_look::Configure();
     if (imgui_drawer()) {

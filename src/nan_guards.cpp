@@ -15,6 +15,7 @@
 #include <rex/ppc.h>
 #include <rex/system/kernel_state.h>
 
+#include "free_camera.h"
 #include "guest_hooks.h"
 #include "guest_layout.h"
 #include "guest_memory.h"
@@ -173,6 +174,7 @@ void crackdown::hooks::CameraUpdate(PPCContext& ctx, uint8_t* base, GuestFunctio
   thread_local std::array<uint8_t, crackdown::nan_guard::kMaxCameraBytes> saved;
   const size_t bytes = crackdown::Layout().camera_bytes;
   if (plausible) {
+    crackdown::free_camera::BeforeCameraUpdate(base, camera);
     std::memcpy(saved.data(), rex::memory::GuestPtr<const uint8_t*>(base, camera), bytes);
   }
   original(ctx, base);
@@ -186,13 +188,13 @@ void crackdown::hooks::CameraUpdate(PPCContext& ctx, uint8_t* base, GuestFunctio
     }
     broken += broken.empty() ? field.name : std::string(", ") + field.name;
   }
-  if (broken.empty()) {
-    return;
+  if (!broken.empty()) {
+    g_camera_log.Note();
+    static std::atomic_flag logged_fields;
+    if (!logged_fields.test_and_set()) {
+      REXLOG_WARN("[NAN_GUARD] camera fields not finite after its update: {}", broken);
+    }
+    std::memcpy(rex::memory::GuestPtr<uint8_t*>(base, camera), saved.data(), bytes);
   }
-  g_camera_log.Note();
-  static std::atomic_flag logged_fields;
-  if (!logged_fields.test_and_set()) {
-    REXLOG_WARN("[NAN_GUARD] camera fields not finite after its update: {}", broken);
-  }
-  std::memcpy(rex::memory::GuestPtr<uint8_t*>(base, camera), saved.data(), bytes);
+  crackdown::free_camera::AfterCameraUpdate(base, camera);
 }

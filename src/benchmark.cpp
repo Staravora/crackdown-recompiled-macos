@@ -19,6 +19,7 @@
 #include <rex/ui/virtual_key.h>
 
 #include "cheat_hooks.h"
+#include "free_camera.h"
 #include "d3d_census.h"
 #include "native/native_probe.h"
 #include "native/shadow.h"
@@ -281,6 +282,7 @@ void Install(rex::input::InputSystem* input, uint8_t* membase, const std::filesy
 void OnGuestFrame() {
   native::textures::OnGuestFrame();
   native::shadow::OnGuestFrame();
+  free_camera::OnGuestFrame();
   g_frame_count.fetch_add(1, std::memory_order_relaxed);
   if (!g_recording.load(std::memory_order_relaxed)) {
     return;

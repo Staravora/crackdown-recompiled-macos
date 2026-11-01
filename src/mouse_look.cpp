@@ -15,6 +15,7 @@
 #include <rex/ui/window.h>
 #include <rex/ui/window_listener.h>
 
+#include "free_camera.h"
 #include "guest_layout.h"
 
 REXCVAR_DECLARE(double, mnk_sensitivity);
@@ -257,7 +258,7 @@ void SetBlocked(bool blocked) {
 
 bool ApplyTurn(float& yaw, float& pitch) {
   const bool stale = MarkUpdate(std::chrono::steady_clock::now());
-  if (!Active() || stale) {
+  if (!Active() || stale || free_camera::Active()) {
     ClearAccumulator();
     return false;
   }
