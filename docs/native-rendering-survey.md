@@ -315,7 +315,7 @@ Shadow mode now costs about 2 FPS, 3 ms on the median frame and 260 MB, on top o
 
 **The rooftop picture didn't change,** as expected if the first main stretch draws the same geometry as the second. Colour from the shadow passes is never sampled yet, since there are no pixel shaders.
 
-**Car bodies are still an open question.** In Bruce's session the wheels and some trim of parked cars drew and the bodies didn't, with only the largest stretch drawn. The rooftop has no cars in view, so this build hasn't been tested on them. If bodies stay missing, they're direct draws.
+**What baked draws leave out, from Bruce's drive with this build.** Some cars draw and some don't. Those that do are complete far away and lose their bodies up close, leaving wheels and trim, and many of the missing vehicles are gang vehicles. Trees, throwable objects, miscellaneous props, people and characters are all missing. Drawing every pass didn't bring these back, so the likely explanation is that they're direct draws: a car's far LOD is baked, and its near body goes through the Direct3D setters so it can dent and come apart. That fits the census, where baked draws are 41-64% of city draws, but no draw has been traced to a specific object yet.
 
 ## Shader trial (2026-10-31)
 

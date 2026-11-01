@@ -3,9 +3,9 @@
 ## 2026-10-31 (night) — Every baked pass drawn to its own target
 - **Added:** each run records the device's colour and depth surfaces, the viewport sets the target's size, and `Clear` plus a target's first use start cleared passes. All 1,830 baked draws go out in 5 Metal passes on 2 targets, a 1024x1024 depth map and the 1280x720 view. `Run::segment` and `OnResolve` are gone. `BakedDraw` gained `surface_info`, `color_info`, `depth_info` and `viewport`.
 - **Result:** rooftop, three rounds: recording 1.1 ms, GPU 2.5 ms, 0 errors, 0 dropped. Costs about 2 FPS, 3 ms and 260 MB on top of the emulator. Table in `docs/native-rendering-survey.md`, "Every pass".
-- **Open:** car bodies. Bruce saw wheels and trim but no bodies in a street with the previous build, and the rooftop benchmark shows no cars, so this build is untested on them. If bodies stay missing, they're direct draws.
+- **Bruce's drive with this build:** far cars are complete and near ones lose their bodies, some vehicles are missing outright, many of them gang vehicles, and trees, throwables, misc props and all characters are missing. Every pass is drawn now, so these are most likely direct draws, though none has been traced to an object.
 - **Guesses to replace:** clear values come from the depth test, not from `Clear`'s arguments. MSAA is left out and culling is off.
-- **Next:** real pixel shaders and textures through the page watch, then direct draws.
+- **Next:** direct draws and real pixel shaders with textures through the page watch, order to be settled with Bruce.
 
 ## 2026-10-31 (night) — First Metal picture: the rooftop in grey from live game data
 - **Result:** shadow mode draws the main scene with real vertex shaders, the live camera and live geometry, off screen or in a window with `crackdown_native_shadow_window`. 32-40 live shaders per run, none missing, 0 GPU errors, 0 dropped frames, about 665 draws in 0.7 ms and 1.3 ms of GPU. Costs about 1 FPS and 220 MB on top of the emulator. Detail in `docs/native-rendering-survey.md`, "First picture".
