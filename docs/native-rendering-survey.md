@@ -454,6 +454,10 @@ Three things about the Xenos that the translated shaders don't carry, and that t
 
 Binding also sorts a block's vertex fetches by offset and turns off outputs the pixel shader doesn't read, so a live shader can differ from its shipped form by more than its blanked fields.
 
+Vertex shaders read textures as well, from fetch constants 16 to 19: effect parameters, the water's FFT and street glow.
+
+A resolve can clear as it copies, and that clear has to happen then. The light layer shows why: it starts as a copy of the normals, is cleared, and only gets lights if any are in view.
+
 The game runs about 190 occlusion queries a frame, as depth-only quads between sample-count events. Metal leaves them out for now, and the emulator still answers them.
 
 ## Free camera (2026-10-31)

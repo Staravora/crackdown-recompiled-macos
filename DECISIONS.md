@@ -57,3 +57,5 @@
 | 2026-11-01 | Apply the game's gamma ramp as Metal's last pass. | The emulator does the same at swap, and it's the game's look. Applying it to `show=` views would hide what targets really hold. | active |
 | 2026-11-01 | Match vertex shaders with stripped outputs through a second, looser hash, used only after the exact one misses. | Binding turns off outputs a pixel shader doesn't read. Blanking exports in the main hash would merge shaders that really differ. | active |
 | 2026-11-01 | Leave D3D's own helper shaders out of extraction. | They have no constant table, so the translator can't read them, and nothing on the game's path has needed them. | active |
+| 2026-11-01 | Run resolve clears in place, as rectangles. | Waiting for the next draw lost them when no draw came, which left normals in the light layer. Rectangles keep one tile's clear off the next tile's rows. | active |
+| 2026-11-01 | Give vertex textures their own table in the shared constants. | The translator numbers them from 0 like pixel textures, and both stages read one table. Moving them in the generator needs no translator change. | active |

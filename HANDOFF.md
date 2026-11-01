@@ -1,5 +1,16 @@
 # Session handoff
 
+## 2026-11-01 (late afternoon) — Second drive
+- **Bruce's drive:** menus are right in Metal and wrong in the emulator, whose rows are only lines. Some lighting looks better each way. Orbs, beams and spotlights were wrong, plus a new overlay of green floors and red walls at some angles, which looking away or firing could change.
+- **Overlay:** those colours are the normal buffer. A resolve's clear waited for the next draw on its target, so with no lights in view the light layer kept its normals and tinted the frame. A muzzle flash is a light, which explains the gun. Reproduced with `skip_ps=` on both light shaders. Clears now run in place, limited to their rectangle (`MetalDevice::ClearRect`), and a null rect or a first tile stops at the rows the next tile needs.
+- **Seam line:** tiles overlap by 4 rows, and per-tile quads blended twice there. Those draws are scissored to their tile.
+- **Vertex textures:** 159 vertex shaders read textures and none were bound. `ParamTexture_*` is effects (24, 23, 5 and 4 shaders), `Streetglow_map` street lighting (70), `FFTTexture` water, plus `MatrixSelect` and `DepthTexture`. They read fetch constants 16 to 19, numbered from 0, which collides with the pixel table, so `pull_vertices.py` moves them to shared offsets 320 and 336 and writes `vertex-textures.txt`.
+- **Rerun `pull_vertices.py` after pulling this.** Bruce's local `native-shaders` is rebuilt.
+- **Verified:** overlay and seam gone with lights forced off. Rooftop noon to night: 5,080 draws, 0 missing shaders, 0 missed resolves, 0 GPU errors, brightness falling smoothly, and a beam now shows in the sky. Side by side by day, Metal and the emulator nearly match. **Not verified:** orbs up close, water, street glow and the lighting differences, which need a drive, and the emulator's menu fault isn't traced.
+- **False alarm to remember:** a frame right after spawn read darker because exposure was still settling. Compare frames taken at the same moment.
+- **Scripts:** don't `pkill -f` a pattern in the same command that names it. It matches its own shell.
+- **Next:** Bruce's drive, then cost. Metal costs 7 ms to encode and 3 to 11 ms of GPU beside the emulator, and textures reload about 2.6 MB a frame, not traced.
+
 ## 2026-11-01 (evening) — After Bruce's first drive
 - **Drive:** Bruce played 15 minutes, day through night, with no sheets. His list: menu panels, HUD pieces, colour grading, shadows, a giant ghost layer, blood and overlays, orbs. Water looks wrong in the emulator too, so it's not on the list.
 - **Ghost:** Bruce called it: a grading layer, offset. The half-size layer is blended over the whole scene, and each tile's half landed in the same space. Each tile has its own target now.
