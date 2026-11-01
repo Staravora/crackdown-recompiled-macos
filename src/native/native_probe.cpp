@@ -5,6 +5,7 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -65,6 +66,9 @@ constexpr size_t kReportRows = 16;
 constexpr uint32_t kMaxRingStretchBytes = 1 << 24;
 constexpr uint32_t kFetchDwords = 192;
 constexpr uint32_t kEveryPass = ~0u;
+constexpr uint32_t kImageStart = 0x82000000;
+constexpr uint32_t kImageEnd = 0x83000000;
+constexpr uint32_t kImageChunk = 0x10000;
 
 struct Buffer {
   uint32_t flags = 0;
@@ -244,6 +248,22 @@ void ReadRing(uint32_t device, const uint8_t* base) {
   if (g_ring.gamma_writes() != g_gamma_writes) {
     g_gamma_writes = g_ring.gamma_writes();
     shadow::SetGammaRamp(g_ring.gamma_ramp());
+  }
+}
+
+// The executable is compressed on disk and holds a few shaders, so tools/shader-trial/extract.py can read a copy of its
+// image from memory. Set CRACKDOWN_DUMP_IMAGE to a path.
+void DumpImageOnce(const uint8_t* base) {
+  static bool done = false;
+  const char* path = std::getenv("CRACKDOWN_DUMP_IMAGE");
+  if (done || !path) {
+    return;
+  }
+  done = true;
+  std::ofstream out(path, std::ios::binary);
+  const std::vector<char> blank(kImageChunk);
+  for (uint32_t at = kImageStart; at < kImageEnd; at += kImageChunk) {
+    out.write(Readable(at, kImageChunk) ? reinterpret_cast<const char*>(GuestPointer(base, at)) : blank.data(), kImageChunk);
   }
 }
 
@@ -466,6 +486,7 @@ void AfterDraw(uint32_t device, const uint8_t* base) {
 
 void OnRingSegmentEnding(uint32_t device, const uint8_t* base) {
   AfterDraw(device, base);
+  DumpImageOnce(base);
 }
 
 void OnResolve(uint32_t device, uint32_t flags, uint32_t rect, uint32_t texture, uint32_t point, uint32_t level,

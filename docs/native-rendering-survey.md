@@ -444,7 +444,15 @@ Results, rooftop, Metal beside the emulator. Encode and GPU are the render threa
 | GPU per frame | 3 ms | 8.6 ms |
 | Shader code copy per frame | 1 to 2.3 ms | not measured |
 
-Still missing: 8 shaders the translated set doesn't have (100 to 200 HUD draws), scissor, stencil-only draws, the second tile's half-resolution draws, gamma, MSAA. Water isn't traced.
+Still missing: 6 shaders compiled into the executable, used by the menus (34 draws a frame on the rooftop), scissor, stencil-only draws, MSAA. Water isn't traced.
+
+Three things about the Xenos that the translated shaders don't carry, and that took the longest to see:
+
+- **Stages join by position.** A vertex shader's output joins the pixel input at the same position, whatever their semantic names say.
+- **Fetches can bias.** A fetch constant can ask for value * 2 - 1 per channel. The normal buffer depends on it.
+- **The display has a gamma ramp.** The game loads 256 entries through the ring, and they're a large part of its look.
+
+Binding also sorts a block's vertex fetches by offset, so a live shader can differ from its shipped form by more than its blanked fields.
 
 ## Free camera (2026-10-31)
 

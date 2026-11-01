@@ -1,5 +1,18 @@
 # Session handoff
 
+## 2026-11-01 (evening) — After Bruce's first drive
+- **Drive:** Bruce played 15 minutes, day through night, with no sheets. His list: menu panels, HUD pieces, colour grading, shadows, a giant ghost layer, blood and overlays, orbs. Water looks wrong in the emulator too, so it's not on the list.
+- **Ghost:** Bruce called it: a grading layer, offset. The half-size layer is blended over the whole scene, and each tile's half landed in the same space. Each tile has its own target now.
+- **Colour grading:** the game loads a 256-entry display gamma ramp through the ring (`0x1922`, `0x1925`), and the emulator applies it at the end. It's now a final pass, on the shown picture only, so `show=<target>` views stay raw.
+- **Lighting, two causes:** a fetch constant can ask for value * 2 - 1, and the normal buffer does, so normals came back all positive. The top four bits of a texture's descriptor now say which channels want it. And the depth pass writes its normal as TEXCOORD0 and reads it as TEXCOORD1, which the Xenos joins by position, so `relink` in `pull_vertices.py` names interpolators by position. The first was fixed by Bruce's character shot, the second by the wall going black after it.
+- **HUD:** binding sorts a block's fetches by offset, so 60-odd shaders never matched. They hash in sorted order now, and fetches are found by destination register. The HUD is complete, and missing-shader draws fell from over 100 a frame to 34. The manifest is now triples: address, swizzle, register.
+- **Menus need one step from Bruce:** `zsh experiments/shader-trial/run-trial.sh`. The rest of the shaders are inside the executable, and `extracted/` already has them (30, from an image dumped with `CRACKDOWN_DUMP_IMAGE`). Then rerun `pull_vertices.py` and `build_pixels.py`. Two inline vertex shaders, `3263...` and `bae0...`, don't match anything yet.
+- **Rerun both shader tools after pulling.** Bruce's local `native-shaders` is rebuilt.
+- **Verified:** rooftop from noon through nightfall, ghost and sheets gone, 0 GPU errors, comparing by eye with the emulator. **Not verified:** blood, orb beams and particles, which probably came back with the fetch fix, because they use `vfx_shaders.spk`. Bruce's next drive answers that. Shadows look right on the rooftop, and need checking in open streets.
+- **Wrong turns worth keeping:** I said same-code twin shaders had different output names, and they don't. The tables showed it in one script. Check the data before explaining it.
+- **Later, Bruce's ideas:** the game's look leans on baked lighting. Once it matches, consider redoing that, more dynamic lighting, and graphics options.
+- **Next:** Bruce's drive, the menu shaders, whatever that turns up, then cost.
+
 ## 2026-11-01 (afternoon) — The whole frame comes out of Metal
 - **Result:** shadow mode now draws the game's complete frame: real shadows, post-processing, particles and clutter, and most of the HUD. The Metal window shows the game's final surface, not the 3D target. Rooftop by day and through nightfall: 4,550 draws recorded at night, 23 Metal copies a frame, 0 missed, 0 blended draws held back. Brightness falls smoothly through sunset with the night effects on real data, so the washout stopgap is gone. Frame map in `docs/native-rendering-survey.md`, "The whole frame".
 - **Native resolves:** a resolve goes into the frame's stream in order, after the draws before it, and copies Metal's own target into a texture the cache hands to readers. Colour reads through an RGBA view of BGRA storage, so a fetch's swizzle means what it does in guest memory. Depth is stored as float, because the depth plane only comes apart by way of a buffer. A resolve's clear waits for the next pass.

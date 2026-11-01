@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Pull the game's shipped shader containers into one file each, with virtual and physical parts joined.
 
-usage: extract.py <game folder> <output folder>
+usage: extract.py <game folder> <output folder> [executable image]
 
 XenosRecomp expects a container's physical section right after its virtual one. That holds in
 prebuilt_shadercache.dat. The .bin, .spk and .bsh packs keep all virtual sections first, then the
 physical ones, so the two get joined here. Output is keyed by a hash of the
-ucode, because the same shader appears in several packs.
+ucode, because the same shader appears in several packs. The HUD and menus also use a few shaders
+compiled into the executable, which is compressed on disk, so a copy of its image taken from memory
+is a source too: run the game with CRACKDOWN_DUMP_IMAGE set to a path.
 """
 import hashlib
 import json
@@ -56,6 +58,7 @@ def packed_shaders(data):
 
 def main():
     game, out = sys.argv[1:3]
+    image = sys.argv[3] if len(sys.argv) > 3 else None
     os.makedirs(out, exist_ok=True)
     sources = {
         "ScreenRenderer/prebuilt_shadercache.dat": inline_shaders,
@@ -63,6 +66,8 @@ def main():
         "vfx_shaders.spk": packed_shaders,
         "boundshaders.bsh": packed_shaders,
     }
+    if image:
+        sources[image] = inline_shaders
     index = {}
     for name, reader in sources.items():
         data = open(os.path.join(game, name), "rb").read()
