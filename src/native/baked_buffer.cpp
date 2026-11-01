@@ -19,6 +19,7 @@ constexpr uint32_t kAlphaReference = 0x210E;
 constexpr uint32_t kStencilBack = 0x210C;
 constexpr uint32_t kStencilFront = 0x210D;
 constexpr uint32_t kMode = 0x2205;
+constexpr uint32_t kViewportControl = 0x2206;
 constexpr uint32_t kProgramControl = 0x2180;
 constexpr uint32_t kInterpolatorControl = 0x2182;
 constexpr uint32_t kViewport = 0x210F;
@@ -278,6 +279,7 @@ size_t BakedLibrary::DecodeWords(const uint32_t* words, size_t count, BakedList&
         draw.stencil_front = reg(kStencilFront);
         draw.stencil_back = reg(kStencilBack);
         draw.mode_control = reg(kMode);
+        draw.viewport_control = reg(kViewportControl);
         draw.surface_info = reg(kSurfaceInfo);
         draw.color_info = reg(kColorInfo);
         draw.depth_info = reg(kDepthInfo);

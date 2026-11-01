@@ -7,8 +7,9 @@ XenosRecomp leaves vertex input to a Metal vertex descriptor, which can't read b
 shader's fetch formats aren't known here either: most shipped shaders hold blanks that the game's D3D
 fills in when it binds them, so the live ucode is the only source. So each shader gets one
 pullElement call per vertex element, and the game hands it a table built from the live ucode, which
-manifest.txt says where to read. Fetches indexed by anything but r0 aren't handled: XenosRecomp
-drops that register's value too.
+manifest.txt says where to read. Fetches indexed by anything but r0 aren't handled. XenosRecomp drops
+r0's value too, which is the vertex index on the Xenos, so that's put back: some shaders work out a
+quad's corners from it.
 """
 import glob
 import hashlib
@@ -25,6 +26,12 @@ USAGES = {0: "Position", 1: "BlendWeight", 2: "BlendIndices", 3: "Normal", 4: "P
           13: "Sample"}
 
 EXEC_OPCODES = {1, 2, 3, 4, 5, 6, 13, 14}
+
+# A draw of screen pixels skips the viewport, which Metal can't, so shadow mode sets these to turn pixels into clip space.
+SCREEN_DEFINES = """
+#define g_ScreenScale (*(reinterpret_cast<device float2*>(g_PushConstants.SharedConstants + 280)))
+#define g_ScreenOffset (*(reinterpret_cast<device float2*>(g_PushConstants.SharedConstants + 288)))
+"""
 
 PREAMBLE = """
 struct PullElement {
@@ -216,11 +223,19 @@ def rewrite(source, elements):
         name = f"i{USAGES[element['usage']]}{element['index']}"
         body.append(f"\tinput.{name} = as_type<decltype(input.{name})>(pullElement(g_Guest, g_Fetch, g_Elements[{i}], vertex_id));")
     source = source.replace(a, a + "\n".join(body) + "\n")
+    a = "\toutput.oPos.xy += g_HalfPixelOffset * output.oPos.w;\n"
+    if source.count(a) != 1:
+        raise ValueError("no position line")
+    source = source.replace(a, "#ifdef __air__\n\toutput.oPos.xy = output.oPos.xy * g_ScreenScale + g_ScreenOffset * output.oPos.w;\n#else\n" + a + "#endif\n")
+    a = "\tfloat4 r0 = 0.0;\n"
+    if source.count(a) != 1:
+        raise ValueError("no r0")
+    source = source.replace(a, "#ifdef __air__\n\tfloat4 r0 = float4(float(vertex_id), 0.0, 0.0, 0.0);\n#else\n" + a + "#endif\n")
     # The loaders go after the shared header, before the shader's own input struct.
     a = "struct VertexShaderInput\n"
     if source.count(a) != 1:
         raise ValueError("no input struct")
-    return source.replace(a, "#ifdef __air__" + PREAMBLE + "#endif\n" + a)
+    return source.replace(a, "#ifdef __air__" + SCREEN_DEFINES + PREAMBLE + "#endif\n" + a)
 
 
 def compile_one(job):

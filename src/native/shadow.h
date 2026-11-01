@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -15,7 +16,7 @@ namespace crackdown::native::shadow {
 // Metal, off screen, while the emulator goes on presenting. The game's threads only hand runs over and never wait: if
 // the thread falls behind, a frame is dropped and counted. Draws use the game's real shaders, geometry and textures, and
 // a draw with no matching pixel shader comes out plain grey. Baked and direct draws go in the order the game made them.
-// Every pass goes to its own target, and the colour target with the most draws is shown. Writes
+// Every pass goes to its own target, and the last colour target drawn to is shown. Writes
 // native-shadow-<time>.json and .png to the logs folder, and crackdown_native_shadow_window shows the picture live.
 // The surfaces a draw goes to, and their size.
 struct Targets {
@@ -23,6 +24,19 @@ struct Targets {
   uint32_t depth = 0;
   uint32_t width = 0;
   uint32_t height = 0;
+};
+
+// A copy the game asks for, out of its current surfaces and into a texture object.
+struct ResolveCopy {
+  uint32_t texture = 0;
+  uint32_t flags = 0;
+  bool has_rect = false;
+  std::array<int32_t, 4> rect{};  // Left, top, right and bottom. Without one, as much as the texture holds.
+  int32_t dest_x = 0;
+  int32_t dest_y = 0;
+  uint32_t level = 0;
+  std::array<float, 4> clear_color{};  // For a resolve that clears as well, as flags say.
+  float clear_depth = 0.0f;
 };
 
 #if defined(__APPLE__)
@@ -35,8 +49,7 @@ void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_
              const uint32_t* loop_constants, const Targets& targets,
              std::shared_ptr<const std::vector<uint8_t>> vertex_code = nullptr);
 void CountDirectDraw();
-// The game has resolved into this texture object.
-void OnResolve(uint32_t texture, const uint8_t* base);
+void OnResolve(const ResolveCopy& copy, const Targets& targets, const uint8_t* base);
 void SetRingDesyncs(uint64_t desyncs);
 #else
 inline bool Enabled() {
@@ -48,7 +61,7 @@ inline void OnClear() {}
 inline void Capture(std::shared_ptr<const std::vector<BakedList>>, uint32_t, const uint32_t*, const uint32_t*, const Targets&,
                     std::shared_ptr<const std::vector<uint8_t>> = nullptr) {}
 inline void CountDirectDraw() {}
-inline void OnResolve(uint32_t, const uint8_t*) {}
+inline void OnResolve(const ResolveCopy&, const Targets&, const uint8_t*) {}
 inline void SetRingDesyncs(uint64_t) {}
 #endif
 

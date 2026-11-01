@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <unordered_map>
 
 #include <rex/system/xmemory.h>
@@ -14,7 +15,7 @@ namespace crackdown::native {
 // Turns fetch constants into Metal textures, read from guest memory: resolved render targets are there too, because the
 // emulator goes on writing them. A texture reloads when it's next used after its memory changes, which the emulator's
 // page watch reports, along with MarkResolved for the writes it doesn't see. Only 2D textures load so far, and those it
-// can't load read as the dummy texture.
+// can't load read as the dummy texture. A texture the render thread has resolved into itself is read from Metal instead.
 class TextureCache {
  public:
   TextureCache(MetalDevice& device, rex::memory::Memory* memory, const uint8_t* guest_memory, size_t guest_bytes);
@@ -25,6 +26,11 @@ class TextureCache {
   // Whether a fetch constant reads something guest memory doesn't hold: a depth buffer, or a resolve too large for the
   // emulator to copy back.
   static bool NeedsNativeResolve(const uint32_t* fetch);
+
+  // Where to copy a resolve to, given the destination's fetch constant, or -1 if it's not a format that can be copied.
+  int ResolveInto(const uint32_t* fetch);
+  void ForgetResolve(const uint32_t* fetch);
+  bool HasResolve(const uint32_t* fetch) const;
 
   // A descriptor for the six dwords of one fetch constant.
   int FindTexture(const uint32_t* fetch);
@@ -53,6 +59,12 @@ class TextureCache {
     uint64_t checked_frame = 0;
   };
 
+  struct Resolved {
+    int resolve = -1;
+    bool live = false;
+    std::unordered_map<uint32_t, int> views;
+  };
+
   int Load(const uint32_t* fetch, int descriptor);
 
   MetalDevice& device_;
@@ -61,6 +73,8 @@ class TextureCache {
   size_t guest_bytes_;
   std::unordered_map<uint64_t, Entry> textures_;
   std::unordered_map<uint32_t, int> samplers_;
+  // The game reuses memory for different resolves within a frame, so these go by first page, format and size.
+  std::map<std::array<uint32_t, 4>, Resolved> resolved_;
   size_t upload_budget_ = 0;
   uint64_t frame_ = 0;
   uint64_t textures_loaded_ = 0;

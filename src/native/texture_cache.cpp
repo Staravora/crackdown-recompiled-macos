@@ -26,6 +26,7 @@ constexpr uint32_t kDummyDescriptor = 0;
 constexpr uint32_t kPageShift = 12;
 constexpr uint32_t kPages = 1 << 17;
 constexpr uint32_t kPhysicalMask = 0x1FFFFFFF;
+constexpr uint32_t kMirrorFirstPage = 0xE0000;
 
 // Bumped each time a page changes, so a texture can tell by adding up its pages. Written from the page watch's fault
 // handler, so nothing here can take a lock.
@@ -164,6 +165,20 @@ uint32_t BlocksOf(uint32_t texels, uint32_t level, uint32_t block_size) {
   return (std::max(texels >> level, 1u) + block_size - 1) / block_size;
 }
 
+// A resolve's texture object can name its memory through the mirror at 0xE0000000, which sits one page along.
+uint32_t FirstPageOf(const xenos::xe_gpu_texture_fetch_t& fetch) {
+  const uint32_t page = uint32_t(fetch.base_address);
+  return ((page + (page >= kMirrorFirstPage ? 1 : 0)) << kPageShift & kPhysicalMask) >> kPageShift;
+}
+
+bool IsDepth(xenos::TextureFormat format) {
+  return format == xenos::TextureFormat::k_24_8 || format == xenos::TextureFormat::k_24_8_FLOAT;
+}
+
+std::array<uint32_t, 4> ResolveKeyOf(const xenos::xe_gpu_texture_fetch_t& fetch) {
+  return {FirstPageOf(fetch), uint32_t(fetch.format), uint32_t(fetch.size_2d.width) + 1, uint32_t(fetch.size_2d.height) + 1};
+}
+
 uint64_t HashFetch(const uint32_t* fetch) {
   uint64_t hash = 0xCBF29CE484222325ull;
   for (size_t i = 0; i < kFetchDwords; ++i) {
@@ -216,15 +231,67 @@ bool TextureCache::NeedsNativeResolve(const uint32_t* fetch_dwords) {
   if (fetch.type != xenos::FetchConstantType::kTexture) {
     return false;
   }
-  const xenos::TextureFormat format = xenos::TextureFormat(uint32_t(fetch.format));
-  if (format == xenos::TextureFormat::k_24_8 || format == xenos::TextureFormat::k_24_8_FLOAT) {
+  if (IsDepth(xenos::TextureFormat(uint32_t(fetch.format)))) {
     return true;
   }
-  return g_resolved_elsewhere && g_resolved_elsewhere[(uint32_t(fetch.base_address) << 12 & kPhysicalMask) >> kPageShift].load(
-                                     std::memory_order_relaxed);
+  return g_resolved_elsewhere && g_resolved_elsewhere[FirstPageOf(fetch)].load(std::memory_order_relaxed);
+}
+
+int TextureCache::ResolveInto(const uint32_t* fetch_dwords) {
+  xenos::xe_gpu_texture_fetch_t fetch;
+  std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
+  const xenos::TextureFormat format = xenos::TextureFormat(uint32_t(fetch.format));
+  if (fetch.type != xenos::FetchConstantType::kTexture || fetch.dimension != xenos::DataDimension::k2DOrStacked ||
+      (format != xenos::TextureFormat::k_8_8_8_8 && !IsDepth(format))) {
+    return -1;
+  }
+  Resolved& resolved = resolved_[ResolveKeyOf(fetch)];
+  if (resolved.resolve < 0) {
+    const uint32_t width = uint32_t(fetch.size_2d.width) + 1, height = uint32_t(fetch.size_2d.height) + 1;
+    const uint32_t mip_address = uint32_t(fetch.mip_address) << 12;
+    const uint32_t levels = mip_address ? std::min(uint32_t(fetch.mip_max_level) + 1, uint32_t(std::bit_width(std::max(width, height)))) : 1;
+    resolved.resolve = device_.AddResolve(width, height, levels, IsDepth(format));
+  }
+  resolved.live = resolved.resolve >= 0;
+  return resolved.resolve;
+}
+
+void TextureCache::ForgetResolve(const uint32_t* fetch_dwords) {
+  xenos::xe_gpu_texture_fetch_t fetch;
+  std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
+  const auto found = resolved_.find(ResolveKeyOf(fetch));
+  if (found != resolved_.end()) {
+    found->second.live = false;
+  }
+}
+
+bool TextureCache::HasResolve(const uint32_t* fetch_dwords) const {
+  xenos::xe_gpu_texture_fetch_t fetch;
+  std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
+  const auto found = resolved_.find(ResolveKeyOf(fetch));
+  return found != resolved_.end() && found->second.live;
 }
 
 int TextureCache::FindTexture(const uint32_t* fetch) {
+  {
+    xenos::xe_gpu_texture_fetch_t decoded;
+    std::memcpy(&decoded, fetch, sizeof(decoded));
+    const auto resolved = resolved_.find(ResolveKeyOf(decoded));
+    if (decoded.type == xenos::FetchConstantType::kTexture && resolved != resolved_.end() && resolved->second.live) {
+      Resolved& entry = resolved->second;
+      const bool gamma = decoded.sign_x == xenos::TextureSign::kGamma;
+      const uint32_t view = uint32_t(decoded.swizzle) | uint32_t(gamma) << 12;
+      const auto found = entry.views.find(view);
+      if (found != entry.views.end()) {
+        return found->second;
+      }
+      uint8_t swizzle[4];
+      for (uint32_t i = 0; i < 4; ++i) {
+        swizzle[i] = uint8_t((decoded.swizzle >> (i * 3)) & 7);
+      }
+      return entry.views[view] = device_.ViewResolve(entry.resolve, gamma, swizzle);
+    }
+  }
   const uint64_t key = HashFetch(fetch);
   const auto found = textures_.find(key);
   if (found != textures_.end()) {

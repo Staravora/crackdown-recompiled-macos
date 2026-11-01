@@ -447,6 +447,36 @@ void OnRingSegmentEnding(uint32_t device, const uint8_t* base) {
   AfterDraw(device, base);
 }
 
+void OnResolve(uint32_t device, uint32_t flags, uint32_t rect, uint32_t texture, uint32_t point, uint32_t level,
+               uint32_t clear_color, float clear_depth, const uint8_t* base) {
+  if (!shadow::Enabled() || !texture) {
+    return;
+  }
+  shadow::ResolveCopy copy;
+  copy.texture = texture;
+  copy.flags = flags;
+  copy.level = level;
+  if (rect) {
+    copy.has_rect = true;
+    for (uint32_t i = 0; i < 4; ++i) {
+      copy.rect[i] = int32_t(Load32(base, rect + i * 4));
+    }
+  }
+  if (point) {
+    copy.dest_x = int32_t(Load32(base, point));
+    copy.dest_y = int32_t(Load32(base, point + 4));
+  }
+  if (clear_color) {
+    for (uint32_t i = 0; i < 4; ++i) {
+      copy.clear_color[i] = std::bit_cast<float>(Load32(base, clear_color + i * 4));
+    }
+  }
+  copy.clear_depth = clear_depth;
+  std::lock_guard lock(g_mutex);
+  ReadRing(device, base);
+  shadow::OnResolve(copy, TargetsOf(device, base), base);
+}
+
 void Write(const std::filesystem::path& path, const std::string& label) {
   if (!Enabled()) {
     return;

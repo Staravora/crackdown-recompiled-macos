@@ -406,6 +406,72 @@ class MetalDeviceImpl final : public MetalDevice {
     return index;
   }
 
+  int AddResolve(uint32_t width, uint32_t height, uint32_t levels, bool depth) override {
+    MTLTextureDescriptor* descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:depth ? kDepthFormat : MTLPixelFormatBGRA8Unorm
+                                                           width:width
+                                                          height:height
+                                                       mipmapped:NO];
+    descriptor.mipmapLevelCount = levels;
+    descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+    descriptor.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
+    if (!texture) {
+      return -1;
+    }
+    resolves_.push_back(texture);
+    return int(resolves_.size()) - 1;
+  }
+
+  int ViewResolve(int resolve, bool gamma, const uint8_t* swizzle) override {
+    if (next_texture_ >= kMaxTextures) {
+      return 0;
+    }
+    id<MTLTexture> storage = resolves_[size_t(resolve)];
+    const MTLPixelFormat format = storage.pixelFormat == kDepthFormat ? kDepthFormat
+                                  : gamma                             ? MTLPixelFormatRGBA8Unorm_sRGB
+                                                                      : MTLPixelFormatRGBA8Unorm;
+    id<MTLTexture> view = [storage newTextureViewWithPixelFormat:format
+                                                     textureType:MTLTextureType2D
+                                                          levels:NSMakeRange(0, storage.mipmapLevelCount)
+                                                          slices:NSMakeRange(0, 1)
+                                                         swizzle:MTLTextureSwizzleChannelsMake(SwizzleOf(swizzle[0]), SwizzleOf(swizzle[1]),
+                                                                                               SwizzleOf(swizzle[2]), SwizzleOf(swizzle[3]))];
+    if (!view) {
+      return 0;
+    }
+    const int index = int(next_texture_++);
+    textures_.resize(next_texture_);
+    textures_[size_t(index)] = view;
+    static_cast<MTLResourceID*>(heaps_[kTextureHeap].contents)[index] = view.gpuResourceID;
+    return index;
+  }
+
+  void CopyTarget(const MetalCopy& copy) override {
+    EndPass();
+    const Target& target = targets_[size_t(copy.target)];
+    id<MTLTexture> from = copy.depth ? target.depth : target.color;
+    id<MTLTexture> to = resolves_[size_t(copy.resolve)];
+    const int32_t left = std::max(copy.left, 0), top = std::max(copy.top, 0);
+    const int32_t dest_x = copy.dest_x + left - copy.left, dest_y = copy.dest_y + top - copy.top;
+    const int32_t width = std::min({copy.right, int32_t(from.width), int32_t(std::max(to.width >> copy.level, NSUInteger(1))) - dest_x + left}) - left;
+    const int32_t height = std::min({copy.bottom, int32_t(from.height), int32_t(std::max(to.height >> copy.level, NSUInteger(1))) - dest_y + top}) - top;
+    if (width <= 0 || height <= 0 || dest_x < 0 || dest_y < 0) {
+      return;
+    }
+    id<MTLBlitCommandEncoder> blit = [buffer_ blitCommandEncoder];
+    [blit copyFromTexture:from
+              sourceSlice:0
+              sourceLevel:0
+             sourceOrigin:MTLOriginMake(left, top, 0)
+               sourceSize:MTLSizeMake(width, height, 1)
+                toTexture:to
+         destinationSlice:0
+         destinationLevel:copy.level
+        destinationOrigin:MTLOriginMake(dest_x, dest_y, 0)];
+    [blit endEncoding];
+  }
+
   MetalFrameTiming RecordFrame(const std::function<void(uint8_t* frame)>& encode,
                                const std::filesystem::path& capture) override {
     MetalFrameTiming timing;
@@ -495,22 +561,22 @@ class MetalDeviceImpl final : public MetalDevice {
     return int(targets_.size()) - 1;
   }
 
-  void BeginPass(int target_index, bool clear, double clear_depth) override {
+  void BeginPass(int target_index, const MetalClear& clear) override {
     EndPass();
     const Target& target = targets_[size_t(target_index)];
     MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
     if (target.color) {
       pass.colorAttachments[0].texture = target.color;
-      pass.colorAttachments[0].loadAction = clear ? MTLLoadActionClear : MTLLoadActionLoad;
-      pass.colorAttachments[0].clearColor = MTLClearColorMake(0.08, 0.1, 0.14, 1.0);
+      pass.colorAttachments[0].loadAction = clear.color ? MTLLoadActionClear : MTLLoadActionLoad;
+      pass.colorAttachments[0].clearColor = MTLClearColorMake(clear.color_value[0], clear.color_value[1], clear.color_value[2], clear.color_value[3]);
       pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     }
     pass.depthAttachment.texture = target.depth;
-    pass.depthAttachment.loadAction = clear ? MTLLoadActionClear : MTLLoadActionLoad;
-    pass.depthAttachment.clearDepth = clear_depth;
+    pass.depthAttachment.loadAction = clear.depth ? MTLLoadActionClear : MTLLoadActionLoad;
+    pass.depthAttachment.clearDepth = clear.depth_value;
     pass.depthAttachment.storeAction = MTLStoreActionStore;
     pass.stencilAttachment.texture = target.depth;
-    pass.stencilAttachment.loadAction = clear ? MTLLoadActionClear : MTLLoadActionLoad;
+    pass.stencilAttachment.loadAction = clear.depth ? MTLLoadActionClear : MTLLoadActionLoad;
     pass.stencilAttachment.clearStencil = 0;
     pass.stencilAttachment.storeAction = MTLStoreActionStore;
     encoder_ = [buffer_ renderCommandEncoderWithDescriptor:pass];
@@ -768,6 +834,7 @@ class MetalDeviceImpl final : public MetalDevice {
   std::vector<PixelShader> pixel_shaders_;
   std::map<ShadedKey, id<MTLRenderPipelineState>> shaded_pipelines_;
   std::vector<id<MTLTexture>> textures_;
+  std::vector<id<MTLTexture>> resolves_;
   std::vector<id<MTLSamplerState>> samplers_;
   std::vector<uint64_t> texture_pass_;
   size_t next_texture_ = 1;
