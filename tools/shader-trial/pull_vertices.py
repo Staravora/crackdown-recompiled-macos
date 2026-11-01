@@ -168,28 +168,34 @@ static float4 pullElement(const device uint* guest, constant uint* fetch, consta
 """
 
 
-def masked_code(code):
-    """The ucode with what binding a shader to a vertex declaration patches blanked out. The game's D3D writes
-    each vertex fetch's format, offset, stride and fetch slot into the shader when it binds it, so most shipped
-    shaders hold none of these and only the live copy does. src/native/shadow.cpp does the same to live ucode."""
-    words = list(struct.unpack(">%dI" % (len(code) // 4), code))
+def fetch_blocks(words):
+    """Each exec block's vertex fetches, as lists of addresses."""
+    blocks = []
     first_instruction = len(words) // 3
     pair = 0
-    while pair * 3 < len(words) and pair < first_instruction:
+    while pair < first_instruction and pair * 3 + 2 < len(words):
         low, middle, high = words[pair * 3 : pair * 3 + 3]
-        for cf_low, cf_high in ((low, middle & 0xFFFF), (((middle >> 16) | (high << 16)) & 0xFFFFFFFF, high >> 16)):
-            if (cf_high >> 12) & 0xF not in EXEC_OPCODES:
+        for flow_low, flow_high in ((low, middle & 0xFFFF), (((middle >> 16) | (high << 16)) & 0xFFFFFFFF, high >> 16)):
+            if (flow_high >> 12) & 0xF not in EXEC_OPCODES:
                 continue
-            address, count, sequence = cf_low & 0xFFF, (cf_low >> 12) & 7, (cf_low >> 16) & 0xFFF
+            address, count, sequence = flow_low & 0xFFF, (flow_low >> 12) & 7, (flow_low >> 16) & 0xFFF
             first_instruction = min(first_instruction, address)
-            for i in range(count):
-                at = (address + i) * 3
-                if (sequence >> (i * 2)) & 1 and at + 2 < len(words) and words[at] & 0x1F == 0:
-                    words[at] &= 0xC00FFFFF
-                    words[at + 1] &= 0x80000000
-                    words[at + 2] = 0
+            fetches = [address + i for i in range(count) if (sequence >> (i * 2)) & 1 and (address + i) * 3 + 2 < len(words)
+                       and words[(address + i) * 3] & 0x1F == 0]
+            if fetches:
+                blocks.append(fetches)
         pair += 1
-    return struct.pack(">%dI" % len(words), *words)
+    return blocks
+
+
+def masked_code(code):
+    """Blanks what binding patches, and sorts each block's fetches, which binding reorders by offset. Matches MaskedKey in shadow.cpp."""
+    words = list(struct.unpack(f">{len(code) // 4}I", code))
+    for fetches in fetch_blocks(words):
+        blanked = sorted((words[at * 3] & 0xC00FFFFF, words[at * 3 + 1] & 0x80000000, 0) for at in fetches)
+        for at, fetch in zip(fetches, blanked):
+            words[at * 3 : at * 3 + 3] = fetch
+    return struct.pack(f">{len(words)}I", *words)
 
 
 def elements_of(path):
@@ -205,6 +211,7 @@ def elements_of(path):
         address = value & 0xFFF
         word0, word1 = struct.unpack_from(">II", code, address * 3 * 4)
         elements.append({"address": address, "usage": (value >> 12) & 0xF, "index": (value >> 16) & 0xF, "swizzle": word1 & 0xFFF,
+                         "dest": (word0 >> 12) & 0x3F,
                          "register": (word0 >> 5) & 0x3F, "component": word0 >> 30, "rounded": (word1 >> 15) & 1,
                          "mini": (word1 >> 30) & 1})
     elements.sort(key=lambda e: e["address"])
@@ -310,8 +317,9 @@ def main():
         if key in manifest:
             report["same_masked_key"] += 1
             continue
-        # The address, then the swizzle the translated shader was built with. Binding rewrites it for the live format.
-        manifest[key] = [value for element in elements for value in (element["address"], element["swizzle"])]
+        # The address, the swizzle the translated shader was built with, which binding rewrites for the live format, and
+        # the register it fetches to, which is how to find it if binding has moved it.
+        manifest[key] = [value for element in elements for value in (element["address"], element["swizzle"], element["dest"])]
         target = os.path.join(work, f"vs_{key}.metal")
         open(target, "w").write(source)
         jobs.append((target, os.path.join(output, f"vs_{key}.metallib"), os.path.join(work, f"vs_{key}.log")))

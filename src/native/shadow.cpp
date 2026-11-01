@@ -242,16 +242,13 @@ uint32_t Word(const uint8_t* code, uint32_t dword) {
   return std::byteswap(value);
 }
 
-// Blanks what binding a shader to a vertex declaration patches, so a live shader hashes like its shipped form. Matches
-// masked_code in tools/shader-trial/pull_vertices.py.
-std::string MaskedKey(const uint8_t* code, uint32_t dwords) {
-  std::vector<uint32_t> words(dwords);
-  std::memcpy(words.data(), code, size_t(dwords) * 4);
-  const auto get = [&](uint32_t i) { return std::byteswap(words[i]); };
-  const auto set = [&](uint32_t i, uint32_t value) { words[i] = std::byteswap(value); };
+// Each exec block's vertex fetches, as addresses. Matches fetch_blocks in tools/shader-trial/pull_vertices.py.
+std::vector<std::vector<uint32_t>> FetchBlocks(const std::vector<uint32_t>& words) {
+  std::vector<std::vector<uint32_t>> blocks;
+  const uint32_t dwords = uint32_t(words.size());
   uint32_t first_instruction = dwords / 3;
   for (uint32_t pair = 0; pair < first_instruction && pair * 3 + 2 < dwords; ++pair) {
-    const uint32_t low = get(pair * 3), middle = get(pair * 3 + 1), high = get(pair * 3 + 2);
+    const uint32_t low = words[pair * 3], middle = words[pair * 3 + 1], high = words[pair * 3 + 2];
     const std::array<std::array<uint32_t, 2>, 2> flow = {{{low, middle & 0xFFFF}, {(middle >> 16) | (high << 16), high >> 16}}};
     for (const auto& [flow_low, flow_high] : flow) {
       const uint32_t opcode = (flow_high >> 12) & 0xF;
@@ -261,15 +258,45 @@ std::string MaskedKey(const uint8_t* code, uint32_t dwords) {
       }
       const uint32_t address = flow_low & 0xFFF, count = (flow_low >> 12) & 7, sequence = (flow_low >> 16) & 0xFFF;
       first_instruction = std::min(first_instruction, address);
+      std::vector<uint32_t> fetches;
       for (uint32_t i = 0; i < count; ++i) {
-        const uint32_t at = (address + i) * 3;
-        if (((sequence >> (i * 2)) & 1) && at + 2 < dwords && (get(at) & 0x1F) == 0) {
-          set(at, get(at) & 0xC00FFFFF);
-          set(at + 1, get(at + 1) & 0x80000000);
-          set(at + 2, 0);
+        const uint32_t at = address + i;
+        if (((sequence >> (i * 2)) & 1) && at * 3 + 2 < dwords && (words[at * 3] & 0x1F) == 0) {
+          fetches.push_back(at);
         }
       }
+      if (!fetches.empty()) {
+        blocks.push_back(std::move(fetches));
+      }
     }
+  }
+  return blocks;
+}
+
+std::vector<uint32_t> WordsOf(const uint8_t* code, uint32_t dwords) {
+  std::vector<uint32_t> words(dwords);
+  for (uint32_t i = 0; i < dwords; ++i) {
+    words[i] = Word(code, i);
+  }
+  return words;
+}
+
+// Blanks what binding patches and sorts each block's fetches, which binding reorders by offset, so a live shader hashes
+// like its shipped form. Matches masked_code in tools/shader-trial/pull_vertices.py.
+std::string MaskedKey(const uint8_t* code, uint32_t dwords) {
+  std::vector<uint32_t> words = WordsOf(code, dwords);
+  for (const std::vector<uint32_t>& fetches : FetchBlocks(words)) {
+    std::vector<std::array<uint32_t, 3>> blanked;
+    for (const uint32_t at : fetches) {
+      blanked.push_back({words[at * 3] & 0xC00FFFFF, words[at * 3 + 1] & 0x80000000, 0});
+    }
+    std::sort(blanked.begin(), blanked.end());
+    for (size_t i = 0; i < fetches.size(); ++i) {
+      std::copy(blanked[i].begin(), blanked[i].end(), words.begin() + fetches[i] * 3);
+    }
+  }
+  for (uint32_t& word : words) {
+    word = std::byteswap(word);
   }
   const std::string_view bytes(reinterpret_cast<const char*>(words.data()), size_t(dwords) * 4);
   return trg::update::Sha256Hex(bytes).substr(0, 16);
@@ -289,21 +316,41 @@ uint32_t SelectFor(uint32_t shipped, uint32_t live) {
   return select[0] | select[1] << 3 | select[2] << 6 | select[3] << 9;
 }
 
-// What pullElement needs from each fetch, read from the live ucode. A mini fetch shares the full fetch's slot and stride.
-// The manifest holds each fetch's address and shipped swizzle.
+// What pullElement needs from each fetch, read from the live ucode. A mini fetch shares the full fetch's slot and stride,
+// in live order, and binding can have moved a fetch, so an element finds its own by the register it fetches to. The
+// manifest holds each fetch's address, shipped swizzle and that register.
 std::vector<MetalPullElement> PullElements(const uint8_t* code, uint32_t dwords, const std::vector<uint32_t>& manifest) {
+  struct Fetch {
+    uint32_t at;
+    uint32_t slot;
+    uint32_t stride;
+  };
+  const std::vector<uint32_t> words = WordsOf(code, dwords);
+  std::vector<Fetch> fetches;
+  for (const std::vector<uint32_t>& block : FetchBlocks(words)) {
+    uint32_t slot = 0, stride = 0;
+    for (const uint32_t at : block) {
+      const uint32_t d0 = words[at * 3], d1 = words[at * 3 + 1], d2 = words[at * 3 + 2];
+      if (!((d1 >> 30) & 1)) {
+        slot = ((d0 >> 20) & 0x1F) * 3 + ((d0 >> 25) & 3);
+        stride = d2 & 0xFF;
+      }
+      fetches.push_back({at, slot, stride});
+    }
+  }
   std::vector<MetalPullElement> elements;
-  uint32_t slot = 0, stride = 0;
-  for (size_t entry = 0; entry + 1 < manifest.size(); entry += 2) {
-    const uint32_t address = manifest[entry], shipped = manifest[entry + 1];
-    if ((address + 1) * 3 > dwords) {
+  for (size_t entry = 0; entry + 2 < manifest.size(); entry += 3) {
+    const uint32_t address = manifest[entry], shipped = manifest[entry + 1], dest = manifest[entry + 2];
+    const Fetch* found = nullptr;
+    for (const Fetch& fetch : fetches) {
+      if (((words[fetch.at * 3] >> 12) & 0x3F) == dest && (!found || fetch.at == address)) {
+        found = &fetch;
+      }
+    }
+    if (!found) {
       return {};
     }
-    const uint32_t d0 = Word(code, address * 3), d1 = Word(code, address * 3 + 1), d2 = Word(code, address * 3 + 2);
-    if (!((d1 >> 30) & 1)) {
-      slot = ((d0 >> 20) & 0x1F) * 3 + ((d0 >> 25) & 3);
-      stride = d2 & 0xFF;
-    }
+    const uint32_t d1 = words[found->at * 3 + 1], d2 = words[found->at * 3 + 2];
     bool reads = false;
     for (uint32_t i = 0; i < 4; ++i) {
       reads |= (((d1 & 0xFFF) >> (i * 3)) & 7) <= 5;
@@ -311,10 +358,18 @@ std::vector<MetalPullElement> PullElements(const uint8_t* code, uint32_t dwords,
     const uint32_t flags = ((d1 >> 12) & 7) | (uint32_t(reads) << 3);
     const int32_t exponent = (int32_t(d1 << 2) >> 26);
     const int32_t offset = int32_t(d2 << 1) >> 9;
-    elements.push_back({slot | (stride << 8) | (((d1 >> 16) & 0x3F) << 16) | (flags << 24), offset,
+    elements.push_back({found->slot | (found->stride << 8) | (((d1 >> 16) & 0x3F) << 16) | (flags << 24), offset,
                         float(std::ldexp(1.0, exponent)), SelectFor(shipped, d1 & 0xFFF)});
   }
   return elements;
+}
+
+// Live code of a shader the translated set doesn't have, in the logs folder, for working out where it comes from.
+void KeepMissingShader(const std::string& name, const uint8_t* code, uint32_t dwords) {
+  const std::filesystem::path folder = g_path.parent_path() / "missing-shaders";
+  std::error_code ignored;
+  std::filesystem::create_directories(folder, ignored);
+  std::ofstream(folder / (name + ".bin"), std::ios::binary).write(reinterpret_cast<const char*>(code), std::streamsize(dwords) * 4);
 }
 
 int FindVertexShader(MetalDevice& device, const BakedDraw& draw, const Run& run) {
@@ -351,6 +406,7 @@ int FindVertexShader(MetalDevice& device, const BakedDraw& draw, const Run& run)
     if (manifest == g_manifest.end()) {
       ++g_totals.shaders_missing;
       REXLOG_INFO("Native shadow: no vertex shader {} ({} dwords at {:08X})", masked, draw.vertex_shader_dwords, address);
+      KeepMissingShader("vs_" + masked, code, draw.vertex_shader_dwords);
     } else {
       const std::vector<MetalPullElement> elements = PullElements(code, draw.vertex_shader_dwords, manifest->second);
       std::string error;
@@ -389,6 +445,7 @@ const PixelShader& FindPixelShader(MetalDevice& device, const BakedDraw& draw) {
     if (manifest == g_pixel_manifest.end()) {
       ++g_totals.pixel_shaders_missing;
       REXLOG_INFO("Native shadow: no pixel shader {} ({} dwords at {:08X})", name, draw.pixel_shader_dwords, address);
+      KeepMissingShader("ps_" + name, g_guest + address, draw.pixel_shader_dwords);
     } else {
       std::string error;
       shader.handle = device.AddPixelShader(g_shader_dir / ("ps_" + name + ".metallib"), error);
