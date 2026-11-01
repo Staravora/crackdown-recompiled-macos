@@ -40,8 +40,8 @@ constexpr NSUInteger kPushConstants = 8;
 constexpr NSUInteger kGuestBuffer = 9;
 constexpr NSUInteger kFetchBuffer = 10;
 constexpr NSUInteger kElementsBuffer = 11;
-constexpr NSUInteger kTargetWidth = 1280;
-constexpr NSUInteger kTargetHeight = 720;
+constexpr NSUInteger kDisplayWidth = 1280;
+constexpr NSUInteger kDisplayHeight = 720;
 constexpr size_t kElementsBytes = 1 << 20;
 constexpr int kDescriptorHeaps = 4;
 
@@ -113,21 +113,6 @@ class MetalDeviceImpl final : public MetalDevice {
     }
     elements_ = [device_ newBufferWithLength:kElementsBytes options:untracked];
 
-    MTLTextureDescriptor* color = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                                                                     width:kTargetWidth
-                                                                                    height:kTargetHeight
-                                                                                 mipmapped:NO];
-    color.usage = MTLTextureUsageRenderTarget;
-    color.storageMode = MTLStorageModePrivate;
-    color_ = [device_ newTextureWithDescriptor:color];
-    MTLTextureDescriptor* depth = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
-                                                                                     width:kTargetWidth
-                                                                                    height:kTargetHeight
-                                                                                 mipmapped:NO];
-    depth.usage = MTLTextureUsageRenderTarget;
-    depth.storageMode = MTLStorageModePrivate;
-    depth_ = [device_ newTextureWithDescriptor:depth];
-
     NSError* error = nil;
     id<MTLLibrary> library = [device_ newLibraryWithSource:@(kClaySource) options:nil error:&error];
     if (!library) {
@@ -148,7 +133,7 @@ class MetalDeviceImpl final : public MetalDevice {
       layer.device = device;
       layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
       layer.framebufferOnly = NO;
-      layer.drawableSize = CGSizeMake(kTargetWidth, kTargetHeight);
+      layer.drawableSize = CGSizeMake(kDisplayWidth, kDisplayHeight);
       NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(60, 60, 640, 360)
                                                      styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskResizable |
                                                                NSWindowStyleMaskMiniaturizable
@@ -192,16 +177,17 @@ class MetalDeviceImpl final : public MetalDevice {
       }
       MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
       descriptor.vertexFunction = vertex;
+      descriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+      id<MTLRenderPipelineState> depth_only = [device_ newRenderPipelineStateWithDescriptor:descriptor error:&failure];
       descriptor.fragmentFunction = clay_;
       descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-      descriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
       id<MTLRenderPipelineState> pipeline = [device_ newRenderPipelineStateWithDescriptor:descriptor error:&failure];
-      if (!pipeline) {
+      if (!pipeline || !depth_only) {
         error = failure.localizedDescription.UTF8String;
         return -1;
       }
       std::memcpy(static_cast<uint8_t*>(elements_.contents) + elements_used_, elements, bytes);
-      pipelines_.push_back({pipeline, elements_used_});
+      pipelines_.push_back({pipeline, depth_only, elements_used_});
       elements_used_ += bytes;
       return int(pipelines_.size()) - 1;
     }
@@ -219,59 +205,41 @@ class MetalDeviceImpl final : public MetalDevice {
       // A drawable has to outlive this autorelease pool, so the window's frames keep their references.
       CAMetalLayer* layer = layer_ready_.load(std::memory_order_acquire) ? layer_ : nil;
       id<MTLCommandBuffer> buffer = layer ? [queue_ commandBuffer] : [queue_ commandBufferWithUnretainedReferences];
-      MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
-      pass.colorAttachments[0].texture = color_;
-      pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-      pass.colorAttachments[0].clearColor = MTLClearColorMake(0.08, 0.1, 0.14, 1.0);
-      pass.colorAttachments[0].storeAction = capture.empty() && !layer ? MTLStoreActionDontCare : MTLStoreActionStore;
-      pass.depthAttachment.texture = depth_;
-      pass.depthAttachment.loadAction = MTLLoadActionClear;
-      // The game uses reversed depth: nearer is greater, cleared to 0.
-      pass.depthAttachment.clearDepth = 0.0;
-      pass.depthAttachment.storeAction = MTLStoreActionDontCare;
-      encoder_ = [buffer renderCommandEncoderWithDescriptor:pass];
-
+      buffer_ = buffer;
       frame_ = frames_[slot_];
       slot_ = (slot_ + 1) % kFramesInFlight;
       frame_address_ = frame_.gpuAddress;
-      for (int i = 0; i < kDescriptorHeaps; ++i) {
-        [encoder_ setVertexBuffer:heaps_[i] offset:0 atIndex:i];
-      }
-      [encoder_ setVertexBuffer:guest_ offset:0 atIndex:kGuestBuffer];
-      [encoder_ setVertexBuffer:frame_ offset:0 atIndex:kFetchBuffer];
-      [encoder_ setVertexBuffer:elements_ offset:0 atIndex:kElementsBuffer];
-      [encoder_ useResource:dummy_ usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
-      [encoder_ setCullMode:MTLCullModeNone];
-      current_pipeline_ = -1;
-      current_depth_ = UINT32_MAX;
+      shown_target_ = -1;
       encode(static_cast<uint8_t*>(frame_.contents));
-      [encoder_ endEncoding];
-      encoder_ = nil;
+      EndPass();
+      buffer_ = nil;
 
+      id<MTLTexture> shown = shown_target_ >= 0 ? targets_[size_t(shown_target_)].color : nil;
+      const MTLSize size = MTLSizeMake(shown.width, shown.height, 1);
       id<MTLBuffer> readback = nil;
-      if (!capture.empty()) {
-        readback = [device_ newBufferWithLength:kTargetWidth * kTargetHeight * 4 options:MTLResourceStorageModeShared];
+      if (!capture.empty() && shown) {
+        readback = [device_ newBufferWithLength:shown.width * shown.height * 4 options:MTLResourceStorageModeShared];
         id<MTLBlitCommandEncoder> blit = [buffer blitCommandEncoder];
-        [blit copyFromTexture:color_
+        [blit copyFromTexture:shown
                      sourceSlice:0
                      sourceLevel:0
                     sourceOrigin:MTLOriginMake(0, 0, 0)
-                      sourceSize:MTLSizeMake(kTargetWidth, kTargetHeight, 1)
+                      sourceSize:size
                         toBuffer:readback
                destinationOffset:0
-          destinationBytesPerRow:kTargetWidth * 4
-        destinationBytesPerImage:kTargetWidth * kTargetHeight * 4];
+          destinationBytesPerRow:shown.width * 4
+        destinationBytesPerImage:shown.width * shown.height * 4];
         [blit endEncoding];
       }
 
-      if (id<CAMetalDrawable> drawable = [layer nextDrawable]) {
+      if (id<CAMetalDrawable> drawable = shown ? [layer nextDrawable] : nil) {
         id<MTLBlitCommandEncoder> blit = [buffer blitCommandEncoder];
-        [blit copyFromTexture:color_
+        [blit copyFromTexture:shown
                   sourceSlice:0
                   sourceLevel:0
                  sourceOrigin:MTLOriginMake(0, 0, 0)
-                   sourceSize:MTLSizeMake(std::min(kTargetWidth, drawable.texture.width),
-                                          std::min(kTargetHeight, drawable.texture.height), 1)
+                   sourceSize:MTLSizeMake(std::min(shown.width, drawable.texture.width),
+                                          std::min(shown.height, drawable.texture.height), 1)
                     toTexture:drawable.texture
              destinationSlice:0
              destinationLevel:0
@@ -298,18 +266,63 @@ class MetalDeviceImpl final : public MetalDevice {
       timing.encode_ns = Since(encode_start);
       if (readback) {
         [buffer waitUntilCompleted];
-        WritePng(capture, readback.contents, kTargetWidth, kTargetHeight);
+        WritePng(capture, readback.contents, shown.width, shown.height);
       }
     }
     return timing;
   }
 
+  int AddTarget(uint32_t width, uint32_t height, bool has_color) override {
+    Target target;
+    if (has_color) {
+      target.color = NewTarget(MTLPixelFormatBGRA8Unorm, width, height);
+    }
+    target.depth = NewTarget(MTLPixelFormatDepth32Float, width, height);
+    targets_.push_back(target);
+    return int(targets_.size()) - 1;
+  }
+
+  void BeginPass(int target_index, bool clear, double clear_depth) override {
+    EndPass();
+    const Target& target = targets_[size_t(target_index)];
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    if (target.color) {
+      pass.colorAttachments[0].texture = target.color;
+      pass.colorAttachments[0].loadAction = clear ? MTLLoadActionClear : MTLLoadActionLoad;
+      pass.colorAttachments[0].clearColor = MTLClearColorMake(0.08, 0.1, 0.14, 1.0);
+      pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    }
+    pass.depthAttachment.texture = target.depth;
+    pass.depthAttachment.loadAction = clear ? MTLLoadActionClear : MTLLoadActionLoad;
+    pass.depthAttachment.clearDepth = clear_depth;
+    pass.depthAttachment.storeAction = MTLStoreActionStore;
+    encoder_ = [buffer_ renderCommandEncoderWithDescriptor:pass];
+    for (int i = 0; i < kDescriptorHeaps; ++i) {
+      [encoder_ setVertexBuffer:heaps_[i] offset:0 atIndex:i];
+    }
+    [encoder_ setVertexBuffer:guest_ offset:0 atIndex:kGuestBuffer];
+    [encoder_ setVertexBuffer:frame_ offset:0 atIndex:kFetchBuffer];
+    [encoder_ setVertexBuffer:elements_ offset:0 atIndex:kElementsBuffer];
+    [encoder_ useResource:dummy_ usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
+    [encoder_ setCullMode:MTLCullModeNone];
+    pass_has_color_ = target.color != nil;
+    current_pipeline_ = -1;
+    current_depth_ = UINT32_MAX;
+    current_viewport_ = {};
+  }
+
+  void ShowTarget(int target) override { shown_target_ = target; }
+
   void Draw(const MetalDraw& draw) override {
     if (draw.vertex_shader != current_pipeline_) {
       const Pipeline& pipeline = pipelines_[size_t(draw.vertex_shader)];
-      [encoder_ setRenderPipelineState:pipeline.state];
+      [encoder_ setRenderPipelineState:pass_has_color_ ? pipeline.state : pipeline.depth_only];
       [encoder_ setVertexBufferOffset:pipeline.elements atIndex:kElementsBuffer];
       current_pipeline_ = draw.vertex_shader;
+    }
+    if (!(draw.viewport == current_viewport_)) {
+      [encoder_ setViewport:{draw.viewport.x, draw.viewport.y, draw.viewport.width, draw.viewport.height, 0.0, 1.0}];
+      current_viewport_ = draw.viewport;
     }
     if (draw.depth_control != current_depth_) {
       [encoder_ setDepthStencilState:DepthState(draw.depth_control)];
@@ -356,8 +369,29 @@ class MetalDeviceImpl final : public MetalDevice {
  private:
   struct Pipeline {
     id<MTLRenderPipelineState> state;
+    id<MTLRenderPipelineState> depth_only;
     size_t elements;
   };
+
+  struct Target {
+    id<MTLTexture> color;
+    id<MTLTexture> depth;
+  };
+
+  id<MTLTexture> NewTarget(MTLPixelFormat format, uint32_t width, uint32_t height) {
+    MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                                                          width:width
+                                                                                         height:height
+                                                                                      mipmapped:NO];
+    descriptor.usage = MTLTextureUsageRenderTarget;
+    descriptor.storageMode = MTLStorageModePrivate;
+    return [device_ newTextureWithDescriptor:descriptor];
+  }
+
+  void EndPass() {
+    [encoder_ endEncoding];
+    encoder_ = nil;
+  }
 
   // The shaders index tables of resource IDs. Until textures arrive every slot holds one dummy, because a few vertex
   // shaders read a map and an empty table would fault the GPU.
@@ -411,13 +445,12 @@ class MetalDeviceImpl final : public MetalDevice {
   id<MTLBuffer> guest_ = nil;
   id<MTLBuffer> elements_ = nil;
   id<MTLBuffer> frame_ = nil;
-  id<MTLTexture> color_ = nil;
-  id<MTLTexture> depth_ = nil;
   id<MTLTexture> dummy_ = nil;
   id<MTLTexture> dummy_3d_ = nil;
   id<MTLTexture> dummy_cube_ = nil;
   id<MTLSamplerState> sampler_ = nil;
   id<MTLFunction> clay_ = nil;
+  id<MTLCommandBuffer> buffer_ = nil;
   id<MTLRenderCommandEncoder> encoder_ = nil;
   CAMetalLayer* layer_ = nil;
   NSWindow* window_ = nil;
@@ -425,6 +458,7 @@ class MetalDeviceImpl final : public MetalDevice {
   std::array<id<MTLBuffer>, kFramesInFlight> frames_{};
   std::array<id<MTLBuffer>, kDescriptorHeaps> heaps_{};
   std::vector<Pipeline> pipelines_;
+  std::vector<Target> targets_;
   std::map<uint32_t, id<MTLDepthStencilState>> depth_states_;
   dispatch_semaphore_t slots_ = nil;
   uint8_t* guest_memory_ = nullptr;
@@ -432,6 +466,9 @@ class MetalDeviceImpl final : public MetalDevice {
   size_t elements_used_ = 0;
   uint32_t slot_ = 0;
   int current_pipeline_ = -1;
+  int shown_target_ = -1;
+  bool pass_has_color_ = false;
+  MetalViewport current_viewport_;
   uint32_t current_depth_ = UINT32_MAX;
   std::atomic<bool> layer_ready_{false};
   std::atomic<uint64_t> completed_{0};

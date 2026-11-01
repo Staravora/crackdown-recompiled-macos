@@ -35,6 +35,8 @@ using Clock = std::chrono::steady_clock;
 
 constexpr uint32_t kDeviceVertexConstants = 1792;
 constexpr uint32_t kDevicePixelConstants = 5888;
+constexpr uint32_t kDeviceColorTarget = 12160;
+constexpr uint32_t kDeviceDepthTarget = 12176;
 constexpr uint32_t kDeviceBinMaskLow = 12428;
 constexpr uint32_t kDeviceBinMaskHigh = 12432;
 constexpr uint32_t kConstantsPerStage = 256;
@@ -288,7 +290,8 @@ void OnRunCommandBuffer(uint32_t device, uint32_t buffer, uint32_t predication, 
 
   if (shadow::Enabled()) {
     CopyDeviceConstants(device, base, kDeviceVertexConstants, kConstantsPerStage, 0);
-    shadow::Capture(entry.lists, predication, g_device_constants.data());
+    shadow::Capture(entry.lists, predication, g_device_constants.data(), Load32(base, device + kDeviceColorTarget),
+                    Load32(base, device + kDeviceDepthTarget));
   }
   if (!timed) {
     return;

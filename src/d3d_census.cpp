@@ -624,6 +624,7 @@ void CensusDrawIndexed(PPCContext& ctx, uint8_t* base, GuestFunction original) {
 }
 
 void CensusClear(PPCContext& ctx, uint8_t* base, GuestFunction original) {
+  native::shadow::OnClear();
   if (census::Counting()) {
     std::lock_guard lock(census::g_mutex);
     ++census::g_row.clears;
@@ -633,7 +634,6 @@ void CensusClear(PPCContext& ctx, uint8_t* base, GuestFunction original) {
 
 void CensusResolve(PPCContext& ctx, uint8_t* base, GuestFunction original) {
   native::textures::OnResolve(ctx.r6.u32);
-  native::shadow::OnResolve();
   if (!census::Counting()) {
     return original(ctx, base);
   }

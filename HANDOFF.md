@@ -1,5 +1,12 @@
 # Session handoff
 
+## 2026-10-31 (night) — Every baked pass drawn to its own target
+- **Added:** each run records the device's colour and depth surfaces, the viewport sets the target's size, and `Clear` plus a target's first use start cleared passes. All 1,830 baked draws go out in 5 Metal passes on 2 targets, a 1024x1024 depth map and the 1280x720 view. `Run::segment` and `OnResolve` are gone. `BakedDraw` gained `surface_info`, `color_info`, `depth_info` and `viewport`.
+- **Result:** rooftop, three rounds: recording 1.1 ms, GPU 2.5 ms, 0 errors, 0 dropped. Costs about 2 FPS, 3 ms and 260 MB on top of the emulator. Table in `docs/native-rendering-survey.md`, "Every pass".
+- **Open:** car bodies. Bruce saw wheels and trim but no bodies in a street with the previous build, and the rooftop benchmark shows no cars, so this build is untested on them. If bodies stay missing, they're direct draws.
+- **Guesses to replace:** clear values come from the depth test, not from `Clear`'s arguments. MSAA is left out and culling is off.
+- **Next:** real pixel shaders and textures through the page watch, then direct draws.
+
 ## 2026-10-31 (night) — First Metal picture: the rooftop in grey from live game data
 - **Result:** shadow mode draws the main scene with real vertex shaders, the live camera and live geometry, off screen or in a window with `crackdown_native_shadow_window`. 32-40 live shaders per run, none missing, 0 GPU errors, 0 dropped frames, about 665 draws in 0.7 ms and 1.3 ms of GPU. Costs about 1 FPS and 220 MB on top of the emulator. Detail in `docs/native-rendering-survey.md`, "First picture".
 - **Key finding:** shipped vertex shaders have blank fetches that D3D patches at bind, so layouts come from live ucode. `tools/shader-trial/pull_vertices.py` builds shaders that pull vertices themselves, and `Crackdown Data/user_data/native-shaders` holds the 191 metallibs. That folder isn't in the repo and comes from `translated/`.

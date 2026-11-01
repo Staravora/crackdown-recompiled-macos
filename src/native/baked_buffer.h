@@ -26,6 +26,10 @@ struct BakedDraw {
   uint32_t index_offset;
   uint32_t booleans;  // Bool constants 0-15 of each stage, as XenosRecomp's shaders read them.
   uint32_t depth_control;
+  uint32_t surface_info;
+  uint32_t color_info;
+  uint32_t depth_info;
+  uint32_t viewport[6];  // Scale and offset: x, then y, then z.
   uint32_t fetch_constants;  // Index of this draw's 32 fetch constants in BakedList::fetch_data.
   uint64_t mask;  // Low half: tiles. High half: which pass this draw belongs to.
   uint32_t first_constant_write;

@@ -13,7 +13,9 @@
 #include <ctime>
 #include <deque>
 #include <fstream>
+#include <map>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -56,6 +58,7 @@ constexpr uint32_t kCaptureFrames = 300;
 constexpr uint32_t kCheckFrames = 300;
 constexpr uint32_t kCheckBytes = 4096;
 constexpr uint32_t kMaxShaderDwords = 1 << 14;
+constexpr uint32_t kMaxTargetSize = 4096;
 
 constexpr uint32_t kSourceAutoIndex = 2;
 constexpr uint32_t kPrimitiveTriangleList = 4;
@@ -64,7 +67,9 @@ constexpr uint32_t kPrimitiveTriangleStrip = 6;
 struct Run {
   std::shared_ptr<const std::vector<BakedList>> lists;
   uint32_t pass_select = 0;
-  uint32_t segment = 0;
+  bool clear = false;
+  uint32_t color_target = 0;
+  uint32_t depth_target = 0;
   std::array<uint32_t, kVertexConstantDwords> constants{};
 };
 
@@ -80,6 +85,8 @@ struct Totals {
   uint64_t recorded_draws = 0;
   uint64_t recorded_indices = 0;
   uint64_t no_shader_draws = 0;
+  uint64_t no_target_draws = 0;
+  uint64_t passes = 0;
   uint64_t other_primitive_draws = 0;
   uint64_t index_copy_ns = 0;
   uint64_t shaders_found = 0;
@@ -99,7 +106,7 @@ std::deque<std::unique_ptr<Frame>> g_ready;
 uint64_t g_guest_frames = 0;
 uint64_t g_dropped = 0;
 uint64_t g_capture_ns = 0;
-uint32_t g_segment = 0;
+bool g_clear_pending = false;
 
 // Render thread only from here down.
 uint8_t* g_guest = nullptr;
@@ -268,30 +275,50 @@ bool CopyIndices(const BakedDraw& draw, uint32_t count, bool wide, uint8_t* fram
   return true;
 }
 
-// The main scene is the stretch between resolves with the most draws, and it's the only one drawn: shadow maps and
-// the like go to targets this doesn't have yet.
-uint32_t MainSegment(const Frame& frame) {
-  std::unordered_map<uint32_t, uint32_t> draws;
-  uint32_t best = 0, best_draws = 0;
-  for (const Run& run : frame.runs) {
-    uint32_t& count = draws[run.segment];
-    for (const BakedList& list : *run.lists) {
-      count += uint32_t(list.draws.size());
-    }
-    if (count > best_draws) {
-      best_draws = count;
-      best = run.segment;
-    }
+struct TargetKey {
+  uint32_t color;
+  uint32_t depth;
+  uint32_t width;
+  uint32_t height;
+  auto operator<=>(const TargetKey&) const = default;
+};
+std::map<TargetKey, int> g_targets;
+
+// The viewport gives a target's size: surfaces say only their pitch, in tiles that collapse here.
+MetalViewport ViewportOf(const BakedDraw& draw) {
+  const std::array<float, 6> v = std::bit_cast<std::array<float, 6>>(draw.viewport);
+  const float width = std::abs(v[0]) * 2.0f, height = std::abs(v[2]) * 2.0f;
+  return {v[1] - width / 2.0f, v[3] - height / 2.0f, width, height};
+}
+
+int TargetOf(MetalDevice& device, const Run& run, const MetalViewport& viewport) {
+  const TargetKey key = {run.color_target, run.depth_target, uint32_t(viewport.width), uint32_t(viewport.height)};
+  if (!key.width || !key.height || key.width > kMaxTargetSize || key.height > kMaxTargetSize) {
+    return -1;
   }
-  return best;
+  const auto found = g_targets.find(key);
+  if (found != g_targets.end()) {
+    return found->second;
+  }
+  const int target = device.AddTarget(key.width, key.height, key.color != 0);
+  REXLOG_INFO("Native shadow: target {}x{}, colour {:08X}, depth {:08X}", key.width, key.height, key.color, key.depth);
+  g_targets[key] = target;
+  return target;
+}
+
+// A depth test that passes on greater-or-equal means reversed depth, which clears to 0.
+double ClearDepthFor(const BakedDraw& draw) {
+  return ((draw.depth_control >> 4) & 7) >= 4 ? 0.0 : 1.0;
 }
 
 void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
-  const uint32_t main_segment = MainSegment(frame);
   size_t used = 0, indices_used = 0;
+  int current_target = -1;
+  std::unordered_map<int, uint32_t> color_draws;
+  std::set<int> cleared;
   for (const Run& run : frame.runs) {
     std::memcpy(g_constants.data(), run.constants.data(), sizeof(run.constants));
-    const bool drawn = run.segment == main_segment;
+    bool run_cleared = run.clear;
     for (const BakedList& list : *run.lists) {
       for (const BakedDraw& draw : list.draws) {
         // Constant writes aren't predicated, so they apply either way.
@@ -301,9 +328,6 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
           continue;
         }
         ++g_totals.draws;
-        if (!drawn) {
-          continue;
-        }
         ApplyLiterals(draw);
         const uint32_t primitive = draw.initiator & 0x3F;
         const uint32_t source = (draw.initiator >> 6) & 3;
@@ -326,8 +350,26 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
           ++g_totals.no_room;
           continue;
         }
+        const MetalViewport viewport = ViewportOf(draw);
+        const int target = TargetOf(device, run, viewport);
+        if (target < 0) {
+          ++g_totals.no_target_draws;
+          continue;
+        }
+        const bool clear = run_cleared || cleared.insert(target).second;
+        if (target != current_target || clear) {
+          device.BeginPass(target, clear, ClearDepthFor(draw));
+          current_target = target;
+          ++g_totals.passes;
+        }
+        run_cleared = false;
+        if (run.color_target) {
+          ++color_draws[target];
+        }
+
         MetalDraw out;
         out.vertex_shader = shader;
+        out.viewport = viewport;
         out.depth_control = draw.depth_control;
         out.primitive = primitive == kPrimitiveTriangleStrip ? MetalPrimitive::kTriangleStrip : MetalPrimitive::kTriangleList;
         out.vertex_constants = used;
@@ -351,6 +393,17 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         }
       }
     }
+  }
+  int shown = -1;
+  uint32_t shown_draws = 0;
+  for (const auto& [target, draws] : color_draws) {
+    if (draws > shown_draws) {
+      shown = target;
+      shown_draws = draws;
+    }
+  }
+  if (shown >= 0) {
+    device.ShowTarget(shown);
   }
 }
 
@@ -389,14 +442,14 @@ void Report(const MetalDevice& device) {
   std::ofstream out(g_path);
   out << fmt::format(
       R"({{"guest_frames":{},"frames":{},"dropped":{},"draws_per_frame":{:.1f},"skipped_draws_per_frame":{:.1f},"no_room":{},)"
-      R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},)"
+      R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"no_target_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},"passes_per_frame":{:.1f},"targets":{},)"
       R"("shaders_found":{},"shaders_missing":{},"shaders_failed":{},"index_copy_ms_per_frame":{:.3f},)"
       R"("capture_ms_per_frame":{:.4f},"wait_ms_per_frame":{:.3f},"encode_ms_p50":{:.3f},"encode_ms_p95":{:.3f},"encode_ms_max":{:.3f},)"
       R"("gpu_frames":{},"gpu_errors":{},"gpu_ms_per_frame":{:.3f},"gpu_ms_worst":{:.3f},)"
       R"("guest_memory_wrapped":{},"guest_checks":{},"guest_matches":{}}})",
       guest_frames, g_totals.frames, dropped, g_totals.draws / frames, g_totals.skipped_draws / frames, g_totals.no_room,
       g_totals.recorded_draws / frames, g_totals.recorded_indices / frames, g_totals.no_shader_draws / frames,
-      g_totals.other_primitive_draws / frames, g_totals.shaders_found, g_totals.shaders_missing, g_totals.shaders_failed,
+      g_totals.no_target_draws / frames, g_totals.other_primitive_draws / frames, g_totals.passes / frames, g_targets.size(), g_totals.shaders_found, g_totals.shaders_missing, g_totals.shaders_failed,
       g_totals.index_copy_ns / 1e6 / frames,
       capture_ns / 1e6 / double(std::max<uint64_t>(guest_frames, 1)), g_totals.wait_ns / 1e6 / frames,
       Percentile(sorted, 0.5) / 1e3, Percentile(sorted, 0.95) / 1e3, Percentile(sorted, 1.0) / 1e3, gpu.frames, gpu.errors,
@@ -481,7 +534,6 @@ void OnGuestFrame() {
   }
   std::lock_guard lock(g_mutex);
   ++g_guest_frames;
-  g_segment = 0;
   if (g_current->runs.empty()) {
     return;
   }
@@ -496,20 +548,24 @@ void OnGuestFrame() {
   g_wake.notify_one();
 }
 
-void OnResolve() {
+void OnClear() {
   if (Enabled()) {
     std::lock_guard lock(g_mutex);
-    ++g_segment;
+    g_clear_pending = true;
   }
 }
 
-void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_select, const uint32_t* vertex_constants) {
+void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_select, const uint32_t* vertex_constants,
+             uint32_t color_target, uint32_t depth_target) {
   const Clock::time_point start = Clock::now();
   std::lock_guard lock(g_mutex);
   Run& run = g_current->runs.emplace_back();
   run.lists = std::move(lists);
   run.pass_select = pass_select;
-  run.segment = g_segment;
+  run.clear = g_clear_pending;
+  g_clear_pending = false;
+  run.color_target = color_target;
+  run.depth_target = depth_target;
   std::memcpy(run.constants.data(), vertex_constants, sizeof(run.constants));
   g_capture_ns += Since(start);
 }

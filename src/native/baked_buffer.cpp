@@ -15,6 +15,7 @@ constexpr uint32_t kIndexOffset = 0x2102;
 constexpr uint32_t kColorMask = 0x2104;
 constexpr uint32_t kProgramControl = 0x2180;
 constexpr uint32_t kInterpolatorControl = 0x2182;
+constexpr uint32_t kViewport = 0x210F;
 constexpr uint32_t kDepthControl = 0x2200;
 constexpr uint32_t kModeControl = 0x2208;
 constexpr uint32_t kFloatConstants = 0x4000;
@@ -141,6 +142,10 @@ BakedList BakedLibrary::Decode(const uint32_t* words, size_t count) {
         draw.index_offset = reg(kIndexOffset);
         draw.booleans = (reg(kBoolConstants) & 0xFFFF) | (reg(kPixelBoolConstants) << 16);
         draw.depth_control = reg(kDepthControl);
+        draw.surface_info = reg(kSurfaceInfo);
+        draw.color_info = reg(kColorInfo);
+        draw.depth_info = reg(kDepthInfo);
+        std::copy_n(&reg(kViewport), 6, draw.viewport);
 
         // Formats and sample counts only: the EDRAM bases and pitches aren't pipeline state.
         uint64_t pipeline = 0xCBF29CE484222325ull;

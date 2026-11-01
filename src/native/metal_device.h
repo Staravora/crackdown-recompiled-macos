@@ -30,9 +30,18 @@ struct MetalPullElement {
 
 enum class MetalPrimitive { kTriangleList, kTriangleStrip };
 
+struct MetalViewport {
+  float x = 0.0f;
+  float y = 0.0f;
+  float width = 0.0f;
+  float height = 0.0f;
+  bool operator==(const MetalViewport&) const = default;
+};
+
 struct MetalDraw {
   int vertex_shader = 0;
   uint32_t depth_control = 0;
+  MetalViewport viewport;
   MetalPrimitive primitive = MetalPrimitive::kTriangleList;
   size_t vertex_constants = 0;  // Into the frame's memory, and so are the rest.
   size_t shared_constants = 0;
@@ -64,12 +73,21 @@ class MetalDevice {
   // Opens a window that shows every frame from here on.
   virtual void ShowWindow() = 0;
 
-  // Records and submits one frame. encode gets that frame's memory and calls Draw. If capture isn't empty, waits for
-  // the GPU and writes the picture there as a PNG.
+  // A render target, with a colour part only if asked for: shadow maps are depth alone. Returns a handle.
+  virtual int AddTarget(uint32_t width, uint32_t height, bool has_color) = 0;
+
+  // Records and submits one frame. encode gets that frame's memory and calls BeginPass, Draw and ShowTarget. If capture
+  // isn't empty, waits for the GPU and writes the shown target there as a PNG.
   virtual MetalFrameTiming RecordFrame(const std::function<void(uint8_t* frame)>& encode,
                                        const std::filesystem::path& capture) = 0;
 
+  // Ends any open pass and starts one on a target. Without clear, it carries on from what the target holds.
+  virtual void BeginPass(int target, bool clear, double clear_depth) = 0;
+
   virtual void Draw(const MetalDraw& draw) = 0;
+
+  // Which colour target this frame's window and capture show.
+  virtual void ShowTarget(int target) = 0;
 
   // Copies a range out through the GPU's view of guest memory and compares it with the CPU's. Waits for the GPU.
   virtual bool MatchesGuestMemory(uint32_t address, uint32_t bytes) = 0;

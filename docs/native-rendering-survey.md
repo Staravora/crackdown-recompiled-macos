@@ -257,7 +257,7 @@ Shadow mode now draws the frame's main scene with the game's real vertex shaders
 
 **The game uses reversed depth:** `RB_DEPTHCONTROL` is `0x00708767`, greater-or-equal, so depth clears to 0. The first run cleared to 1 and drew nothing.
 
-**Only one stretch of the frame is drawn.** Targets aren't tracked yet, so frames are cut at each `Resolve` and only the stretch with the most draws is recorded, which is the main scene here. That's about 660 of 1,830 baked draws. Culling is off, and the viewport is assumed to be the full 1280x720.
+**Only one stretch of the frame was drawn at this point.** Frames were cut at each `Resolve` and only the stretch with the most draws was recorded, about 660 of 1,830 baked draws. [Every pass](#every-pass-2026-10-31) replaced that. Culling is off.
 
 | Rooftop, per frame, three runs | |
 | --- | --- |
@@ -279,6 +279,43 @@ So shadow mode now costs about 1 FPS, or 2 ms on the median frame, and 220 MB, m
 **Compared with the emulator on two scenes, by eye.** Screenshots of both windows, taken a moment apart in one benchmark run, show the same camera and geometry on the rooftop and inside the Agency tower: columns, wall slots, the X panel, floor lines, the balcony and the ledge the player stands on, which is the band across the bottom of the rooftop frame. A frame from a street in Bruce's session also shows parked cars, so some cars are baked. The player and HUD are missing, as direct draws. That's two scenes by eye, not a pixel comparison.
 
 **The window needed three fixes.** `CAMetalLayer` has to be created and set up on the main thread: on the render thread its changes sit in a transaction that thread's missing run loop never commits, and the layer displays nothing with every frame reporting `presentedTime` 0. A view has to supply the layer through `makeBackingLayer`, and keeping the picture's shape takes `layerContentsPlacement`, because AppKit overrides `contentsGravity`. After the fix, 9 of the first 100 frames weren't shown and none of the next 100 were.
+
+## Every pass (2026-10-31)
+
+Shadow mode now records every baked draw, each to the target it belongs to, and shows the colour target with the most draws.
+
+**A frame's baked draws fall into four stretches on two targets.** From one rooftop frame, split at resolves:
+
+| Stretch | Target | Baked draws | Depth test |
+| --- | --- | --- | --- |
+| Before the first resolve | 1024x1024 depth only | 148 | less-or-equal |
+| After it | Same | 426 | less-or-equal |
+| Next | 1280x720 colour and depth, 2x MSAA in the game | 640 | greater-or-equal |
+| After 12 more resolves with no baked draws | Same | 680 | greater-or-equal, stencil on |
+
+So the 1024x1024 target is presumably a shadow map and the main view is drawn twice, which suggests a depth pass followed by the colour pass. The first version drew only the last row.
+
+**How passes are built.** Each run records the device's colour and depth surfaces, at +12160 and +12176, and the size comes from the draw's viewport, since surfaces only give a pitch. A new pass starts when the target changes or after `Clear`, and a target's first pass in a frame clears, to 0 for greater-or-equal and 1 otherwise. That's a guess at what the game clears to, because `Clear`'s arguments aren't read. MSAA is left out.
+
+| Rooftop, per frame, three runs | |
+| --- | --- |
+| Drawn | 1,830 draws, 1.59 million indices, 5 Metal passes |
+| Render thread, recording, p50 / p95 / worst | 1.10-1.18 / 1.81-1.99 / 15.3 ms |
+| Copying indices | 0.24-0.25 ms |
+| GPU | 2.47-2.48 ms, worst 8.4 ms, 0 errors |
+| Dropped frames | 0 |
+| Live vertex shaders | 51-54, 0 missing |
+
+| Benchmark, interleaved | Average FPS | Median frame | Peak memory |
+| --- | --- | --- | --- |
+| Off | 25.52, 25.68, 26.86 | 37.5, 38.8, 36.9 ms | 2,563-2,607 MB |
+| On | 24.76, 23.78, 23.74 | 40.2, 41.0, 41.5 ms | 2,814-2,890 MB |
+
+Shadow mode now costs about 2 FPS, 3 ms on the median frame and 260 MB, on top of the emulator.
+
+**The rooftop picture didn't change,** as expected if the first main stretch draws the same geometry as the second. Colour from the shadow passes is never sampled yet, since there are no pixel shaders.
+
+**Car bodies are still an open question.** In Bruce's session the wheels and some trim of parked cars drew and the bodies didn't, with only the largest stretch drawn. The rooftop has no cars in view, so this build hasn't been tested on them. If bodies stay missing, they're direct draws.
 
 ## Shader trial (2026-10-31)
 
@@ -620,7 +657,7 @@ The output helps the emulator too: the per-shader gap shows how much cost is sti
 
 ### Phase 2: Native vertical slice (6-10 sessions)
 
-**Started:** the [baked buffer decoder](#baked-buffer-decoder-2026-10-31) runs live behind a setting, the [texture change test](#texture-change-test-2026-10-31) passed, and [shadow mode](#shadow-mode-2026-10-31) draws [the main scene in grey](#first-picture-2026-10-31) with real vertex shaders. Next: compare it with the emulator, track render targets so every pass draws, then real pixel shaders, textures and direct draws.
+**Started:** the [baked buffer decoder](#baked-buffer-decoder-2026-10-31) runs live behind a setting, the [texture change test](#texture-change-test-2026-10-31) passed, and [shadow mode](#shadow-mode-2026-10-31) draws [the main scene in grey](#first-picture-2026-10-31) with real vertex shaders. [Every pass](#every-pass-2026-10-31) now draws to its own target. Next: real pixel shaders, textures and direct draws.
 
 - Metal device, render thread and command queue. Choose plume's Metal backend or direct Metal with a small spike; direct is likely simpler for one game on one API.
 - Shadow-device reader, texture path (reusing SDK untile and format code), no-copy guest memory, vertex pulling or copy-and-swap decided by a spike.
