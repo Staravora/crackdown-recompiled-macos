@@ -270,7 +270,8 @@ if(APPLE)
     # The native Metal layer. Only the .mm file sees Metal, and the C++ precompiled header can't serve Objective-C++.
     enable_language(OBJCXX)
     set(CMAKE_OBJCXX_STANDARD 23)
-    list(APPEND CRACKDOWN_SOURCES src/native/shadow.cpp src/native/metal_device.mm)
+    list(APPEND CRACKDOWN_SOURCES src/native/shadow.cpp
+        src/native/texture_cache.cpp src/native/metal_device.mm)
     set_source_files_properties(src/native/metal_device.mm PROPERTIES
         COMPILE_OPTIONS "-fobjc-arc" SKIP_PRECOMPILE_HEADERS ON)
 endif()

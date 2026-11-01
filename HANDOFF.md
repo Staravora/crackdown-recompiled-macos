@@ -1,5 +1,12 @@
 # Session handoff
 
+## 2026-11-01 (night) — First textured frame in Metal
+- **Result:** the Metal window now shows the real game on the rooftop: 3,988 draws, 3,327 with real pixel shaders, 598 textures with mips, 0 GPU errors. Table and the full gap list in `docs/native-rendering-survey.md`, "First textures".
+- **Added:** `src/native/texture_cache.cpp`, pipelines with real blending and alpha test in `metal_device.mm`, pixel constants per draw, and `tools/shader-trial/build_pixels.py`, which writes `ps_*.metallib` and `pixel-manifest.txt` to `native-shaders`. Rerun it after pulling, or draws stay grey. Bruce's local folder is built.
+- **Big gaps:** textures never update, only 2D loads (so no real-time shadows or environment reflections), no post-processing, HUD or particles, 8-bit target. Blended draws now run for real, so Bruce's orb issue can finally be looked at.
+- **Not verified:** compared by eye on the rooftop only, not driven. Windows, Linux and title update 6 aren't built with this.
+- **Next:** texture updates through the page watch, then depth and cube textures, then the non-list draws and ring quads.
+
 ## 2026-11-01 — Direct draws in the Metal picture
 - **Result:** shadow mode records about 4,000 draws a frame on the rooftop, 2,716 of them direct, in game order. The player, pedestrians, cars, trees and sky dome appear. 0 GPU errors, 0 ring parse errors, 0 draws a frame with no shader, 3 render targets. Bruce drove several minutes with nothing exploded. Tables in `docs/native-rendering-survey.md`, "Direct draws".
 - **How:** `native::probe::ReadRing` reads D3D's ring as a stream with `BakedLibrary::DecodeRing`, after every draw and before every baked run, and a hook on `826BB1A0` reads the rest of a segment before it closes. A first version that read a span around each draw call lost draws and constants, which Bruce's drive showed as cars thrown apart and flicker.

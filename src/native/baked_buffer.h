@@ -28,6 +28,7 @@ struct BakedDraw {
   uint32_t vertex_shader;
   uint32_t vertex_shader_dwords;
   uint32_t pixel_shader;
+  uint32_t pixel_shader_dwords;
   BakedLiteral literals[kMaxLiteralsPerDraw];
   uint32_t literal_count;
   uint32_t index_buffer;
@@ -39,6 +40,7 @@ struct BakedDraw {
   uint32_t blend_control;
   uint32_t color_control;
   uint32_t color_mask;
+  uint32_t alpha_reference;
   uint32_t surface_info;
   uint32_t color_info;
   uint32_t depth_info;
@@ -93,8 +95,8 @@ class BakedLibrary {
   // The vertex shader's code, in host order, if it came inside the ring and not from an address.
   const std::vector<uint32_t>& inline_vertex_shader() const { return inline_vertex_shader_; }
 
-  // The vertex constants DecodeRing has seen, as the GPU would hold them.
-  const uint32_t* vertex_constants() const { return registers_.data() + (kFloatConstantRegister - kRegisterBase); }
+  // The float constants DecodeRing has seen, vertex then pixel, as the GPU would hold them.
+  const uint32_t* float_constants() const { return registers_.data() + (kFloatConstantRegister - kRegisterBase); }
 
   // The 32 fetch constants of a texture set, six dwords each.
   const uint32_t* texture_set(uint32_t id) const { return texture_set_data_.data() + size_t(id) * 192; }

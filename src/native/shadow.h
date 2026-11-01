@@ -13,8 +13,8 @@ namespace crackdown::native::shadow {
 
 // Phase 2's shadow mode. With crackdown_native_shadow on, a thread of its own records every frame's baked draws in
 // Metal, off screen, while the emulator goes on presenting. The game's threads only hand runs over and never wait: if
-// the thread falls behind, a frame is dropped and counted. Draws use the game's real vertex shaders and geometry with a
-// plain grey pixel shader, since textures aren't there yet. Baked and direct draws go in the order the game made them.
+// the thread falls behind, a frame is dropped and counted. Draws use the game's real shaders, geometry and textures, and
+// a draw with no matching pixel shader comes out plain grey. Baked and direct draws go in the order the game made them.
 // Every pass goes to its own target, and the colour target with the most draws is shown. Writes
 // native-shadow-<time>.json and .png to the logs folder, and crackdown_native_shadow_window shows the picture live.
 // The surfaces a draw goes to, and their size.

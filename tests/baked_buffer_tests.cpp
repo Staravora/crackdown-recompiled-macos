@@ -71,7 +71,7 @@ void TestStateCarriesFromOneDrawToTheNext() {
   CHECK(next.draws[0].vertex_shader == 0x1000);
   CHECK(next.draws[0].viewport[0] == 0x44200000);
   CHECK(next.fetch[6] == 0x12345678);
-  CHECK(library.vertex_constants()[4] == 0x3F800000);
+  CHECK(library.float_constants()[4] == 0x3F800000);
 }
 
 void TestAListStartsFromNothing() {
@@ -172,7 +172,7 @@ void TestTheRingLoadsConstantsFromMemoryAsTheGpuWould() {
   AddLiterals(words, 0x5000, 0x10);
   AddDraw(words, 0x2000);
   const RingRead read = ReadRing(library, words, memory);
-  CHECK(library.vertex_constants()[0x10] == 0x3F800000);
+  CHECK(library.float_constants()[0x10] == 0x3F800000);
   CHECK(read.draws[0].literal_count == 0);
 }
 

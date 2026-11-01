@@ -7,3 +7,4 @@ Run from `work/experiments/shader-trial`, with these files copied there and Xeno
 3. `join.py`: lines each shipped shader up with the emulator's Metal. It needs a MoltenVK dump (`MVK_CONFIG_SHADER_DUMP_DIR`) and SPIR-V saved by ucode hash, which took a temporary change to `VulkanTranslation::GetOrCreateShaderModule`.
 4. `time-all.py`: times both forms with `harness_xenos.swift` and `experiments/menu-bench/harness`.
 5. `pull_vertices.py extracted translated "<Crackdown Data>/user_data/native-shaders"`: writes the vertex shaders shadow mode loads, with `manifest.txt`. It needs `translated/` from step 2 and only Apple's compiler.
+6. `build_pixels.py translated "<Crackdown Data>/user_data/native-shaders"`: compiles the pixel shaders and writes `pixel-manifest.txt`.

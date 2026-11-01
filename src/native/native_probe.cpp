@@ -204,7 +204,7 @@ void OnRingDraw(uint32_t device, const uint8_t* base, const BakedDraw& draw, con
   list.draws.push_back(draw);
   list.fetch_data.assign(fetch_constants, fetch_constants + kFetchDwords);
   shadow::CountDirectDraw();
-  shadow::Capture(std::move(lists), kEveryPass, g_ring.vertex_constants(), TargetsOf(device, base), g_vertex_code);
+  shadow::Capture(std::move(lists), kEveryPass, g_ring.float_constants(), TargetsOf(device, base), g_vertex_code);
 }
 
 // Reads the ring up to where D3D has got to. Words go from the current segment's start to the word the write pointer rests
@@ -389,6 +389,7 @@ void OnRunCommandBuffer(uint32_t device, uint32_t buffer, uint32_t predication, 
 
   if (shadow::Enabled()) {
     CopyDeviceConstants(device, base, kDeviceVertexConstants, kConstantsPerStage, 0);
+    CopyDeviceConstants(device, base, kDevicePixelConstants, kConstantsPerStage, kConstantsPerStage * kDwordsPerConstant);
     shadow::Capture(entry.lists, predication, g_device_constants.data(), TargetsOf(device, base));
   }
   if (!timed) {

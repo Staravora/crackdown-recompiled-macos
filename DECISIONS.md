@@ -44,3 +44,5 @@
 | 2026-11-01 | Key render targets on their surfaces, with sizes from the surface and its tiles. | Viewports gave up to 53 targets and sent draws to the wrong ones. | active |
 | 2026-11-01 | Remap fetched components per element at runtime rather than building a shader per vertex format. | Binding rewrites each fetch's swizzle to suit the format, and the same shader is bound to several. A 12-bit remap keeps one metallib per shader. | active |
 | 2026-11-01 | Leave transparent draws, non-indexed draws and `BeginVertices` quads out of the grey picture until pixel shaders exist. | With no pixel shader, a blended draw is a solid sheet, and fullscreen passes would cover the frame. Each group is counted in the report. | active |
+| 2026-11-01 | List each pixel shader's fetch slots from its translated source, in `pixel-manifest.txt`. | Each draw has to fill the shader's descriptor table, and the source already names what it reads, so nothing has to parse ucode at run time. | active |
+| 2026-11-01 | Upload DXT textures to Metal as BC, unconverted. | Apple Silicon samples BC natively, so textures need untiling and byte swapping only. | active |

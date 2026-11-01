@@ -369,6 +369,36 @@ The Air warmed through those runs, so compare each pair rather than the rows: on
 - The hook on `826BB1A0` is bound for the base guest only. The title update 6 guest hasn't got it, and these device offsets haven't been checked there.
 - A list being recorded is skipped in the stream, on the flag at `device + 10812`, because it's decoded when it runs. Nothing has shown one being recorded.
 
+## First textures (2026-11-01)
+
+Shadow mode now draws with the game's pixel shaders and textures, so the Metal window shows Crackdown, not grey. The rooftop came out right on the first run, with the signs, the player's armour and the haze in place. Compared by eye with the emulator only, and only on the rooftop.
+
+| Rooftop, last 300 frames | |
+| --- | --- |
+| Drawn | 3,988 draws, 3,327 with real pixel shaders |
+| Pixel shaders | 88 live, 3 not matched, all very small and in the ring area |
+| Textures | 598 loaded with their mips, 1 skipped |
+| Render thread, recording, p50 / p95 | 5.2 / 6.3 ms |
+| GPU | 1.9 ms, 0 errors |
+| Dropped frames | 7 in the last 300 |
+
+Frame rate is about 22 FPS with shadow mode on and the window closed, in one run on a warm Air, so that's no cost measurement.
+
+**How it fits together.** `tools/shader-trial/build_pixels.py` compiles every translated pixel shader and lists the fetch slots each reads, taken from the translated source. A shader reads its texture numbers from a table in its shared constants, so each draw fills that table. `src/native/texture_cache.cpp` reads a fetch constant, untiles guest memory with the SDK's layout code, and uploads every mip. DXT is BC to Metal, so nothing is decoded. In shadow mode resolved render targets are plain textures in guest memory, because the emulator keeps writing them. Pixel constants travel with each draw beside the vertex ones, so a draw's constants are now 8 KB and a frame's memory is 128 MB.
+
+**Run `build_pixels.py` after pulling this,** or every draw stays grey.
+
+**Not there yet, roughly in order of what it'll change on screen:**
+
+- **Textures never update.** One that changes after it's loaded stays as it was, which will show on resolved targets such as shadow maps and reflections. The page watch is what fixes this.
+- **Only 2D textures load.** 3D, cube and depth formats read a dummy, and 24-bit depth is what a shadow map is, so real-time shadows and environment reflections are missing.
+- **Vertex shader textures aren't bound,** so the particle shaders that read lookup tables get a dummy.
+- **Non-list draws and ring quads aren't drawn:** about 325 and 340 a frame, which is where the HUD, particles and fullscreen passes are likely to be. So there's no post-processing, bloom or colour grading.
+- **Colour target is 8-bit BGRA,** and gamma is approximated with sRGB. Xenos's own curve differs slightly, and the game's real targets may be other formats.
+- **No culling, stencil, MSAA or depth bias.**
+- **Alpha test ignores the compare function,** and always keeps what's above the reference.
+- **The orb occlusion issue** hasn't been looked at. Now that blending is real, it can be.
+
 ## Free camera (2026-10-31)
 
 A test tool in the cheat menu, under Testing, that flies the game's camera, so both renderers follow it. Session only: it isn't in the launcher. WASD moves, Q and E go down and up, the mouse looks, Shift goes faster, 1-9 jump to saved spots, Shift+1-9 save one to `camera-spots.txt`, and F freezes time. `--crackdown_free_camera_start=x,y,z,yaw,pitch` starts with it on, for scripted runs.
@@ -738,7 +768,7 @@ The output helps the emulator too: the per-shader gap shows how much cost is sti
 
 ### Phase 2: Native vertical slice (6-10 sessions)
 
-**Started:** the [baked buffer decoder](#baked-buffer-decoder-2026-10-31) runs live behind a setting, the [texture change test](#texture-change-test-2026-10-31) passed, and [shadow mode](#shadow-mode-2026-10-31) draws [the main scene in grey](#first-picture-2026-10-31) with real vertex shaders. [Every pass](#every-pass-2026-10-31) draws to its own target, a [free camera](#free-camera-2026-10-31) can test any spot, and [direct draws](#direct-draws-2026-11-01) are in. Next: real pixel shaders and textures.
+**Started:** the [baked buffer decoder](#baked-buffer-decoder-2026-10-31) runs live behind a setting, the [texture change test](#texture-change-test-2026-10-31) passed, and [shadow mode](#shadow-mode-2026-10-31) draws [the main scene in grey](#first-picture-2026-10-31) with real vertex shaders. [Every pass](#every-pass-2026-10-31) draws to its own target, a [free camera](#free-camera-2026-10-31) can test any spot, [direct draws](#direct-draws-2026-11-01) are in, and the picture has [real shaders and textures](#first-textures-2026-11-01). Next: texture updates through the page watch, then the rest of the frame.
 
 - Metal device, render thread and command queue. Choose plume's Metal backend or direct Metal with a small spike; direct is likely simpler for one game on one API.
 - Shadow-device reader, texture path (reusing SDK untile and format code), no-copy guest memory, vertex pulling or copy-and-swap decided by a spike.

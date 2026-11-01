@@ -15,6 +15,7 @@ constexpr uint32_t kColorInfo = 0x2001;
 constexpr uint32_t kDepthInfo = 0x2002;
 constexpr uint32_t kIndexOffset = 0x2102;
 constexpr uint32_t kColorMask = 0x2104;
+constexpr uint32_t kAlphaReference = 0x210E;
 constexpr uint32_t kProgramControl = 0x2180;
 constexpr uint32_t kInterpolatorControl = 0x2182;
 constexpr uint32_t kViewport = 0x210F;
@@ -230,6 +231,7 @@ size_t BakedLibrary::DecodeWords(const uint32_t* words, size_t count, BakedList&
           inline_vertex_shader_.clear();
         } else {
           state_.pixel_shader = data[0] & ~3u;
+          state_.pixel_shader_dwords = data[1] & 0xFFFF;
           literals_open_[1] = false;
         }
         break;
@@ -249,6 +251,7 @@ size_t BakedLibrary::DecodeWords(const uint32_t* words, size_t count, BakedList&
           }
         } else {
           state_.pixel_shader = 0;
+          state_.pixel_shader_dwords = 0;
           literals_open_[1] = false;
         }
         break;
@@ -268,6 +271,7 @@ size_t BakedLibrary::DecodeWords(const uint32_t* words, size_t count, BakedList&
         draw.blend_control = reg(kBlendControl);
         draw.color_control = reg(kColorControl);
         draw.color_mask = reg(kColorMask);
+        draw.alpha_reference = reg(kAlphaReference);
         draw.surface_info = reg(kSurfaceInfo);
         draw.color_info = reg(kColorInfo);
         draw.depth_info = reg(kDepthInfo);

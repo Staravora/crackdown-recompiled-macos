@@ -29,6 +29,7 @@
 
 #include "../updater/sha256.h"
 #include "metal_device.h"
+#include "texture_cache.h"
 
 REXCVAR_DEFINE_BOOL(crackdown_native_shadow, false, "Crackdown",
                     "Draw every frame's baked geometry in Metal, off screen, beside the emulator, and write native-shadow-<time>.json");
@@ -43,13 +44,17 @@ using Clock = std::chrono::steady_clock;
 constexpr size_t kGuestBytes = size_t(1) << 29;
 constexpr uint32_t kGuestMask = uint32_t(kGuestBytes - 1);
 constexpr uint32_t kAluDwords = 2048;
-constexpr uint32_t kVertexConstantDwords = 1024;
-constexpr size_t kVertexConstantBytes = kVertexConstantDwords * 4;
+constexpr size_t kConstantBytes = kAluDwords * 4;
+constexpr size_t kPixelConstantsOffset = 1024 * 4;
 constexpr size_t kFetchBytes = 192 * 4;
 constexpr size_t kSharedBytes = 512;
 constexpr size_t kBooleansOffset = 256;
-constexpr size_t kDrawBytes = kVertexConstantBytes + kFetchBytes + kSharedBytes;
-constexpr size_t kConstantRegionBytes = 32 << 20;
+constexpr size_t kAlphaThresholdOffset = 272;
+constexpr size_t kSamplerTableOffset = 192;
+constexpr std::array<size_t, 3> kTextureTableOffsets = {0, 64, 128};
+constexpr size_t kFetchConstantDwords = 6;
+constexpr size_t kDrawBytes = kConstantBytes + kFetchBytes + kSharedBytes;
+constexpr size_t kConstantRegionBytes = 96 << 20;
 constexpr size_t kIndexRegionBytes = 32 << 20;
 constexpr size_t kFrameBytes = kConstantRegionBytes + kIndexRegionBytes;
 constexpr size_t kPooledFrames = 3;
@@ -84,7 +89,7 @@ struct Run {
   bool clear = false;
   Targets targets;
   std::shared_ptr<const std::vector<uint8_t>> vertex_code;
-  std::array<uint32_t, kVertexConstantDwords> constants{};
+  std::array<uint32_t, kAluDwords> constants{};
 };
 
 struct Frame {
@@ -104,6 +109,9 @@ struct Totals {
   uint64_t other_primitive_draws = 0;
   uint64_t other_index_order_draws = 0;
   uint64_t transparent_draws = 0;
+  uint64_t shaded_draws = 0;
+  uint64_t pixel_shaders_found = 0;
+  uint64_t pixel_shaders_missing = 0;
   uint64_t no_color_draws = 0;
   uint64_t alpha_tested_draws = 0;
   uint64_t index_copy_ns = 0;
@@ -135,6 +143,18 @@ std::filesystem::path g_shader_dir;
 std::unordered_map<std::string, std::vector<uint32_t>> g_manifest;
 // By address and size. -1 means looked at and no use.
 std::unordered_map<uint64_t, int> g_vertex_shaders;
+struct PixelSlot {
+  uint32_t slot;
+  uint32_t kind;  // 0 is 2D, 1 is 3D and 2 is cube.
+};
+struct PixelShader {
+  int handle = -1;
+  std::vector<PixelSlot> slots;
+};
+std::unordered_map<std::string, std::vector<PixelSlot>> g_pixel_manifest;
+std::unordered_map<uint64_t, PixelShader> g_pixel_shaders;
+std::unique_ptr<TextureCache> g_textures;
+const PixelShader g_no_pixel_shader;
 Totals g_totals;
 uint64_t g_frame_number = 0;
 std::vector<uint32_t> g_encode_us;
@@ -291,6 +311,36 @@ int FindVertexShader(MetalDevice& device, const BakedDraw& draw, const Run& run)
   return handle;
 }
 
+const PixelShader& FindPixelShader(MetalDevice& device, const BakedDraw& draw) {
+  const uint64_t key = uint64_t(draw.pixel_shader) << 32 | draw.pixel_shader_dwords;
+  const auto found = g_pixel_shaders.find(key);
+  if (found != g_pixel_shaders.end()) {
+    return found->second;
+  }
+  PixelShader& shader = g_pixel_shaders[key];
+  const uint32_t address = draw.pixel_shader & kGuestMask;
+  if (draw.pixel_shader_dwords && draw.pixel_shader_dwords <= kMaxShaderDwords &&
+      uint64_t(address) + draw.pixel_shader_dwords * 4ull <= kGuestBytes) {
+    const std::string_view code(reinterpret_cast<const char*>(g_guest + address), size_t(draw.pixel_shader_dwords) * 4);
+    const std::string name = trg::update::Sha256Hex(code).substr(0, 16);
+    const auto manifest = g_pixel_manifest.find(name);
+    if (manifest == g_pixel_manifest.end()) {
+      ++g_totals.pixel_shaders_missing;
+      REXLOG_INFO("Native shadow: no pixel shader {} ({} dwords at {:08X})", name, draw.pixel_shader_dwords, address);
+    } else {
+      std::string error;
+      shader.handle = device.AddPixelShader(g_shader_dir / ("ps_" + name + ".metallib"), error);
+      shader.slots = manifest->second;
+      if (shader.handle < 0) {
+        REXLOG_ERROR("Native shadow: pixel shader {}: {}", name, error);
+      } else {
+        ++g_totals.pixel_shaders_found;
+      }
+    }
+  }
+  return shader;
+}
+
 // Big-endian guest indices into the frame's index region, in the Metal order. Returns false if they don't fit.
 bool CopyIndices(const BakedDraw& draw, uint32_t count, bool wide, uint8_t* frame, size_t& used, size_t& offset) {
   const uint32_t address = draw.index_buffer & kGuestMask;
@@ -380,6 +430,7 @@ double ClearDepthFor(const BakedDraw& draw) {
 }
 
 void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
+  g_textures->BeginFrame();
   size_t used = 0, indices_used = 0;
   int current_target = -1;
   std::unordered_map<int, uint32_t> color_draws;
@@ -397,13 +448,15 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         }
         ++g_totals.draws;
         ApplyLiterals(draw);
-        g_totals.alpha_tested_draws += (draw.color_control & kAlphaTestEnable) != 0;
+        const bool alpha_test = (draw.color_control & kAlphaTestEnable) != 0;
+        g_totals.alpha_tested_draws += alpha_test;
+        const PixelShader& pixel = run.targets.color ? FindPixelShader(device, draw) : g_no_pixel_shader;
         if (!WritesDepth(draw) && run.targets.color) {
           if (WritesNoColor(draw)) {
             ++g_totals.no_color_draws;
             continue;
           }
-          if (IsBlended(draw)) {
+          if (IsBlended(draw) && pixel.handle < 0) {
             ++g_totals.transparent_draws;
             continue;
           }
@@ -449,16 +502,42 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
 
         MetalDraw out;
         out.vertex_shader = shader;
+        out.pixel_shader = pixel.handle;
+        out.blend_control = draw.blend_control;
+        out.color_mask = draw.color_mask;
+        out.alpha_test = alpha_test;
         out.viewport = viewport;
         out.depth_control = draw.depth_control;
         out.primitive = primitive == kPrimitiveTriangleStrip ? MetalPrimitive::kTriangleStrip : MetalPrimitive::kTriangleList;
         out.vertex_constants = used;
-        std::memcpy(memory + used, g_constants.data(), kVertexConstantBytes);
-        out.fetch_constants = used + kVertexConstantBytes;
-        std::memcpy(memory + out.fetch_constants, list.fetch_data.data() + size_t(draw.fetch_constants) * 192, kFetchBytes);
+        out.pixel_constants = used + kPixelConstantsOffset;
+        std::memcpy(memory + used, g_constants.data(), kConstantBytes);
+        out.fetch_constants = used + kConstantBytes;
+        const uint32_t* fetch_constants = list.fetch_data.data() + size_t(draw.fetch_constants) * 192;
+        std::memcpy(memory + out.fetch_constants, fetch_constants, kFetchBytes);
         out.shared_constants = out.fetch_constants + kFetchBytes;
-        std::memset(memory + out.shared_constants, 0, kSharedBytes);
-        std::memcpy(memory + out.shared_constants + kBooleansOffset, &draw.booleans, sizeof(draw.booleans));
+        uint8_t* shared = memory + out.shared_constants;
+        std::memset(shared, 0, kSharedBytes);
+        std::memcpy(shared + kBooleansOffset, &draw.booleans, sizeof(draw.booleans));
+        std::memcpy(shared + kAlphaThresholdOffset, &draw.alpha_reference, sizeof(draw.alpha_reference));
+        std::array<int, 32> textures;
+        uint32_t texture_count = 0;
+        if (pixel.handle >= 0) {
+          ++g_totals.shaded_draws;
+          for (const PixelSlot& slot : pixel.slots) {
+            const uint32_t* fetch = fetch_constants + size_t(slot.slot) * kFetchConstantDwords;
+            // Only 2D loads so far, and the tables start out pointing at the dummies.
+            if (slot.kind == 0 && slot.slot < textures.size()) {
+              const int texture = g_textures->FindTexture(fetch);
+              textures[texture_count++] = texture;
+              std::memcpy(shared + kTextureTableOffsets[0] + slot.slot * 4, &texture, sizeof(texture));
+            }
+            const int sampler = g_textures->FindSampler(fetch);
+            std::memcpy(shared + kSamplerTableOffset + slot.slot * 4, &sampler, sizeof(sampler));
+          }
+        }
+        out.textures = textures.data();
+        out.texture_count = texture_count;
         out.indices = indices;
         out.index_count = index_count;
         out.wide_indices = wide;
@@ -500,6 +579,17 @@ void ReadManifest() {
       addresses.push_back(address);
     }
   }
+  std::ifstream pixels(g_shader_dir / "pixel-manifest.txt");
+  while (std::getline(pixels, line)) {
+    std::istringstream row(line);
+    std::string key;
+    row >> key;
+    std::vector<PixelSlot>& slots = g_pixel_manifest[key];
+    PixelSlot slot;
+    while (row >> slot.slot >> slot.kind) {
+      slots.push_back(slot);
+    }
+  }
   REXLOG_INFO("Native shadow: {} vertex shaders in {}", g_manifest.size(), g_shader_dir.string());
 }
 
@@ -525,7 +615,7 @@ void Report(const MetalDevice& device) {
   std::ofstream out(g_path);
   out << fmt::format(
       R"({{"guest_frames":{},"frames":{},"dropped":{},"draws_per_frame":{:.1f},"skipped_draws_per_frame":{:.1f},"no_room":{},)"
-      R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"no_target_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},"other_index_order_draws_per_frame":{:.1f},"transparent_draws_per_frame":{:.1f},"no_color_draws_per_frame":{:.1f},"alpha_tested_draws_per_frame":{:.1f},"direct_draws_per_frame":{:.1f},"ring_desyncs":{},"passes_per_frame":{:.1f},"targets":{},)"
+      R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"no_target_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},"other_index_order_draws_per_frame":{:.1f},"transparent_draws_per_frame":{:.1f},"no_color_draws_per_frame":{:.1f},"alpha_tested_draws_per_frame":{:.1f},"shaded_draws_per_frame":{:.1f},"pixel_shaders_found":{},"pixel_shaders_missing":{},"textures_loaded":{},"textures_skipped":{},"direct_draws_per_frame":{:.1f},"ring_desyncs":{},"passes_per_frame":{:.1f},"targets":{},)"
       R"("shaders_found":{},"shaders_missing":{},"shaders_failed":{},"index_copy_ms_per_frame":{:.3f},)"
       R"("capture_ms_per_frame":{:.4f},"wait_ms_per_frame":{:.3f},"encode_ms_p50":{:.3f},"encode_ms_p95":{:.3f},"encode_ms_max":{:.3f},)"
       R"("gpu_frames":{},"gpu_errors":{},"gpu_ms_per_frame":{:.3f},"gpu_ms_worst":{:.3f},)"
@@ -533,7 +623,9 @@ void Report(const MetalDevice& device) {
       guest_frames, g_totals.frames, dropped, g_totals.draws / frames, g_totals.skipped_draws / frames, g_totals.no_room,
       g_totals.recorded_draws / frames, g_totals.recorded_indices / frames, g_totals.no_shader_draws / frames,
       g_totals.no_target_draws / frames, g_totals.other_primitive_draws / frames, g_totals.other_index_order_draws / frames,
-      g_totals.transparent_draws / frames, g_totals.no_color_draws / frames, g_totals.alpha_tested_draws / frames, direct_draws / double(std::max<uint64_t>(guest_frames, 1)), ring_desyncs,
+      g_totals.transparent_draws / frames, g_totals.no_color_draws / frames, g_totals.alpha_tested_draws / frames,
+      g_totals.shaded_draws / frames, g_totals.pixel_shaders_found, g_totals.pixel_shaders_missing, g_textures->textures_loaded(),
+      g_textures->textures_skipped(), direct_draws / double(std::max<uint64_t>(guest_frames, 1)), ring_desyncs,
       g_totals.passes / frames, g_targets.size(), g_totals.shaders_found, g_totals.shaders_missing, g_totals.shaders_failed,
       g_totals.index_copy_ns / 1e6 / frames,
       capture_ns / 1e6 / double(std::max<uint64_t>(guest_frames, 1)), g_totals.wait_ns / 1e6 / frames,
@@ -545,6 +637,8 @@ void Report(const MetalDevice& device) {
   g_totals.shaders_found = kept.shaders_found;
   g_totals.shaders_missing = kept.shaders_missing;
   g_totals.shaders_failed = kept.shaders_failed;
+  g_totals.pixel_shaders_found = kept.pixel_shaders_found;
+  g_totals.pixel_shaders_missing = kept.pixel_shaders_missing;
   g_encode_us.clear();
 }
 
@@ -558,6 +652,7 @@ void RenderThread() {
   }
   REXLOG_INFO("Native shadow: Metal is up, guest memory wrapped: {}", device->guest_memory_wrapped());
   ReadManifest();
+  g_textures = std::make_unique<TextureCache>(*device, g_guest, kGuestBytes);
   if (REXCVAR_GET(crackdown_native_shadow_window)) {
     device->ShowWindow();
   }

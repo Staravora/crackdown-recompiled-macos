@@ -31,6 +31,47 @@ struct MetalPullElement {
 
 enum class MetalPrimitive { kTriangleList, kTriangleStrip };
 
+enum class MetalTextureFormat {
+  kRgba8,
+  kRgba8Srgb,
+  kBc1,
+  kBc1Srgb,
+  kBc2,
+  kBc2Srgb,
+  kBc3,
+  kBc3Srgb,
+  kBc5,
+  kR8,
+  kRg8,
+  kB5G6R5,
+  kRgb10A2,
+  kR16,
+  kRg16,
+  kRgba16,
+  kR16Float,
+  kRg16Float,
+  kRgba16Float,
+  kR32Float,
+  kRg32Float,
+  kRgba32Float,
+};
+
+struct MetalTextureDesc {
+  MetalTextureFormat format = MetalTextureFormat::kRgba8;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t levels = 1;
+  uint8_t swizzle[4] = {0, 1, 2, 3};  // Xenos's: 0-3 pick a component, 4 is zero and 5 is one.
+};
+
+enum class MetalAddressMode { kRepeat, kMirrorRepeat, kClamp, kMirrorClamp };
+
+struct MetalSamplerDesc {
+  MetalAddressMode address_u = MetalAddressMode::kRepeat;
+  MetalAddressMode address_v = MetalAddressMode::kRepeat;
+  bool nearest = false;
+};
+
 struct MetalViewport {
   float x = 0.0f;
   float y = 0.0f;
@@ -41,10 +82,17 @@ struct MetalViewport {
 
 struct MetalDraw {
   int vertex_shader = 0;
+  int pixel_shader = -1;  // -1 is plain grey.
   uint32_t depth_control = 0;
+  uint32_t blend_control = 0;
+  uint32_t color_mask = 0;
+  bool alpha_test = false;
+  const int* textures = nullptr;  // Descriptors the pixel shader reads.
+  uint32_t texture_count = 0;
   MetalViewport viewport;
   MetalPrimitive primitive = MetalPrimitive::kTriangleList;
   size_t vertex_constants = 0;  // Into the frame's memory, and so are the rest.
+  size_t pixel_constants = 0;
   size_t shared_constants = 0;
   size_t fetch_constants = 0;
   size_t indices = 0;
@@ -70,6 +118,16 @@ class MetalDevice {
   // Loads a metallib and returns a handle for MetalDraw::vertex_shader, or -1. error says why.
   virtual int AddVertexShader(const std::filesystem::path& library, const MetalPullElement* elements, size_t count,
                               std::string& error) = 0;
+
+  // Loads a pixel shader and returns a handle for MetalDraw::pixel_shader, or -1.
+  virtual int AddPixelShader(const std::filesystem::path& library, std::string& error) = 0;
+
+  // Adds a texture and returns its descriptor, or -1. Descriptor 0 is a dummy. Fill gives a mip level its data, as one row
+  // of blocks after another.
+  virtual int AddTexture(const MetalTextureDesc& desc) = 0;
+  virtual void FillTexture(int descriptor, uint32_t level, uint32_t width, uint32_t height, const void* data,
+                           size_t bytes_per_row) = 0;
+  virtual int AddSampler(const MetalSamplerDesc& desc) = 0;
 
   // Opens a window that shows every frame from here on.
   virtual void ShowWindow() = 0;
