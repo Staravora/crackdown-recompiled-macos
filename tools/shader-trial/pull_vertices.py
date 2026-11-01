@@ -15,6 +15,10 @@ each fetch uses the register its ucode names, once the shader has got to it.
 The Xenos joins a vertex shader's outputs to a pixel shader's inputs by position, and the semantic
 names in their tables needn't agree: the depth pass writes its normal as TEXCOORD0 and reads it as
 TEXCOORD1. relink makes Metal do the same.
+
+Vertex shaders read textures too, from fetch constants 16 to 19, and the constant table numbers those
+from 0, the same as a pixel shader's. Both stages share one table, so vertex textures move to a table
+of their own, and vertex-textures.txt says which each shader reads.
 """
 import glob
 import hashlib
@@ -305,6 +309,28 @@ def relink(source, names):
     return re.sub(r"\[\[user\((\w+)\)\]\]", lambda found: f"[[user(SLOT{order.index(found.group(1))})]]", source)
 
 
+VERTEX_TEXTURE = re.compile(r"(#define (\w+?)_(Texture2D|Sampler)DescriptorIndex \(\*\(reinterpret_cast<device uint\*>"
+                            r"\(g_PushConstants\.SharedConstants \+ )(\d+)\)\)\)")
+SHARED_VERTEX_TEXTURES = 320
+SHARED_VERTEX_SAMPLERS = 336
+SHARED_SAMPLERS = 192
+
+
+def move_vertex_textures(source):
+    def moved(found):
+        offset = int(found.group(4))
+        offset = SHARED_VERTEX_SAMPLERS + offset - SHARED_SAMPLERS if found.group(3) == "Sampler" else SHARED_VERTEX_TEXTURES + offset
+        return f"{found.group(1)}{offset})))"
+    return VERTEX_TEXTURE.sub(moved, source)
+
+
+def vertex_texture_slots(source):
+    """The vertex samplers the shader's body reads."""
+    body = source[source.index("shaderMain"):]
+    return sorted({int(offset) // 4 for _, name, kind, offset in VERTEX_TEXTURE.findall(source)
+                   if kind == "Texture2D" and f"{name}_Texture2DDescriptorIndex," in body})
+
+
 def compile_one(job):
     source, target, log = job
     done = subprocess.run(["xcrun", "-sdk", "macosx", "metal", "-D__air__=1", source, "-o", target],
@@ -321,12 +347,14 @@ def main():
     jobs = []
     manifest = {}
     loose_keys = {}
+    texture_slots = {}
     report = {"bad": {}, "same_masked_key": 0}
     for path in sorted(glob.glob(os.path.join(translated, "vs_*.metal"))):
         name = os.path.basename(path)[:-6]
         try:
             code, elements = elements_of(os.path.join(extracted, name + ".bin"))
-            source = relink(rewrite(open(path).read(), elements), interpolators_of(os.path.join(extracted, name + ".bin")))
+            original = open(path).read()
+            source = relink(rewrite(original, elements), interpolators_of(os.path.join(extracted, name + ".bin")))
         except (ValueError, struct.error, KeyError) as error:
             report["bad"][name] = str(error)
             continue
@@ -338,12 +366,17 @@ def main():
         # The address, the swizzle the translated shader was built with, which binding rewrites for the live format, and
         # the register it fetches to, which is how to find it if binding has moved it.
         manifest[key] = [value for element in elements for value in (element["address"], element["swizzle"], element["dest"])]
+        texture_slots[key] = vertex_texture_slots(original)
+        source = move_vertex_textures(source)
         target = os.path.join(work, f"vs_{key}.metal")
         open(target, "w").write(source)
         jobs.append((target, os.path.join(output, f"vs_{key}.metallib"), os.path.join(work, f"vs_{key}.log")))
     with open(os.path.join(output, "manifest.txt"), "w") as out:
         for key, addresses in sorted(manifest.items()):
             out.write(" ".join([key] + [str(value) for value in addresses]) + "\n")
+    with open(os.path.join(output, "vertex-textures.txt"), "w") as out:
+        for key, slots in sorted(texture_slots.items()):
+            out.write(" ".join([key] + [str(slot) for slot in slots]) + "\n")
     with open(os.path.join(output, "loose-manifest.txt"), "w") as out:
         for loose, key in sorted(loose_keys.items()):
             out.write(f"{loose} {key}\n")

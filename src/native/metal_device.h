@@ -92,6 +92,20 @@ struct MetalClear {
   double depth_value = 1.0;
 };
 
+// Clears part of a target, in order with its draws.
+struct MetalRectClear {
+  int target = 0;
+  bool color = false;
+  bool depth = false;
+  float color_value[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  float depth_value = 1.0f;
+  uint32_t stencil_value = 0;
+  int32_t left = 0;
+  int32_t top = 0;
+  int32_t right = 0;
+  int32_t bottom = 0;
+};
+
 // Copies part of a render target into a resolve texture. The source can run past the target's edge.
 struct MetalCopy {
   int target = 0;
@@ -115,6 +129,8 @@ struct MetalDraw {
   uint32_t stencil_back = 0;
   uint32_t mode_control = 0;
   float depth_bias_slope = 0.0f;
+  uint32_t scissor_top = 0;  // Rows of the target it can touch, across its whole width.
+  uint32_t scissor_bottom = UINT32_MAX;
   uint32_t blend_control = 0;
   uint32_t color_mask = 0;
   bool alpha_test = false;
@@ -186,6 +202,7 @@ class MetalDevice {
 
   // Ends any open pass, so the next draw needs a BeginPass.
   virtual void CopyTarget(const MetalCopy& copy) = 0;
+  virtual void ClearRect(const MetalRectClear& clear) = 0;
   virtual void CopyDepthToStack(int target, int stack, uint32_t slice) = 0;
 
   // Which colour target this frame's window and capture show, and whether it goes through the gamma ramp on the way, as

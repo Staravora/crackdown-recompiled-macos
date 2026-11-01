@@ -62,6 +62,9 @@ constexpr size_t kAlphaThresholdOffset = 272;
 constexpr size_t kScreenScaleOffset = 280;
 constexpr size_t kScreenOffsetOffset = 288;
 constexpr size_t kDepthOffsetOffset = 296;
+constexpr size_t kVertexTextureTableOffset = 320;
+constexpr size_t kVertexSamplerTableOffset = 336;
+constexpr uint32_t kFirstVertexFetch = 16;
 constexpr size_t kSamplerTableOffset = 192;
 constexpr std::array<size_t, 3> kTextureTableOffsets = {0, 64, 128};
 constexpr size_t kFetchConstantDwords = 6;
@@ -109,6 +112,7 @@ constexpr uint32_t kResolveDepth = 4;
 constexpr uint32_t kResolveClearColor = 1 << 8;
 constexpr uint32_t kResolveClearDepth = 1 << 9;
 constexpr int32_t kSecondTileTop = 480;
+constexpr int32_t kFirstTileBottom = 484;
 constexpr uint32_t kFirstTileMask = 0x3;
 constexpr uint32_t kSecondTileMask = 0xC;
 constexpr uint32_t kBiasShift = 28;
@@ -190,6 +194,8 @@ std::filesystem::path g_path;
 std::filesystem::path g_shader_dir;
 std::unordered_map<std::string, std::vector<uint32_t>> g_manifest;
 std::unordered_map<std::string, std::string> g_loose_manifest;
+std::unordered_map<std::string, std::vector<uint32_t>> g_vertex_texture_manifest;
+std::vector<std::vector<uint32_t>> g_vertex_textures;  // By handle.
 // By address and size. -1 means looked at and no use.
 std::unordered_map<uint64_t, int> g_vertex_shaders;
 struct PixelSlot {
@@ -474,6 +480,8 @@ int FindVertexShader(MetalDevice& device, const BakedDraw& draw, const Run& run)
         REXLOG_ERROR("Native shadow: vertex shader {}: {}", masked, error);
       } else {
         ++g_totals.shaders_found;
+        g_vertex_textures.resize(size_t(handle) + 1);
+        g_vertex_textures[size_t(handle)] = g_vertex_texture_manifest[masked];
       }
     }
   }
@@ -698,45 +706,10 @@ bool g_debug_no_stencil = false;
 std::ofstream* g_dump = nullptr;
 int g_debug_id = 0;
 
-// A target nothing has drawn to this frame holds nothing worth copying, so the texture goes back to what guest memory has.
-// A clear waits for the next pass, because the game clears one tile and then copies the next, and here they share a target.
-void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& drawn, std::map<int, MetalClear>& clears,
-                  int& current_target) {
+void CopyResolve(const Run& run, MetalDevice& device, int target, int resolve, bool depth) {
   const ResolveCopy& copy = *run.resolve;
   xenos::xe_gpu_texture_fetch_t fetch;
   std::memcpy(&fetch, run.dest.data(), sizeof(fetch));
-  const uint32_t source = copy.flags & kResolveSourceMask;
-  const bool depth = source == kResolveDepth;
-  const int tile = HalfSizeTiles(run.targets) ? (copy.has_rect && copy.rect[3] <= kHalfSecondTileHeight ? 1 : 0) : -1;
-  const auto found = g_targets.find({run.targets.color, run.targets.depth, run.targets.width, run.targets.height, tile});
-  const int target = found == g_targets.end() ? -1 : found->second;
-  const int resolve = copy.texture && !g_debug_no_resolves && target >= 0 && drawn.contains(target) && (depth || (source == 0 && run.targets.color))
-                          ? g_textures->ResolveInto(run.dest.data())
-                          : -1;
-  if (g_dump) {
-    *g_dump << fmt::format("R {} flags {:X} rect {} {} {} {} {} to {} {} level {} fetch f{} {}x{} {:05X} swizzle {:03X} type {} dim {} mips {} {} clear {} {} tgt {} {:08X} {:08X} {}\n", g_debug_id, copy.flags, copy.has_rect,
-                           copy.rect[0], copy.rect[1], copy.rect[2], copy.rect[3], copy.dest_x, copy.dest_y, copy.level, uint32_t(fetch.format), uint32_t(fetch.size_2d.width) + 1,
-                           uint32_t(fetch.size_2d.height) + 1, uint32_t(fetch.base_address), uint32_t(fetch.swizzle), uint32_t(fetch.type), uint32_t(fetch.dimension), uint32_t(fetch.mip_address),
-                           uint32_t(fetch.mip_max_level), copy.clear_depth, copy.clear_stencil, target, run.targets.color, run.targets.depth, resolve);
-  }
-  if (target >= 0 && (copy.flags & kResolveClearColor)) {
-    MetalClear& clear = clears[target];
-    clear.color = true;
-    std::copy(copy.clear_color.begin(), copy.clear_color.end(), clear.color_value);
-  }
-  if (target >= 0 && (copy.flags & kResolveClearDepth)) {
-    MetalClear& clear = clears[target];
-    clear.depth = true;
-    clear.depth_value = copy.clear_depth;
-  }
-  if (!copy.texture) {
-    return;
-  }
-  if (resolve < 0) {
-    ++g_totals.missed_resolves;
-    g_textures->ForgetResolve(run.dest.data());
-    return;
-  }
   int stack = 0;
   uint32_t slice = 0;
   if (depth && g_textures->FindStackSlice(run.dest.data(), stack, slice)) {
@@ -763,8 +736,68 @@ void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& draw
       device.CopyTarget(out);
     }
   }
-  current_target = -1;
   ++g_totals.native_resolves;
+}
+
+// A resolve's clear reaches only what its surface holds. The game clears a tile and then copies the next, and they share a
+// target here, so the rows the first tile overlaps the second with are left for the second.
+void ClearAfterResolve(const Run& run, MetalDevice& device, int target) {
+  const ResolveCopy& copy = *run.resolve;
+  xenos::xe_gpu_texture_fetch_t fetch;
+  std::memcpy(&fetch, run.dest.data(), sizeof(fetch));
+  const int32_t surface_bottom = int32_t(run.targets.surface_height) == kFirstTileBottom ? kSecondTileTop : int32_t(run.targets.surface_height);
+  MetalRectClear clear;
+  clear.target = target;
+  clear.color = (copy.flags & kResolveClearColor) != 0;
+  clear.depth = (copy.flags & kResolveClearDepth) != 0;
+  std::copy(copy.clear_color.begin(), copy.clear_color.end(), clear.color_value);
+  clear.depth_value = copy.clear_depth;
+  clear.stencil_value = copy.clear_stencil & 0xFF;
+  if (copy.has_rect) {
+    clear.left = copy.rect[0];
+    clear.top = copy.rect[1];
+    clear.right = copy.rect[2];
+    clear.bottom = copy.rect[3] == kFirstTileBottom ? surface_bottom : copy.rect[3];
+  } else {
+    clear.right = copy.texture ? int32_t(fetch.size_2d.width) + 1 : int32_t(run.targets.width);
+    clear.bottom = copy.texture ? std::min(int32_t(fetch.size_2d.height) + 1, surface_bottom) : surface_bottom;
+  }
+  device.ClearRect(clear);
+}
+
+// A target nothing has drawn to this frame holds nothing worth copying, so the texture goes back to what guest memory has.
+void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& drawn, int& current_target) {
+  const ResolveCopy& copy = *run.resolve;
+  xenos::xe_gpu_texture_fetch_t fetch;
+  std::memcpy(&fetch, run.dest.data(), sizeof(fetch));
+  const uint32_t source = copy.flags & kResolveSourceMask;
+  const bool depth = source == kResolveDepth;
+  const int tile = HalfSizeTiles(run.targets) ? (copy.has_rect && copy.rect[3] <= kHalfSecondTileHeight ? 1 : 0) : -1;
+  const auto found = g_targets.find({run.targets.color, run.targets.depth, run.targets.width, run.targets.height, tile});
+  const int target = found == g_targets.end() ? -1 : found->second;
+  const int resolve = copy.texture && !g_debug_no_resolves && target >= 0 && drawn.contains(target) && (depth || (source == 0 && run.targets.color))
+                          ? g_textures->ResolveInto(run.dest.data())
+                          : -1;
+  if (g_dump) {
+    *g_dump << fmt::format("R {} flags {:X} rect {} {} {} {} {} to {} {} level {} fetch f{} {}x{} {:05X} swizzle {:03X} type {} dim {} mips {} {} clear {} {} tgt {} {:08X} {:08X} {}\n", g_debug_id, copy.flags, copy.has_rect,
+                           copy.rect[0], copy.rect[1], copy.rect[2], copy.rect[3], copy.dest_x, copy.dest_y, copy.level, uint32_t(fetch.format), uint32_t(fetch.size_2d.width) + 1,
+                           uint32_t(fetch.size_2d.height) + 1, uint32_t(fetch.base_address), uint32_t(fetch.swizzle), uint32_t(fetch.type), uint32_t(fetch.dimension), uint32_t(fetch.mip_address),
+                           uint32_t(fetch.mip_max_level), copy.clear_depth, copy.clear_stencil, target, run.targets.color, run.targets.depth, resolve);
+  }
+  // A target with nothing drawn on it yet this frame is cleared by its first draw.
+  const bool clears = (copy.flags & (kResolveClearColor | kResolveClearDepth)) != 0 && target >= 0 && drawn.contains(target);
+  if (resolve >= 0) {
+    CopyResolve(run, device, target, resolve, depth);
+  } else if (copy.texture) {
+    ++g_totals.missed_resolves;
+    g_textures->ForgetResolve(run.dest.data());
+  }
+  if (clears) {
+    ClearAfterResolve(run, device, target);
+  }
+  if (resolve >= 0 || clears) {
+    current_target = -1;
+  }
 }
 
 void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
@@ -776,12 +809,11 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
   int current_target = -1;
   std::unordered_map<int, uint32_t> color_draws;
   std::set<int> cleared;
-  std::map<int, MetalClear> resolve_clears;
   int last_color_target = -1;
   for (const Run& run : frame.runs) {
     if (run.resolve) {
       if (!g_debug_stopped) {
-        ApplyResolve(run, device, cleared, resolve_clears, current_target);
+        ApplyResolve(run, device, cleared, current_target);
       }
       continue;
     }
@@ -878,18 +910,10 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         }
         const bool first_use = cleared.insert(target).second;
         const bool clear = run_cleared || first_use;
-        const auto resolve_clear = resolve_clears.find(target);
-        if (target != current_target || clear || resolve_clear != resolve_clears.end()) {
+        if (target != current_target || clear) {
           MetalClear pass_clear;
-          if (clear) {
-            pass_clear.color = pass_clear.depth = true;
-            pass_clear.depth_value = ClearDepthFor(draw);
-          } else if (resolve_clear != resolve_clears.end()) {
-            pass_clear = resolve_clear->second;
-          }
-          if (resolve_clear != resolve_clears.end()) {
-            resolve_clears.erase(resolve_clear);
-          }
+          pass_clear.color = pass_clear.depth = clear;
+          pass_clear.depth_value = ClearDepthFor(draw);
           device.BeginPass(target, pass_clear);
           current_target = target;
           ++g_totals.passes;
@@ -929,6 +953,11 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         out.blend_control = draw.blend_control;
         out.color_mask = WritesNoColor(draw) ? 0 : draw.color_mask;
         out.alpha_test = alpha_test;
+        // Tiles overlap by a few rows, and a quad drawn for one tile would blend twice on those.
+        if (tile >= 0 && run.targets.height > uint32_t(kSecondTileTop) && !HalfSizeTiles(run.targets)) {
+          out.scissor_top = tile ? kSecondTileTop : 0;
+          out.scissor_bottom = tile ? UINT32_MAX : kSecondTileTop;
+        }
         out.viewport = viewport;
         out.depth_control = g_debug_no_stencil ? draw.depth_control & ~1u : draw.depth_control;
         out.stencil_front = draw.stencil_front;
@@ -966,7 +995,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
           const std::array<int32_t, 4> values = {int32_t(loop & 0xFF), int32_t((loop >> 8) & 0xFF), int32_t(int8_t(loop >> 16)), 0};
           std::memcpy(shared + kLoopTableOffset + i * 16, values.data(), sizeof(values));
         }
-        std::array<int, 32> textures;
+        std::array<int, 36> textures;
         uint32_t texture_count = 0;
         if (pixel.handle >= 0) {
           ++g_totals.shaded_draws;
@@ -982,6 +1011,14 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
             const int sampler = g_textures->FindSampler(fetch);
             std::memcpy(shared + kSamplerTableOffset + slot.slot * 4, &sampler, sizeof(sampler));
           }
+        }
+        for (const uint32_t slot : g_vertex_textures[size_t(shader)]) {
+          const uint32_t* fetch = fetch_constants + size_t(kFirstVertexFetch + slot) * kFetchConstantDwords;
+          const int texture = g_textures->FindTexture(fetch, tile);
+          const int sampler = g_textures->FindSampler(fetch);
+          textures[texture_count++] = texture;
+          std::memcpy(shared + kVertexTextureTableOffset + slot * 4, &texture, sizeof(texture));
+          std::memcpy(shared + kVertexSamplerTableOffset + slot * 4, &sampler, sizeof(sampler));
         }
         out.textures = textures.data();
         out.texture_count = texture_count;
@@ -1023,6 +1060,17 @@ void ReadManifest() {
   std::string loose_key, key;
   while (loose >> loose_key >> key) {
     g_loose_manifest[loose_key] = key;
+  }
+  std::ifstream vertex_textures(g_shader_dir / "vertex-textures.txt");
+  while (std::getline(vertex_textures, line)) {
+    std::istringstream row(line);
+    std::string key;
+    row >> key;
+    std::vector<uint32_t>& slots = g_vertex_texture_manifest[key];
+    uint32_t slot;
+    while (row >> slot) {
+      slots.push_back(slot);
+    }
   }
   std::ifstream pixels(g_shader_dir / "pixel-manifest.txt");
   while (std::getline(pixels, line)) {

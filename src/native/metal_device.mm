@@ -76,6 +76,13 @@ vertex float4 display_vertex(uint id [[vertex_id]]) {
   float2 corner = float2((id << 1) & 2, id & 2);
   return float4(corner * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
 }
+vertex float4 clear_vertex(uint id [[vertex_id]], constant float& depth [[buffer(4)]]) {
+  float2 corner = float2((id << 1) & 2, id & 2);
+  return float4(corner * float2(2.0, -2.0) + float2(-1.0, 1.0), depth, 1.0);
+}
+fragment float4 clear_fragment(constant float4& color [[buffer(4)]]) {
+  return color;
+}
 fragment float4 display_fragment(float4 position [[position]], texture2d<float> source [[texture(0)]],
                                  texture1d<float> ramp [[texture(1)]]) {
   uint3 color = uint3(source.read(uint2(position.xy)).rgb * 255.0 + 0.5);
@@ -269,6 +276,17 @@ class MetalDeviceImpl final : public MetalDevice {
       return false;
     }
     clay_ = [library newFunctionWithName:@"clay_fragment"];
+    clear_vertex_ = [library newFunctionWithName:@"clear_vertex"];
+    clear_fragment_ = [library newFunctionWithName:@"clear_fragment"];
+    MTLDepthStencilDescriptor* keep_depth = [MTLDepthStencilDescriptor new];
+    clear_keeping_depth_ = [device_ newDepthStencilStateWithDescriptor:keep_depth];
+    MTLDepthStencilDescriptor* write_depth = [MTLDepthStencilDescriptor new];
+    write_depth.depthWriteEnabled = YES;
+    MTLStencilDescriptor* write_stencil = [MTLStencilDescriptor new];
+    write_stencil.depthStencilPassOperation = MTLStencilOperationReplace;
+    write_depth.frontFaceStencil = write_stencil;
+    write_depth.backFaceStencil = write_stencil;
+    clear_writing_depth_ = [device_ newDepthStencilStateWithDescriptor:write_depth];
     MTLRenderPipelineDescriptor* display = [MTLRenderPipelineDescriptor new];
     display.vertexFunction = [library newFunctionWithName:@"display_vertex"];
     display.fragmentFunction = [library newFunctionWithName:@"display_fragment"];
@@ -515,6 +533,38 @@ class MetalDeviceImpl final : public MetalDevice {
               MTLOriginMake(0, 0, slice));
   }
 
+  void ClearRect(const MetalRectClear& clear) override {
+    const Target& target = targets_[size_t(clear.target)];
+    const int32_t width = int32_t(target.depth.width), height = int32_t(target.depth.height);
+    const int32_t left = std::max(clear.left, 0), top = std::max(clear.top, 0);
+    const int32_t right = std::min(clear.right, width), bottom = std::min(clear.bottom, height);
+    const bool color = clear.color && target.color;
+    if (right <= left || bottom <= top || (!color && !clear.depth)) {
+      return;
+    }
+    if (left == 0 && top == 0 && right == width && bottom == height) {
+      MetalClear whole;
+      whole.color = color;
+      whole.depth = clear.depth;
+      std::copy_n(clear.color_value, 4, whole.color_value);
+      whole.depth_value = clear.depth_value;
+      BeginPass(clear.target, whole);
+      EndPass();
+      return;
+    }
+    BeginPass(clear.target, MetalClear{});
+    [encoder_ setRenderPipelineState:ClearPipeline(target.color != nil, color)];
+    [encoder_ setDepthStencilState:clear.depth ? clear_writing_depth_ : clear_keeping_depth_];
+    [encoder_ setStencilReferenceValue:clear.stencil_value];
+    [encoder_ setCullMode:MTLCullModeNone];
+    [encoder_ setViewport:{0.0, 0.0, double(width), double(height), 0.0, 1.0}];
+    [encoder_ setScissorRect:{NSUInteger(left), NSUInteger(top), NSUInteger(right - left), NSUInteger(bottom - top)}];
+    [encoder_ setVertexBytes:&clear.depth_value length:sizeof(clear.depth_value) atIndex:4];
+    [encoder_ setFragmentBytes:clear.color_value length:sizeof(clear.color_value) atIndex:4];
+    [encoder_ drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    EndPass();
+  }
+
   void CopyTarget(const MetalCopy& copy) override {
     EndPass();
     const Target& target = targets_[size_t(copy.target)];
@@ -674,6 +724,9 @@ class MetalDeviceImpl final : public MetalDevice {
     [encoder_ useResource:dummy_cube_ usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
     ++pass_number_;
     pass_has_color_ = target.color != nil;
+    pass_width_ = target.depth.width;
+    pass_height_ = uint32_t(target.depth.height);
+    current_scissor_ = {0, pass_height_};
     current_pipeline_ = nil;
     current_elements_ = SIZE_MAX;
     current_depth_ = {};
@@ -726,7 +779,7 @@ class MetalDeviceImpl final : public MetalDevice {
       if (index && index < textures_.size()) {
         texture_pass_.resize(textures_.size());
         texture_pass_[index] = pass_number_;
-        [encoder_ useResource:textures_[index] usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+        [encoder_ useResource:textures_[index] usage:MTLResourceUsageRead stages:MTLRenderStageVertex | MTLRenderStageFragment];
       }
     }
     if (!(draw.viewport == current_viewport_)) {
@@ -743,6 +796,11 @@ class MetalDeviceImpl final : public MetalDevice {
     if (draw.depth_control & kStencilEnable) {
       const uint32_t back = (draw.depth_control & kBackFaceEnable) ? draw.stencil_back : draw.stencil_front;
       [encoder_ setStencilFrontReferenceValue:draw.stencil_front & 0xFF backReferenceValue:back & 0xFF];
+    }
+    const std::pair<uint32_t, uint32_t> scissor = {draw.scissor_top, std::min(draw.scissor_bottom, pass_height_)};
+    if (scissor != current_scissor_) {
+      [encoder_ setScissorRect:{0, scissor.first, pass_width_, scissor.second - scissor.first}];
+      current_scissor_ = scissor;
     }
     if (draw.depth_bias_slope != current_bias_slope_) {
       [encoder_ setDepthBias:0.0f slopeScale:draw.depth_bias_slope clamp:0.0f];
@@ -885,6 +943,23 @@ class MetalDeviceImpl final : public MetalDevice {
     return display_;
   }
 
+  id<MTLRenderPipelineState> ClearPipeline(bool has_color, bool write_color) {
+    const size_t index = has_color ? (write_color ? 2 : 1) : 0;
+    if (!clear_pipelines_[index]) {
+      MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
+      descriptor.vertexFunction = clear_vertex_;
+      descriptor.depthAttachmentPixelFormat = kDepthFormat;
+      descriptor.stencilAttachmentPixelFormat = kDepthFormat;
+      if (has_color) {
+        descriptor.fragmentFunction = clear_fragment_;
+        descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        descriptor.colorAttachments[0].writeMask = write_color ? MTLColorWriteMaskAll : MTLColorWriteMaskNone;
+      }
+      clear_pipelines_[index] = [device_ newRenderPipelineStateWithDescriptor:descriptor error:nil];
+    }
+    return clear_pipelines_[index];
+  }
+
   void ReserveDepthCopy(NSUInteger bytes) {
     if (depth_copy_.length < bytes) {
       // A frame in flight may still be using it, and frames don't keep what they use alive.
@@ -987,6 +1062,11 @@ class MetalDeviceImpl final : public MetalDevice {
   id<MTLSamplerState> sampler_ = nil;
   id<MTLFunction> clay_ = nil;
   id<MTLRenderPipelineState> display_pipeline_ = nil;
+  id<MTLFunction> clear_vertex_ = nil;
+  id<MTLFunction> clear_fragment_ = nil;
+  id<MTLDepthStencilState> clear_keeping_depth_ = nil;
+  id<MTLDepthStencilState> clear_writing_depth_ = nil;
+  std::array<id<MTLRenderPipelineState>, 3> clear_pipelines_{};
   id<MTLTexture> gamma_ramp_ = nil;
   id<MTLTexture> display_ = nil;
   id<MTLCommandBuffer> buffer_ = nil;
@@ -1023,6 +1103,9 @@ class MetalDeviceImpl final : public MetalDevice {
   bool shown_gamma_ = false;
   bool gamma_ramp_set_ = false;
   bool pass_has_color_ = false;
+  NSUInteger pass_width_ = 0;
+  uint32_t pass_height_ = 0;
+  std::pair<uint32_t, uint32_t> current_scissor_{};
   MetalViewport current_viewport_;
   DepthKey current_depth_{};
   bool has_depth_state_ = false;

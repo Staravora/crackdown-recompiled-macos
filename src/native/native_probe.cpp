@@ -179,6 +179,7 @@ shadow::Targets TargetsOf(uint32_t device, const uint8_t* base) {
   const uint32_t size = Load32(base, surface + kSurfaceSize);
   targets.width = ((size >> 18) & 0x1FFF) + 1;
   targets.height = ((size >> 3) & 0x1FFF) + 1;
+  targets.surface_height = targets.height;
   const uint32_t tiles = std::min(Load32(base, device + kDeviceTileCount), kMaxTiles);
   for (uint32_t i = 0; i < tiles; ++i) {
     const uint32_t rect = device + kDeviceTileRects + i * 16;
