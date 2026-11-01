@@ -268,7 +268,7 @@ std::optional<Pose> ParsePose(const std::string& text) {
 
 // The game picks what to load and how much detail to draw from where the player stands, not where the camera is. Its
 // physics puts the real position back every update, so this is written every update, and the player keeps their place
-// on the map. Their height doesn't survive it, because they follow the ground under this position.
+// on the map. Their height doesn't survive it: they drop under the map.
 void CarryPlayer(uint8_t* base) {
   if (const uint32_t character = cheats::LocalPlayerCharacter(base)) {
     StoreVec(base, character + kCharacterPositionOffset, g_pose->position);

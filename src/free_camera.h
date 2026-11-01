@@ -12,7 +12,7 @@ namespace crackdown::free_camera {
 // game's camera logic never sees it. Turned on from the cheat menu.
 //
 // The world's detail follows the player, so the player's position goes along too. They stay where they are on the map
-// but drop to the height of the ground under the camera, and stay at that height once the camera is turned off.
+// but drop under the map, and stay at that height once the camera is turned off.
 //
 // WASD moves, Q and E go down and up, the mouse looks and Shift goes faster. 1-9 jump to a saved spot, Shift+1-9 save
 // one to camera-spots.txt in the user data folder, and F freezes time.

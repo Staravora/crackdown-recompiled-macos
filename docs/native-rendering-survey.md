@@ -335,10 +335,12 @@ So the write has to stay in place through step 16 of `SimulationUpdate` (`824EC0
 What the write does to the player, from a run that turned the camera off after 150 updates:
 
 - **Position on the map:** unchanged. The game's physics puts the real x and z back every update.
-- **Height:** they follow the ground under the camera. From the 39 m ledge they dropped to about -1.5 and stayed there after the camera went off, with no damage.
-- **Not tested:** a camera over tall ground, which would lift the player and could drop them from a height when it goes off.
+- **Height:** they drop under the map, as Bruce saw in play. From the 39 m ledge the log shows about -1.5, and they stayed there after the camera went off, with no damage.
+- **Not tested:** a camera over tall ground.
 
-A write held through the game's spawn moves the player for real, because spawning takes their physics position from this field. Starting with `--crackdown_free_camera_start` does this, so scripted runs stand the player under the camera. Traffic and people near a mid-play camera are untested.
+Bruce's play also found that the cursor stays on screen and stops the camera turning all the way round, and that NPCs away from the player look like they drop to a reduced animation state, which isn't traced. All of this is parked: it's good enough for testing draws.
+
+A write held through the game's spawn moves the player for real, because spawning takes their physics position from this field. Starting with `--crackdown_free_camera_start` does this, so scripted runs stand the player under the camera.
 
 **Freeze Time:** a car in view stayed in place across 20 seconds of captures, where the street changed between captures before freezing. Two other cars appeared in one capture only and didn't move, and that isn't explained.
 
