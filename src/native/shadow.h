@@ -34,6 +34,8 @@ void OnClear();
 void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_select, const uint32_t* vertex_constants,
              const Targets& targets, std::shared_ptr<const std::vector<uint8_t>> vertex_code = nullptr);
 void CountDirectDraw();
+// The game has resolved into this texture object.
+void OnResolve(uint32_t texture, const uint8_t* base);
 void SetRingDesyncs(uint64_t desyncs);
 #else
 inline bool Enabled() {
@@ -45,6 +47,7 @@ inline void OnClear() {}
 inline void Capture(std::shared_ptr<const std::vector<BakedList>>, uint32_t, const uint32_t*, const Targets&,
                     std::shared_ptr<const std::vector<uint8_t>> = nullptr) {}
 inline void CountDirectDraw() {}
+inline void OnResolve(uint32_t, const uint8_t*) {}
 inline void SetRingDesyncs(uint64_t) {}
 #endif
 

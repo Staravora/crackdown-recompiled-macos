@@ -1,9 +1,12 @@
 #include "texture_cache.h"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstring>
+#include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include <rex/graphics/pipeline/texture/info.h>
@@ -20,6 +23,74 @@ using rex::graphics::FormatInfo;
 
 constexpr size_t kFetchDwords = 6;
 constexpr uint32_t kDummyDescriptor = 0;
+constexpr uint32_t kPageShift = 12;
+constexpr uint32_t kPages = 1 << 17;
+constexpr uint32_t kPhysicalMask = 0x1FFFFFFF;
+
+// Bumped each time a page changes, so a texture can tell by adding up its pages. Written from the page watch's fault
+// handler, so nothing here can take a lock.
+std::unique_ptr<std::atomic<uint32_t>[]> g_page_versions;
+
+struct Range {
+  uint32_t start = 0;
+  uint32_t bytes = 0;
+};
+
+void MarkChanged(const Range& range) {
+  if (!g_page_versions || !range.bytes) {
+    return;
+  }
+  const uint32_t first = range.start >> kPageShift;
+  const uint32_t last = uint32_t(std::min((uint64_t(range.start) + range.bytes - 1) >> kPageShift, uint64_t(kPages - 1)));
+  for (uint32_t page = first; page <= last; ++page) {
+    g_page_versions[page].fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+uint64_t VersionOf(const Range& range) {
+  uint64_t version = 0;
+  if (!range.bytes) {
+    return version;
+  }
+  const uint32_t first = range.start >> kPageShift;
+  const uint32_t last = uint32_t(std::min((uint64_t(range.start) + range.bytes - 1) >> kPageShift, uint64_t(kPages - 1)));
+  for (uint32_t page = first; page <= last; ++page) {
+    version += g_page_versions[page].load(std::memory_order_relaxed);
+  }
+  return version;
+}
+
+// A watched page is 16 KB on this host, 4 guest pages, so a write beside a texture looks like a write to it. Comparing
+// what's there costs far less than reloading.
+uint64_t ContentOf(const uint8_t* memory, size_t memory_bytes, const Range& range) {
+  uint64_t hash = 0xCBF29CE484222325ull;
+  if (uint64_t(range.start) + range.bytes > memory_bytes) {
+    return hash;
+  }
+  for (size_t at = 0; at + 8 <= range.bytes; at += 8) {
+    uint64_t word;
+    std::memcpy(&word, memory + range.start + at, sizeof(word));
+    hash = (hash ^ word) * 0x100000001B3ull;
+  }
+  return hash;
+}
+
+std::pair<uint32_t, uint32_t> OnPagesChanged(void*, uint32_t start, uint32_t length, bool) {
+  MarkChanged({start, length});
+  return {start, length};
+}
+
+// The memory a texture reads: its top level, then its mips.
+std::array<Range, 2> RangesOf(const xenos::xe_gpu_texture_fetch_t& fetch) {
+  const xenos::TextureFormat format = xenos::TextureFormat(uint32_t(fetch.format));
+  const uint32_t width = uint32_t(fetch.size_2d.width) + 1, height = uint32_t(fetch.size_2d.height) + 1;
+  const uint32_t mip_address = uint32_t(fetch.mip_address) << 12;
+  const texture_util::TextureGuestLayout layout = texture_util::GetGuestTextureLayout(
+      xenos::DataDimension::k2DOrStacked, fetch.pitch, width, height, 1, fetch.tiled, format, fetch.packed_mips, true,
+      mip_address ? uint32_t(fetch.mip_max_level) : 0);
+  return {Range{(uint32_t(fetch.base_address) << 12) & kPhysicalMask, layout.base.level_data_extent_bytes},
+          Range{mip_address & kPhysicalMask, mip_address ? layout.mips_total_extent_bytes : 0}};
+}
 
 std::optional<MetalTextureFormat> MetalFormatOf(xenos::TextureFormat format, bool gamma) {
   switch (format) {
@@ -114,25 +185,89 @@ MetalAddressMode AddressModeOf(xenos::ClampMode clamp) {
 
 }  // namespace
 
-TextureCache::TextureCache(MetalDevice& device, const uint8_t* guest_memory, size_t guest_bytes)
-    : device_(device), guest_memory_(guest_memory), guest_bytes_(guest_bytes) {}
+TextureCache::TextureCache(MetalDevice& device, rex::memory::Memory* memory, const uint8_t* guest_memory, size_t guest_bytes)
+    : device_(device), memory_(memory), guest_memory_(guest_memory), guest_bytes_(guest_bytes) {
+  g_page_versions = std::make_unique<std::atomic<uint32_t>[]>(kPages);
+  memory_->RegisterPhysicalMemoryInvalidationCallback(OnPagesChanged, nullptr);
+}
+
+void TextureCache::MarkResolved(const uint32_t* fetch_dwords) {
+  xenos::xe_gpu_texture_fetch_t fetch;
+  std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
+  if (fetch.type == xenos::FetchConstantType::kTexture && FormatInfo::Get(xenos::TextureFormat(uint32_t(fetch.format)))) {
+    for (const Range& range : RangesOf(fetch)) {
+      MarkChanged(range);
+    }
+  }
+}
 
 int TextureCache::FindTexture(const uint32_t* fetch) {
   const uint64_t key = HashFetch(fetch);
   const auto found = textures_.find(key);
   if (found != textures_.end()) {
-    return found->second;
+    Entry& entry = found->second;
+    if (entry.checked_frame != frame_ && entry.descriptor != int(kDummyDescriptor)) {
+      entry.checked_frame = frame_;
+      xenos::xe_gpu_texture_fetch_t decoded;
+      std::memcpy(&decoded, entry.fetch.data(), sizeof(decoded));
+      const std::array<Range, 2> ranges = RangesOf(decoded);
+      const uint64_t version = VersionOf(ranges[0]) + VersionOf(ranges[1]);
+      if (version != entry.version && upload_budget_) {
+        // Watch again first, so a write during the read isn't lost.
+        for (const Range& range : ranges) {
+          if (range.bytes) {
+            memory_->EnablePhysicalMemoryAccessCallbacks(range.start, range.bytes, true, false);
+          }
+        }
+        const uint64_t content = ContentOf(guest_memory_, guest_bytes_, ranges[0]) ^ ContentOf(guest_memory_, guest_bytes_, ranges[1]);
+        if (content == entry.content) {
+          entry.version = version;
+          ++textures_unchanged_;
+        } else {
+          const size_t budget_before = upload_budget_;
+          if (Load(fetch, entry.descriptor) != int(kDummyDescriptor)) {
+            entry.version = version;
+            entry.content = content;
+            ++textures_reloaded_;
+            reloaded_bytes_ += budget_before - upload_budget_;
+          }
+        }
+      }
+    }
+    return entry.descriptor;
   }
   const size_t budget_before = upload_budget_;
-  const int descriptor = Load(fetch);
-  // Out of budget isn't an answer, so it gets asked again next frame.
-  if (budget_before != 0 && (descriptor != int(kDummyDescriptor) || upload_budget_ != 0)) {
-    textures_[key] = descriptor;
+  Entry entry;
+  std::copy_n(fetch, kFetchDwords, entry.fetch.begin());
+  xenos::xe_gpu_texture_fetch_t decoded;
+  std::memcpy(&decoded, fetch, sizeof(decoded));
+  const bool has_layout = decoded.type == xenos::FetchConstantType::kTexture &&
+                          FormatInfo::Get(xenos::TextureFormat(uint32_t(decoded.format))) != nullptr;
+  std::array<Range, 2> ranges{};
+  if (has_layout) {
+    ranges = RangesOf(decoded);
+    entry.version = VersionOf(ranges[0]) + VersionOf(ranges[1]);
+    entry.content = ContentOf(guest_memory_, guest_bytes_, ranges[0]) ^ ContentOf(guest_memory_, guest_bytes_, ranges[1]);
   }
-  return descriptor;
+  entry.descriptor = Load(fetch, -1);
+  entry.checked_frame = frame_;
+  // Out of budget isn't an answer, so it gets asked again next frame.
+  if (budget_before != 0 && (entry.descriptor != int(kDummyDescriptor) || upload_budget_ != 0)) {
+    if (entry.descriptor != int(kDummyDescriptor)) {
+      for (const Range& range : ranges) {
+        if (range.bytes) {
+          memory_->EnablePhysicalMemoryAccessCallbacks(range.start, range.bytes, true, false);
+        }
+      }
+    }
+    const int descriptor = entry.descriptor;
+    textures_[key] = entry;
+    return descriptor;
+  }
+  return entry.descriptor;
 }
 
-int TextureCache::Load(const uint32_t* fetch_dwords) {
+int TextureCache::Load(const uint32_t* fetch_dwords, int existing) {
   xenos::xe_gpu_texture_fetch_t fetch;
   std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
   if (fetch.type != xenos::FetchConstantType::kTexture || fetch.dimension != xenos::DataDimension::k2DOrStacked ||
@@ -177,7 +312,7 @@ int TextureCache::Load(const uint32_t* fetch_dwords) {
   for (uint32_t i = 0; i < 4; ++i) {
     desc.swizzle[i] = uint8_t((fetch.swizzle >> (i * 3)) & 7);
   }
-  const int descriptor = device_.AddTexture(desc);
+  const int descriptor = existing >= 0 ? existing : device_.AddTexture(desc);
   if (descriptor < 0) {
     ++textures_skipped_;
     return kDummyDescriptor;
@@ -218,7 +353,7 @@ int TextureCache::Load(const uint32_t* fetch_dwords) {
                         size_t(blocks_x) * block_bytes);
   }
   upload_budget_ -= needed;
-  ++textures_loaded_;
+  textures_loaded_ += existing < 0;
   return descriptor;
 }
 

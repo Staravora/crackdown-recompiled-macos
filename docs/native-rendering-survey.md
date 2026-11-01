@@ -384,13 +384,17 @@ Shadow mode now draws with the game's pixel shaders and textures, so the Metal w
 
 Frame rate is about 22 FPS with shadow mode on and the window closed, in one run on a warm Air, so that's no cost measurement.
 
-**How it fits together.** `tools/shader-trial/build_pixels.py` compiles every translated pixel shader and lists the fetch slots each reads, taken from the translated source. A shader reads its texture numbers from a table in its shared constants, so each draw fills that table. `src/native/texture_cache.cpp` reads a fetch constant, untiles guest memory with the SDK's layout code, and uploads every mip. DXT is BC to Metal, so nothing is decoded. In shadow mode resolved render targets are plain textures in guest memory, because the emulator keeps writing them. Pixel constants travel with each draw beside the vertex ones, so a draw's constants are now 8 KB and a frame's memory is 128 MB.
+**How it fits together.** `tools/shader-trial/build_pixels.py` compiles every translated pixel shader and lists the fetch slots each reads, taken from the translated source. A shader reads its texture numbers from a table in its shared constants, so each draw fills that table. `src/native/texture_cache.cpp` reads a fetch constant, untiles guest memory with the SDK's layout code, and uploads every mip. DXT is BC to Metal, so nothing is decoded. Pixel constants travel with each draw beside the vertex ones, so a draw's constants are now 8 KB and a frame's memory is 128 MB.
 
 **Run `build_pixels.py` after pulling this,** or every draw stays grey.
 
+**Texture updates.** A texture reloads when it's next bound after its memory changes. A per-page version counter is bumped by the emulator's page watch, and also by `Resolve`, whose writes the watch doesn't see, again a frame later because the emulator does them late. Host pages are 16 KB, 4 guest pages, so a write beside a texture looks like a write to it: on the rooftop that's about 40 false alarms a frame, and reloading them took recording from 5 to 21 ms. A hash of the raw memory now rules those out first, and recording settled at 7.2 ms. No texture really changed on the still rooftop, so a real reload hasn't been seen to work in a drive.
+
+**Bruce saw the picture go white** in a dark stairwell after five minutes of play. Stale textures were the first guess and are unlikely: exposure seems to be worked out on the CPU from the 320x180 targets, and constants are live. The next suspect is that the picture isn't tone mapped yet, because that pass isn't drawn, so a high exposure clips in an 8-bit target. Not proven.
+
 **Not there yet, roughly in order of what it'll change on screen:**
 
-- **Textures never update.** One that changes after it's loaded stays as it was, which will show on resolved targets such as shadow maps and reflections. The page watch is what fixes this.
+- **Resolved render targets aren't in guest memory.** `readback_resolve_max_bytes` is 256 KB, so the emulator only copies back the 320x180 targets. Anything larger stays on its GPU, so a shader sampling one reads stale memory. Only native resolves fix this.
 - **Only 2D textures load.** 3D, cube and depth formats read a dummy, and 24-bit depth is what a shadow map is, so real-time shadows and environment reflections are missing.
 - **Vertex shader textures aren't bound,** so the particle shaders that read lookup tables get a dummy.
 - **Non-list draws and ring quads aren't drawn:** about 325 and 340 a frame, which is where the HUD, particles and fullscreen passes are likely to be. So there's no post-processing, bloom or colour grading.

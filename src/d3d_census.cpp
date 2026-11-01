@@ -647,6 +647,7 @@ void CensusClear(PPCContext& ctx, uint8_t* base, GuestFunction original) {
 
 void CensusResolve(PPCContext& ctx, uint8_t* base, GuestFunction original) {
   native::textures::OnResolve(ctx.r6.u32);
+  native::shadow::OnResolve(ctx.r6.u32, base);
   if (!census::Counting()) {
     return original(ctx, base);
   }

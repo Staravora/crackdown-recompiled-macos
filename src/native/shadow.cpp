@@ -53,6 +53,7 @@ constexpr size_t kAlphaThresholdOffset = 272;
 constexpr size_t kSamplerTableOffset = 192;
 constexpr std::array<size_t, 3> kTextureTableOffsets = {0, 64, 128};
 constexpr size_t kFetchConstantDwords = 6;
+constexpr uint32_t kTextureFetchConstant = 28;
 constexpr size_t kDrawBytes = kConstantBytes + kFetchBytes + kSharedBytes;
 constexpr size_t kConstantRegionBytes = 96 << 20;
 constexpr size_t kIndexRegionBytes = 32 << 20;
@@ -134,10 +135,14 @@ uint64_t g_dropped = 0;
 uint64_t g_capture_ns = 0;
 uint64_t g_direct_draws = 0;
 uint64_t g_ring_desyncs = 0;
+using FetchConstant = std::array<uint32_t, kFetchConstantDwords>;
+std::vector<FetchConstant> g_resolved_this_frame;
+std::vector<FetchConstant> g_resolved_last_frame;
 bool g_clear_pending = false;
 
 // Render thread only from here down.
 uint8_t* g_guest = nullptr;
+rex::memory::Memory* g_memory = nullptr;
 std::filesystem::path g_path;
 std::filesystem::path g_shader_dir;
 std::unordered_map<std::string, std::vector<uint32_t>> g_manifest;
@@ -397,7 +402,8 @@ int TargetOf(MetalDevice& device, const Run& run) {
     return found->second;
   }
   const int target = device.AddTarget(key.width, key.height, key.color != 0);
-  REXLOG_INFO("Native shadow: target {}x{}, colour {:08X}, depth {:08X}", key.width, key.height, key.color, key.depth);
+  REXLOG_INFO("Native shadow: target {}x{}, colour {:08X}, depth {:08X}, format {}", key.width, key.height, key.color,
+              key.depth, (run.lists->front().draws.front().color_info >> 16) & 0xF);
   g_targets[key] = target;
   return target;
 }
@@ -615,7 +621,7 @@ void Report(const MetalDevice& device) {
   std::ofstream out(g_path);
   out << fmt::format(
       R"({{"guest_frames":{},"frames":{},"dropped":{},"draws_per_frame":{:.1f},"skipped_draws_per_frame":{:.1f},"no_room":{},)"
-      R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"no_target_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},"other_index_order_draws_per_frame":{:.1f},"transparent_draws_per_frame":{:.1f},"no_color_draws_per_frame":{:.1f},"alpha_tested_draws_per_frame":{:.1f},"shaded_draws_per_frame":{:.1f},"pixel_shaders_found":{},"pixel_shaders_missing":{},"textures_loaded":{},"textures_skipped":{},"direct_draws_per_frame":{:.1f},"ring_desyncs":{},"passes_per_frame":{:.1f},"targets":{},)"
+      R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"no_target_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},"other_index_order_draws_per_frame":{:.1f},"transparent_draws_per_frame":{:.1f},"no_color_draws_per_frame":{:.1f},"alpha_tested_draws_per_frame":{:.1f},"shaded_draws_per_frame":{:.1f},"pixel_shaders_found":{},"pixel_shaders_missing":{},"textures_loaded":{},"textures_skipped":{},"textures_reloaded":{},"reloaded_mb":{:.1f},"textures_unchanged":{},"direct_draws_per_frame":{:.1f},"ring_desyncs":{},"passes_per_frame":{:.1f},"targets":{},)"
       R"("shaders_found":{},"shaders_missing":{},"shaders_failed":{},"index_copy_ms_per_frame":{:.3f},)"
       R"("capture_ms_per_frame":{:.4f},"wait_ms_per_frame":{:.3f},"encode_ms_p50":{:.3f},"encode_ms_p95":{:.3f},"encode_ms_max":{:.3f},)"
       R"("gpu_frames":{},"gpu_errors":{},"gpu_ms_per_frame":{:.3f},"gpu_ms_worst":{:.3f},)"
@@ -625,7 +631,7 @@ void Report(const MetalDevice& device) {
       g_totals.no_target_draws / frames, g_totals.other_primitive_draws / frames, g_totals.other_index_order_draws / frames,
       g_totals.transparent_draws / frames, g_totals.no_color_draws / frames, g_totals.alpha_tested_draws / frames,
       g_totals.shaded_draws / frames, g_totals.pixel_shaders_found, g_totals.pixel_shaders_missing, g_textures->textures_loaded(),
-      g_textures->textures_skipped(), direct_draws / double(std::max<uint64_t>(guest_frames, 1)), ring_desyncs,
+      g_textures->textures_skipped(), g_textures->textures_reloaded(), g_textures->reloaded_bytes() / 1e6, g_textures->textures_unchanged(), direct_draws / double(std::max<uint64_t>(guest_frames, 1)), ring_desyncs,
       g_totals.passes / frames, g_targets.size(), g_totals.shaders_found, g_totals.shaders_missing, g_totals.shaders_failed,
       g_totals.index_copy_ns / 1e6 / frames,
       capture_ns / 1e6 / double(std::max<uint64_t>(guest_frames, 1)), g_totals.wait_ns / 1e6 / frames,
@@ -652,7 +658,7 @@ void RenderThread() {
   }
   REXLOG_INFO("Native shadow: Metal is up, guest memory wrapped: {}", device->guest_memory_wrapped());
   ReadManifest();
-  g_textures = std::make_unique<TextureCache>(*device, g_guest, kGuestBytes);
+  g_textures = std::make_unique<TextureCache>(*device, g_memory, g_guest, kGuestBytes);
   if (REXCVAR_GET(crackdown_native_shadow_window)) {
     device->ShowWindow();
   }
@@ -702,6 +708,7 @@ void Install(rex::memory::Memory* memory, const std::filesystem::path& shader_di
     return;
   }
   g_guest = memory->TranslatePhysical<uint8_t*>(0);
+  g_memory = memory;
   g_shader_dir = shader_dir;
   g_path = output_dir / fmt::format("native-shadow-{}.json", uint64_t(std::time(nullptr)));
   g_current = std::make_unique<Frame>();
@@ -721,6 +728,13 @@ void OnGuestFrame() {
   }
   std::lock_guard lock(g_mutex);
   ++g_guest_frames;
+  // The emulator does a resolve some time after the game asks for it, so a frame can read the old contents and settle
+  // on them. Marking them again a frame later picks up the new ones.
+  for (const FetchConstant& fetch : g_resolved_last_frame) {
+    TextureCache::MarkResolved(fetch.data());
+  }
+  g_resolved_last_frame.swap(g_resolved_this_frame);
+  g_resolved_this_frame.clear();
   if (g_current->runs.empty()) {
     return;
   }
@@ -745,6 +759,21 @@ void OnClear() {
 void CountDirectDraw() {
   std::lock_guard lock(g_mutex);
   ++g_direct_draws;
+}
+
+void OnResolve(uint32_t texture, const uint8_t* base) {
+  if (!Enabled() || !texture) {
+    return;
+  }
+  FetchConstant fetch;
+  std::memcpy(fetch.data(), base + texture + kTextureFetchConstant + rex::memory::detail::PhysicalHostOffset(texture),
+              sizeof(fetch));
+  for (uint32_t& dword : fetch) {
+    dword = std::byteswap(dword);
+  }
+  TextureCache::MarkResolved(fetch.data());
+  std::lock_guard lock(g_mutex);
+  g_resolved_this_frame.push_back(fetch);
 }
 
 void SetRingDesyncs(uint64_t desyncs) {
