@@ -92,8 +92,11 @@ constexpr uint32_t kPrimitiveTriangleStrip = 6;
 constexpr uint32_t kPrimitiveQuadList = 13;
 constexpr uint64_t kHashBasis = 0xCBF29CE484222325ull;
 constexpr uint64_t kHashPrime = 0x100000001B3ull;
+constexpr uint32_t kStencilEnable = 1 << 0;
 constexpr uint32_t kDepthEnable = 1 << 1;
 constexpr uint32_t kDepthWrite = 1 << 2;
+constexpr uint32_t kStencilWriteMask = 0xFF << 16;
+constexpr uint32_t kStencilOperations = 0xFF8FF800;  // What fail, pass and depth fail do, on both faces. All zero is keep.
 constexpr uint32_t kBlendDestinationShift = 8;
 constexpr uint32_t kBlendFactorMask = 0x1F;
 constexpr uint32_t kBlendFactorZero = 0;
@@ -677,6 +680,11 @@ bool WritesDepth(const BakedDraw& draw) {
   return (draw.depth_control & kDepthEnable) && (draw.depth_control & kDepthWrite);
 }
 
+// A draw with no colour or depth can still leave a mark. Tunnels keep the sea out by writing stencil.
+bool WritesStencil(const BakedDraw& draw) {
+  return (draw.depth_control & kStencilEnable) && (draw.depth_control & kStencilOperations) && (draw.stencil_front & kStencilWriteMask);
+}
+
 bool IsBlended(const BakedDraw& draw) {
   const uint32_t source_factor = draw.blend_control & kBlendFactorMask;
   const uint32_t destination_factor = (draw.blend_control >> kBlendDestinationShift) & kBlendFactorMask;
@@ -863,9 +871,13 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
             continue;
           }
         }
-        if (!WritesDepth(draw) && run.targets.color) {
+        if (!WritesDepth(draw) && !WritesStencil(draw) && run.targets.color) {
           if (WritesNoColor(draw)) {
             ++g_totals.no_color_draws;
+            if (g_dump) {
+              *g_dump << fmt::format("N vs {} ps {:08X} {} prim {} n {} edram {} mode {:X} depth {:08X} st {:06X} back {:06X} mask {:X}\n", draw.vertex_shader_dwords, draw.pixel_shader, draw.pixel_shader_dwords,
+                                     draw.initiator & 0x3F, draw.initiator >> 16, draw.edram_mode, draw.mode_control, draw.depth_control, draw.stencil_front, draw.stencil_back, draw.color_mask);
+            }
             continue;
           }
           if (IsBlended(draw) && pixel.handle < 0 && !g_debug_ids) {
@@ -938,7 +950,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
           std::string slots;
           const auto word = [](uint32_t value) { return std::bit_cast<float>(value); };
           std::string pc;
-          for (int i = 0; i < 12; ++i) {
+          for (int i = 0; i < 96; ++i) {
             pc += fmt::format(" {:.3f}", word(g_constants[1024 + i]));
           }
           *g_dump << "PC" << pc << "\n";
