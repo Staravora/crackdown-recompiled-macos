@@ -444,7 +444,7 @@ Results, rooftop, Metal beside the emulator. Encode and GPU are the render threa
 | GPU per frame | 3 ms | 8.6 ms |
 | Shader code copy per frame | 1 to 2.3 ms | not measured |
 
-Still missing: 6 shaders compiled into the executable, used by the menus (34 draws a frame on the rooftop), scissor, stencil-only draws, MSAA. Water isn't traced.
+Still missing: 6 shaders compiled into the executable, used by the menus and maybe more (34 draws a frame by day and 207 at night on the rooftop), scissor, stencil-only draws, MSAA. Water isn't traced.
 
 Three things about the Xenos that the translated shaders don't carry, and that took the longest to see:
 
