@@ -80,6 +80,9 @@ constexpr uint32_t kMaxShaderDwords = 1 << 14;
 constexpr uint32_t kMaxTargetSize = 4096;
 
 constexpr uint32_t kSourceAutoIndex = 2;
+constexpr uint32_t kEdramDepthOnly = 5;
+constexpr uint32_t kAluExport = 1 << 15;
+constexpr uint32_t kAluWriteMasks = 0xFF0000;
 constexpr uint32_t kPrimitiveTriangleList = 4;
 constexpr uint32_t kPrimitiveTriangleFan = 5;
 constexpr uint32_t kPrimitiveTriangleStrip = 6;
@@ -186,6 +189,7 @@ rex::memory::Memory* g_memory = nullptr;
 std::filesystem::path g_path;
 std::filesystem::path g_shader_dir;
 std::unordered_map<std::string, std::vector<uint32_t>> g_manifest;
+std::unordered_map<std::string, std::string> g_loose_manifest;
 // By address and size. -1 means looked at and no use.
 std::unordered_map<uint64_t, int> g_vertex_shaders;
 struct PixelSlot {
@@ -242,9 +246,14 @@ uint32_t Word(const uint8_t* code, uint32_t dword) {
   return std::byteswap(value);
 }
 
-// Each exec block's vertex fetches, as addresses. Matches fetch_blocks in tools/shader-trial/pull_vertices.py.
-std::vector<std::vector<uint32_t>> FetchBlocks(const std::vector<uint32_t>& words) {
-  std::vector<std::vector<uint32_t>> blocks;
+struct Instruction {
+  uint32_t at;
+  bool fetch;
+};
+
+// Each exec block's instructions. Matches exec_blocks in tools/shader-trial/pull_vertices.py.
+std::vector<std::vector<Instruction>> ExecBlocks(const std::vector<uint32_t>& words) {
+  std::vector<std::vector<Instruction>> blocks;
   const uint32_t dwords = uint32_t(words.size());
   uint32_t first_instruction = dwords / 3;
   for (uint32_t pair = 0; pair < first_instruction && pair * 3 + 2 < dwords; ++pair) {
@@ -258,16 +267,30 @@ std::vector<std::vector<uint32_t>> FetchBlocks(const std::vector<uint32_t>& word
       }
       const uint32_t address = flow_low & 0xFFF, count = (flow_low >> 12) & 7, sequence = (flow_low >> 16) & 0xFFF;
       first_instruction = std::min(first_instruction, address);
-      std::vector<uint32_t> fetches;
+      std::vector<Instruction> block;
       for (uint32_t i = 0; i < count; ++i) {
-        const uint32_t at = address + i;
-        if (((sequence >> (i * 2)) & 1) && at * 3 + 2 < dwords && (words[at * 3] & 0x1F) == 0) {
-          fetches.push_back(at);
+        if ((address + i) * 3 + 2 < dwords) {
+          block.push_back({address + i, ((sequence >> (i * 2)) & 1) != 0});
         }
       }
-      if (!fetches.empty()) {
-        blocks.push_back(std::move(fetches));
+      blocks.push_back(std::move(block));
+    }
+  }
+  return blocks;
+}
+
+// Each exec block's vertex fetches, as addresses.
+std::vector<std::vector<uint32_t>> FetchBlocks(const std::vector<uint32_t>& words) {
+  std::vector<std::vector<uint32_t>> blocks;
+  for (const std::vector<Instruction>& block : ExecBlocks(words)) {
+    std::vector<uint32_t> fetches;
+    for (const Instruction& instruction : block) {
+      if (instruction.fetch && (words[instruction.at * 3] & 0x1F) == 0) {
+        fetches.push_back(instruction.at);
       }
+    }
+    if (!fetches.empty()) {
+      blocks.push_back(std::move(fetches));
     }
   }
   return blocks;
@@ -283,7 +306,7 @@ std::vector<uint32_t> WordsOf(const uint8_t* code, uint32_t dwords) {
 
 // Blanks what binding patches and sorts each block's fetches, which binding reorders by offset, so a live shader hashes
 // like its shipped form. Matches masked_code in tools/shader-trial/pull_vertices.py.
-std::string MaskedKey(const uint8_t* code, uint32_t dwords) {
+std::vector<uint32_t> MaskedWords(const uint8_t* code, uint32_t dwords) {
   std::vector<uint32_t> words = WordsOf(code, dwords);
   for (const std::vector<uint32_t>& fetches : FetchBlocks(words)) {
     std::vector<std::array<uint32_t, 3>> blanked;
@@ -295,11 +318,34 @@ std::string MaskedKey(const uint8_t* code, uint32_t dwords) {
       std::copy(blanked[i].begin(), blanked[i].end(), words.begin() + fetches[i] * 3);
     }
   }
+  return words;
+}
+
+std::string KeyOf(std::vector<uint32_t> words) {
   for (uint32_t& word : words) {
     word = std::byteswap(word);
   }
-  const std::string_view bytes(reinterpret_cast<const char*>(words.data()), size_t(dwords) * 4);
+  const std::string_view bytes(reinterpret_cast<const char*>(words.data()), words.size() * 4);
   return trg::update::Sha256Hex(bytes).substr(0, 16);
+}
+
+std::string MaskedKey(const uint8_t* code, uint32_t dwords) {
+  return KeyOf(MaskedWords(code, dwords));
+}
+
+// Binding turns off outputs the pixel shader doesn't read, which leaves instructions writing nothing, so this one blanks
+// exports as well. It's the fallback for a shader that doesn't match. Matches loose_code in pull_vertices.py.
+std::string LooseKey(const uint8_t* code, uint32_t dwords) {
+  std::vector<uint32_t> words = MaskedWords(code, dwords);
+  for (const std::vector<Instruction>& block : ExecBlocks(words)) {
+    for (const Instruction& instruction : block) {
+      const uint32_t word = words[instruction.at * 3];
+      if (!instruction.fetch && ((word & kAluExport) || !(word & kAluWriteMasks))) {
+        std::fill_n(words.begin() + instruction.at * 3, 3, 0);
+      }
+    }
+  }
+  return KeyOf(std::move(words));
 }
 
 // Which of the fetched x, y, z, w, 0 or 1 each lane of input should hold, so that a translated shader, which swizzles
@@ -401,7 +447,13 @@ int FindVertexShader(MetalDevice& device, const BakedDraw& draw, const Run& run)
   }
   int handle = -1;
   {
-    const std::string masked = MaskedKey(code, draw.vertex_shader_dwords);
+    std::string masked = MaskedKey(code, draw.vertex_shader_dwords);
+    if (!g_manifest.contains(masked)) {
+      const auto loose = g_loose_manifest.find(LooseKey(code, draw.vertex_shader_dwords));
+      if (loose != g_loose_manifest.end()) {
+        masked = loose->second;
+      }
+    }
     const auto manifest = g_manifest.find(masked);
     if (manifest == g_manifest.end()) {
       ++g_totals.shaders_missing;
@@ -620,8 +672,9 @@ bool IsBlended(const BakedDraw& draw) {
   return source_factor != kBlendFactorOne || destination_factor != kBlendFactorZero;
 }
 
+// An occlusion query draws in depth-only mode, whatever pixel shader and mask are left over from the draw before.
 bool WritesNoColor(const BakedDraw& draw) {
-  return (draw.color_mask & kColorMaskFirstTarget) == 0;
+  return (draw.color_mask & kColorMaskFirstTarget) == 0 || draw.edram_mode == kEdramDepthOnly;
 }
 
 // A depth test that passes on greater-or-equal means reversed depth, which clears to 0.
@@ -874,7 +927,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         }
         ++g_debug_id;
         out.blend_control = draw.blend_control;
-        out.color_mask = draw.color_mask;
+        out.color_mask = WritesNoColor(draw) ? 0 : draw.color_mask;
         out.alpha_test = alpha_test;
         out.viewport = viewport;
         out.depth_control = g_debug_no_stencil ? draw.depth_control & ~1u : draw.depth_control;
@@ -965,6 +1018,11 @@ void ReadManifest() {
     while (row >> address) {
       addresses.push_back(address);
     }
+  }
+  std::ifstream loose(g_shader_dir / "loose-manifest.txt");
+  std::string loose_key, key;
+  while (loose >> loose_key >> key) {
+    g_loose_manifest[loose_key] = key;
   }
   std::ifstream pixels(g_shader_dir / "pixel-manifest.txt");
   while (std::getline(pixels, line)) {

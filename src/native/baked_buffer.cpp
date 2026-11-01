@@ -289,6 +289,7 @@ size_t BakedLibrary::DecodeWords(const uint32_t* words, size_t count, BakedList&
         draw.stencil_back = reg(kStencilBack);
         draw.mode_control = reg(kMode);
         draw.viewport_control = reg(kViewportControl);
+        draw.edram_mode = reg(kModeControl) & 7;
         std::copy_n(&reg(kPolygonOffset), 4, draw.polygon_offset);
         draw.surface_info = reg(kSurfaceInfo);
         draw.color_info = reg(kColorInfo);

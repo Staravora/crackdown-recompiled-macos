@@ -55,3 +55,5 @@
 | 2026-11-01 | Join shader stages by position, not semantic name. | That's what the Xenos does, and the depth pass's names don't agree. Names only ever worked where they happened to line up. | active |
 | 2026-11-01 | Carry a fetch's biased channels in the top four bits of the texture descriptor. | No Metal format does value * 2 - 1, the translator ignores it, and the shader already reads that table for every fetch. | active |
 | 2026-11-01 | Apply the game's gamma ramp as Metal's last pass. | The emulator does the same at swap, and it's the game's look. Applying it to `show=` views would hide what targets really hold. | active |
+| 2026-11-01 | Match vertex shaders with stripped outputs through a second, looser hash, used only after the exact one misses. | Binding turns off outputs a pixel shader doesn't read. Blanking exports in the main hash would merge shaders that really differ. | active |
+| 2026-11-01 | Leave D3D's own helper shaders out of extraction. | They have no constant table, so the translator can't read them, and nothing on the game's path has needed them. | active |

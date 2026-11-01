@@ -8,7 +8,8 @@ prebuilt_shadercache.dat. The .bin, .spk and .bsh packs keep all virtual section
 physical ones, so the two get joined here. Output is keyed by a hash of the
 ucode, because the same shader appears in several packs. The HUD and menus also use a few shaders
 compiled into the executable, which is compressed on disk, so a copy of its image taken from memory
-is a source too: run the game with CRACKDOWN_DUMP_IMAGE set to a path.
+is a source too: run the game with CRACKDOWN_DUMP_IMAGE set to a path. Its containers with no
+constant table are D3D's own helpers, which the translator can't read, so they're left out.
 """
 import hashlib
 import json
@@ -73,6 +74,8 @@ def main():
         data = open(os.path.join(game, name), "rb").read()
         count = fresh = 0
         for virtual, physical in reader(data):
+            if not struct.unpack_from(">I", virtual, 16)[0]:
+                continue
             code = ucode(virtual, physical)
             key = hashlib.sha256(code).hexdigest()[:16]
             count += 1

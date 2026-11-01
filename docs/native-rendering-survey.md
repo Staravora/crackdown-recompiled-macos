@@ -444,7 +444,7 @@ Results, rooftop, Metal beside the emulator. Encode and GPU are the render threa
 | GPU per frame | 3 ms | 8.6 ms |
 | Shader code copy per frame | 1 to 2.3 ms | not measured |
 
-Still missing: 6 shaders compiled into the executable, used by the menus and maybe more (34 draws a frame by day and 207 at night on the rooftop), scissor, stencil-only draws, MSAA. Water isn't traced.
+Still missing: scissor, stencil-only draws, MSAA. Water isn't traced. Every shader on the rooftop run is matched.
 
 Three things about the Xenos that the translated shaders don't carry, and that took the longest to see:
 
@@ -452,7 +452,9 @@ Three things about the Xenos that the translated shaders don't carry, and that t
 - **Fetches can bias.** A fetch constant can ask for value * 2 - 1 per channel. The normal buffer depends on it.
 - **The display has a gamma ramp.** The game loads 256 entries through the ring, and they're a large part of its look.
 
-Binding also sorts a block's vertex fetches by offset, so a live shader can differ from its shipped form by more than its blanked fields.
+Binding also sorts a block's vertex fetches by offset and turns off outputs the pixel shader doesn't read, so a live shader can differ from its shipped form by more than its blanked fields.
+
+The game runs about 190 occlusion queries a frame, as depth-only quads between sample-count events. Metal leaves them out for now, and the emulator still answers them.
 
 ## Free camera (2026-10-31)
 

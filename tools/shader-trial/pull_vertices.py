@@ -31,6 +31,8 @@ USAGES = {0: "Position", 1: "BlendWeight", 2: "BlendIndices", 3: "Normal", 4: "P
           13: "Sample"}
 
 EXEC_OPCODES = {1, 2, 3, 4, 5, 6, 13, 14}
+ALU_EXPORT = 1 << 15
+ALU_WRITE_MASKS = 0xFF0000
 
 # A draw of screen pixels skips the viewport, which Metal can't, so shadow mode sets these to turn pixels into clip space.
 SCREEN_DEFINES = """
@@ -168,8 +170,8 @@ static float4 pullElement(const device uint* guest, constant uint* fetch, consta
 """
 
 
-def fetch_blocks(words):
-    """Each exec block's vertex fetches, as lists of addresses."""
+def exec_blocks(words):
+    """Each exec block's instructions, as lists of (address, whether it's a fetch)."""
     blocks = []
     first_instruction = len(words) // 3
     pair = 0
@@ -180,12 +182,15 @@ def fetch_blocks(words):
                 continue
             address, count, sequence = flow_low & 0xFFF, (flow_low >> 12) & 7, (flow_low >> 16) & 0xFFF
             first_instruction = min(first_instruction, address)
-            fetches = [address + i for i in range(count) if (sequence >> (i * 2)) & 1 and (address + i) * 3 + 2 < len(words)
-                       and words[(address + i) * 3] & 0x1F == 0]
-            if fetches:
-                blocks.append(fetches)
+            blocks.append([(address + i, (sequence >> (i * 2)) & 1 != 0) for i in range(count) if (address + i) * 3 + 2 < len(words)])
         pair += 1
     return blocks
+
+
+def fetch_blocks(words):
+    """Each exec block's vertex fetches, as lists of addresses."""
+    blocks = [[at for at, fetch in block if fetch and words[at * 3] & 0x1F == 0] for block in exec_blocks(words)]
+    return [block for block in blocks if block]
 
 
 def masked_code(code):
@@ -195,6 +200,17 @@ def masked_code(code):
         blanked = sorted((words[at * 3] & 0xC00FFFFF, words[at * 3 + 1] & 0x80000000, 0) for at in fetches)
         for at, fetch in zip(fetches, blanked):
             words[at * 3 : at * 3 + 3] = fetch
+    return struct.pack(f">{len(words)}I", *words)
+
+
+def loose_code(code):
+    """masked_code with exports blanked too, for finding a shader whose unused outputs binding has turned off. Those
+    instructions come out writing nothing, so they're blanked as well. Matches LooseKey in shadow.cpp."""
+    words = list(struct.unpack(f">{len(code) // 4}I", masked_code(code)))
+    for block in exec_blocks(words):
+        for at, fetch in block:
+            if not fetch and (words[at * 3] & ALU_EXPORT or not words[at * 3] & ALU_WRITE_MASKS):
+                words[at * 3 : at * 3 + 3] = 0, 0, 0
     return struct.pack(f">{len(words)}I", *words)
 
 
@@ -304,6 +320,7 @@ def main():
     os.makedirs(work, exist_ok=True)
     jobs = []
     manifest = {}
+    loose_keys = {}
     report = {"bad": {}, "same_masked_key": 0}
     for path in sorted(glob.glob(os.path.join(translated, "vs_*.metal"))):
         name = os.path.basename(path)[:-6]
@@ -314,6 +331,7 @@ def main():
             report["bad"][name] = str(error)
             continue
         key = hashlib.sha256(masked_code(code)).hexdigest()[:16]
+        loose_keys.setdefault(hashlib.sha256(loose_code(code)).hexdigest()[:16], key)
         if key in manifest:
             report["same_masked_key"] += 1
             continue
@@ -326,6 +344,9 @@ def main():
     with open(os.path.join(output, "manifest.txt"), "w") as out:
         for key, addresses in sorted(manifest.items()):
             out.write(" ".join([key] + [str(value) for value in addresses]) + "\n")
+    with open(os.path.join(output, "loose-manifest.txt"), "w") as out:
+        for loose, key in sorted(loose_keys.items()):
+            out.write(f"{loose} {key}\n")
     with ThreadPoolExecutor(6) as pool:
         codes = list(pool.map(compile_one, jobs))
     report["compiled"] = codes.count(0)
