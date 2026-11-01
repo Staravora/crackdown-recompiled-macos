@@ -205,8 +205,10 @@ struct PixelSlot {
 struct PixelShader {
   int handle = -1;
   std::vector<PixelSlot> slots;
+  bool reads_whole_picture = false;  // By pixel position, so it wants joined-up textures even when drawn for one tile.
 };
 std::unordered_map<std::string, std::vector<PixelSlot>> g_pixel_manifest;
+std::set<std::string> g_screen_shaders;
 std::unordered_map<uint64_t, PixelShader> g_pixel_shaders;
 std::unique_ptr<TextureCache> g_textures;
 const PixelShader g_no_pixel_shader;
@@ -510,6 +512,7 @@ const PixelShader& FindPixelShader(MetalDevice& device, const BakedDraw& draw) {
       std::string error;
       shader.handle = device.AddPixelShader(g_shader_dir / ("ps_" + name + ".metallib"), error);
       shader.slots = manifest->second;
+      shader.reads_whole_picture = g_screen_shaders.contains(name);
       if (shader.handle < 0) {
         REXLOG_ERROR("Native shadow: pixel shader {}: {}", name, error);
       } else {
@@ -1004,7 +1007,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
             const uint32_t* fetch = fetch_constants + size_t(slot.slot) * kFetchConstantDwords;
             // 3D means a stack of depth maps. The tables start out pointing at the dummies.
             if (slot.slot < textures.size()) {
-              const int texture = slot.kind == 1 ? g_textures->FindStack(fetch) : g_textures->FindTexture(fetch, tile);
+              const int texture = slot.kind == 1 ? g_textures->FindStack(fetch) : g_textures->FindTexture(fetch, pixel.reads_whole_picture ? -1 : tile);
               textures[texture_count++] = texture;
               const uint32_t entry = uint32_t(texture) | (slot.kind == 0 ? TextureCache::BiasedChannels(fetch) << kBiasShift : 0);
               std::memcpy(shared + kTextureTableOffsets[slot.kind] + slot.slot * 4, &entry, sizeof(entry));
@@ -1072,6 +1075,10 @@ void ReadManifest() {
     while (row >> slot) {
       slots.push_back(slot);
     }
+  }
+  std::ifstream screen_shaders(g_shader_dir / "screen-shaders.txt");
+  while (screen_shaders >> line) {
+    g_screen_shaders.insert(line);
   }
   std::ifstream pixels(g_shader_dir / "pixel-manifest.txt");
   while (std::getline(pixels, line)) {

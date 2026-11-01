@@ -31,6 +31,7 @@ constexpr uint32_t kPictureWidth = 1280;
 constexpr uint32_t kPictureHeight = 720;
 constexpr uint32_t kTileHeight = 484;
 constexpr uint32_t kCubeFaces = 6;
+constexpr uint32_t kSecondTilePages = (kPictureWidth * 480 * 4) >> 12;
 
 // Bumped each time a page changes, so a texture can tell by adding up its pages. Written from the page watch's fault
 // handler, so nothing here can take a lock.
@@ -190,6 +191,25 @@ std::array<uint32_t, 5> ResolveKeyOf(const xenos::xe_gpu_texture_fetch_t& fetch,
           DecodedHoldsOneTile(fetch) ? uint32_t(tile + 1) : 0};
 }
 
+// Light cones read depth through a window one tile high, which starts at its tile. It's the whole picture's depth here.
+template <typename Map>
+auto FindResolved(Map& resolved, const xenos::xe_gpu_texture_fetch_t& fetch, int tile) -> decltype(&resolved.begin()->second) {
+  std::array<uint32_t, 5> key = ResolveKeyOf(fetch, tile);
+  const bool window = IsDepth(xenos::TextureFormat(uint32_t(fetch.format))) && key[2] == kPictureWidth && key[3] == kTileHeight;
+  if (window) {
+    key[3] = kPictureHeight;
+  }
+  for (const uint32_t first_row : {0u, window ? kSecondTilePages : 0u}) {
+    std::array<uint32_t, 5> at = key;
+    at[0] -= first_row;
+    const auto found = resolved.find(at);
+    if (found != resolved.end() && found->second.live) {
+      return &found->second;
+    }
+  }
+  return nullptr;
+}
+
 uint64_t HashFetch(const uint32_t* fetch) {
   uint64_t hash = 0xCBF29CE484222325ull;
   for (size_t i = 0; i < kFetchDwords; ++i) {
@@ -301,8 +321,7 @@ void TextureCache::ForgetResolve(const uint32_t* fetch_dwords) {
 bool TextureCache::HasResolve(const uint32_t* fetch_dwords) const {
   xenos::xe_gpu_texture_fetch_t fetch;
   std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
-  const auto found = resolved_.find(ResolveKeyOf(fetch, -1));
-  return found != resolved_.end() && found->second.live;
+  return FindResolved(resolved_, fetch, -1) != nullptr;
 }
 
 int TextureCache::FindStack(const uint32_t* fetch_dwords) {
@@ -339,9 +358,9 @@ int TextureCache::FindTexture(const uint32_t* fetch, int tile) {
   {
     xenos::xe_gpu_texture_fetch_t decoded;
     std::memcpy(&decoded, fetch, sizeof(decoded));
-    const auto resolved = resolved_.find(ResolveKeyOf(decoded, tile));
-    if (decoded.type == xenos::FetchConstantType::kTexture && resolved != resolved_.end() && resolved->second.live) {
-      Resolved& entry = resolved->second;
+    Resolved* resolved = decoded.type == xenos::FetchConstantType::kTexture ? FindResolved(resolved_, decoded, tile) : nullptr;
+    if (resolved) {
+      Resolved& entry = *resolved;
       const bool gamma = decoded.sign_x == xenos::TextureSign::kGamma;
       const uint32_t view = uint32_t(decoded.swizzle) | uint32_t(gamma) << 12;
       const auto found = entry.views.find(view);

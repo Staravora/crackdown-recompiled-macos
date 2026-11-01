@@ -10,7 +10,8 @@ translated/ is the hash of their live code too.
 
 Scene shaders read the shadow mask at pixel position / (1280, 484), the size of one tile, which is
 right on the Xenos, where positions restart at each tile. Here one pass draws the whole picture and
-the mask is joined up to match, so that constant becomes 1 / 720.
+the mask is joined up to match, so that constant becomes 1 / 720. screen-shaders.txt lists those
+shaders, because even when one is drawn for a single tile it has to read the joined-up textures.
 
 A fetch constant can ask for a channel to come back as value * 2 - 1, which no Metal format does and
 the translator doesn't do. The normal buffer depends on it. So the top four bits of a texture's
@@ -79,17 +80,22 @@ def main():
     work = os.path.join(output, "source")
     os.makedirs(work, exist_ok=True)
     manifest = []
+    screen = []
     jobs = []
     for path in sorted(glob.glob(os.path.join(translated, "ps_*.metal"))):
         name = os.path.basename(path)[:-6]
         source = open(path, errors="ignore").read()
         slots = slots_of(source)
+        if ONE_OVER_TILE_HEIGHT in source[source.find("shaderMain"):]:
+            screen.append(name[3:])
         manifest.append(" ".join([name[3:]] + [f"{slot} {kind}" for slot, kind in slots]))
         target = os.path.join(work, name + ".metal")
         open(target, "w").write(patched(source))
         jobs.append((target, os.path.join(output, name + ".metallib")))
     with open(os.path.join(output, "pixel-manifest.txt"), "w") as out:
         out.write("\n".join(manifest) + "\n")
+    with open(os.path.join(output, "screen-shaders.txt"), "w") as out:
+        out.write("\n".join(screen) + "\n")
     with ThreadPoolExecutor(6) as pool:
         codes = list(pool.map(compile_one, jobs))
     print(json.dumps({"shaders": len(jobs), "failed": [jobs[i][0] for i, code in enumerate(codes) if code][:8]}))
