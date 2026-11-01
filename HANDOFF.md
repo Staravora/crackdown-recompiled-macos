@@ -1,5 +1,14 @@
 # Session handoff
 
+## 2026-11-01 (evening) — Third drive
+- **Pushed** through `92b7d37`, on Bruce's word. Later commits are local.
+- **Bruce's drive:** orbs better but still wrong, spawn effect wrong in both renderers, an orb visible in Metal that the emulator doesn't show. Race markers, Agency spotlights and headlights missing. Shadows occasionally differ.
+- **Beams:** a regression from the fetch rework. `PullElements` reset slot and stride per exec block, but a mini fetch inherits from the last full fetch, even in an earlier block. Vertex shaders 417 and 510 dwords came out `slot 0 stride 0` and read the wrong memory. A beam seen from the rooftop went from thin edges to a soft column. Grep the log for `slot 0 stride 0`, it should be 0.
+- **Ruled out for the missing effects:** 3D textures (only the shadow stack uses them), inline pixel shaders (only opaque shadow draws), and dropped draws. Bruce's drive reported 0 transparent, 0 other-primitive and 0 no-shader draws, in the last window of each run.
+- **Shadows, unresolved:** the stack is point sampled, which matches, and shadow casters aren't alpha tested. Their inline pixel shaders are dropped by the baked decoder, so a caster that kills pixels in its shader would come out solid. Next thing to check. Depth-only targets do now run a pixel shader when a draw alpha tests.
+- **Debugging the main target:** it's cleared at the end of the scene now, so stop the frame first, with `show=<target>,stop_ps=1B152F80`. Target numbers change between runs.
+- **Not verified:** whether orbs, markers, spotlights and headlights are fixed. They need a drive.
+
 ## 2026-11-01 (late afternoon) — Second drive
 - **Bruce's drive:** menus are right in Metal and wrong in the emulator, whose rows are only lines. Some lighting looks better each way. Orbs, beams and spotlights were wrong, plus a new overlay of green floors and red walls at some angles, which looking away or firing could change.
 - **Overlay:** those colours are the normal buffer. A resolve's clear waited for the next draw on its target, so with no lights in view the light layer kept its normals and tinted the frame. A muzzle flash is a light, which explains the gun. Reproduced with `skip_ps=` on both light shaders. Clears now run in place, limited to their rectangle (`MetalDevice::ClearRect`), and a null rect or a first tile stops at the rows the next tile needs.

@@ -835,7 +835,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         }
         const bool alpha_test = (draw.color_control & kAlphaTestEnable) != 0;
         g_totals.alpha_tested_draws += alpha_test;
-        const PixelShader& found_pixel = run.targets.color ? FindPixelShader(device, draw) : g_no_pixel_shader;
+        const PixelShader& found_pixel = run.targets.color || alpha_test ? FindPixelShader(device, draw) : g_no_pixel_shader;
         if (g_debug_skip_blended && run.targets.color && IsBlended(draw)) {
           continue;
         }

@@ -760,7 +760,7 @@ class MetalDeviceImpl final : public MetalDevice {
   void Draw(const MetalDraw& draw) override {
     const Pipeline& pipeline = pipelines_[size_t(draw.vertex_shader)];
     id<MTLRenderPipelineState> state = pass_has_color_ ? pipeline.state : pipeline.depth_only;
-    if (pass_has_color_ && draw.pixel_shader >= 0) {
+    if (draw.pixel_shader >= 0) {
       state = ShadedPipeline(draw) ?: state;
     }
     if (state != current_pipeline_) {
@@ -869,11 +869,11 @@ class MetalDeviceImpl final : public MetalDevice {
     std::array<id<MTLFunction>, 2> functions;
   };
 
-  using ShadedKey = std::tuple<int, int, uint32_t, uint32_t, bool>;
+  using ShadedKey = std::tuple<int, int, uint32_t, uint32_t, bool, bool>;
   using DepthKey = std::array<uint32_t, 3>;
 
   id<MTLRenderPipelineState> ShadedPipeline(const MetalDraw& draw) {
-    const ShadedKey key = {draw.vertex_shader, draw.pixel_shader, draw.blend_control, draw.color_mask & 0xF, draw.alpha_test};
+    const ShadedKey key = {draw.vertex_shader, draw.pixel_shader, draw.blend_control, draw.color_mask & 0xF, draw.alpha_test, pass_has_color_};
     const auto found = shaded_pipelines_.find(key);
     if (found != shaded_pipelines_.end()) {
       return found->second;
@@ -883,11 +883,14 @@ class MetalDeviceImpl final : public MetalDevice {
     descriptor.fragmentFunction = pixel_shaders_[size_t(draw.pixel_shader)].functions[draw.alpha_test];
     descriptor.depthAttachmentPixelFormat = kDepthFormat;
     descriptor.stencilAttachmentPixelFormat = kDepthFormat;
+    // A shadow map has no colour, but a cut-out's pixel shader still decides which pixels cast.
     MTLRenderPipelineColorAttachmentDescriptor* color = descriptor.colorAttachments[0];
-    color.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    color.writeMask = ((draw.color_mask & 1) ? MTLColorWriteMaskRed : 0) | ((draw.color_mask & 2) ? MTLColorWriteMaskGreen : 0) |
-                      ((draw.color_mask & 4) ? MTLColorWriteMaskBlue : 0) | ((draw.color_mask & 8) ? MTLColorWriteMaskAlpha : 0);
-    if (draw.blend_control != kOpaqueBlend) {
+    if (pass_has_color_) {
+      color.pixelFormat = MTLPixelFormatBGRA8Unorm;
+      color.writeMask = ((draw.color_mask & 1) ? MTLColorWriteMaskRed : 0) | ((draw.color_mask & 2) ? MTLColorWriteMaskGreen : 0) |
+                        ((draw.color_mask & 4) ? MTLColorWriteMaskBlue : 0) | ((draw.color_mask & 8) ? MTLColorWriteMaskAlpha : 0);
+    }
+    if (pass_has_color_ && draw.blend_control != kOpaqueBlend) {
       color.blendingEnabled = YES;
       color.sourceRGBBlendFactor = BlendFactorOf(draw.blend_control & 0x1F);
       color.rgbBlendOperation = BlendOperationOf((draw.blend_control >> 5) & 7);
