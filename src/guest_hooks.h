@@ -46,6 +46,7 @@ void CensusBeginVertices(PPCContext&, uint8_t*, GuestFunction original);
 void CensusBeginIndexedVertices(PPCContext&, uint8_t*, GuestFunction original);
 void CensusDrawVertices(PPCContext&, uint8_t*, GuestFunction original);
 void CensusDrawIndexed(PPCContext&, uint8_t*, GuestFunction original);
+void RingSegmentEnd(PPCContext&, uint8_t*, GuestFunction original);
 void CensusClear(PPCContext&, uint8_t*, GuestFunction original);
 void CensusResolve(PPCContext&, uint8_t*, GuestFunction original);
 void CensusBeginTiling(PPCContext&, uint8_t*, GuestFunction original);

@@ -69,6 +69,7 @@ std::atomic<int> g_look_y{0};
 std::atomic<int> g_jump_to{0};
 std::atomic<int> g_save_to{0};
 std::atomic<bool> g_forced{false};
+std::optional<Pose> g_start;
 
 rex::ui::Window* g_window = nullptr;
 uint8_t* g_membase = nullptr;
@@ -76,7 +77,6 @@ std::filesystem::path g_spots_path;
 
 // The rest is the camera thread's.
 std::array<std::optional<Pose>, kSpots> g_spots;
-std::optional<Pose> g_start;
 std::optional<Pose> g_pose;
 std::array<uint8_t, kPoseBytes> g_game_pose{};
 uint32_t g_overridden_camera = 0;
@@ -152,7 +152,8 @@ class Listener final : public rex::ui::WindowInputListener {
   }
 
   void OnMouseMove(rex::ui::MouseEvent& e) override {
-    if (e.target() == g_window && Wanted()) {
+    // A scripted run holds its spot, so the same flags give the same picture.
+    if (e.target() == g_window && Wanted() && !g_start) {
       g_look_x.fetch_add(int(e.dx()), std::memory_order_relaxed);
       g_look_y.fetch_add(int(e.dy()), std::memory_order_relaxed);
     }

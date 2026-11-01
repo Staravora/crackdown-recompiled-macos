@@ -2,7 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace crackdown::native {
@@ -67,6 +69,7 @@ struct DecodeStats {
   uint64_t unknown_packets = 0;
   uint64_t truncated_packets = 0;
   uint64_t dropped_literals = 0;
+  uint64_t ring_desyncs = 0;
 };
 
 class BakedLibrary {
@@ -77,14 +80,17 @@ class BakedLibrary {
   // Decodes one list of host-order packets. Keep the result: this is the slow path, and it interns as it goes.
   BakedList Decode(const uint32_t* words, size_t count);
 
-  // Reads one direct draw from the ring into `list`, as its only draw. Unlike a list, the ring holds only what changed,
-  // so state carries over from the call before. Returns false if the words held no draw.
-  bool DecodeNext(const uint32_t* words, size_t count, BakedList& list);
+  // Reads the next stretch of D3D's ring, which holds only what changed, so state carries over from the call before.
+  // Everything the GPU would do to its registers is done here, including loads from `physical_memory`, which is guest
+  // physical memory. Calls on_draw for each draw, with its 32 fetch constants, and returns how many words it used: a packet
+  // that doesn't fit is left for next time.
+  using RingDraw = std::function<void(const BakedDraw& draw, const uint32_t* fetch_constants)>;
+  size_t DecodeRing(const uint32_t* words, size_t count, const uint8_t* physical_memory, const RingDraw& on_draw);
 
-  // Whether the last DecodeNext loaded a vertex shader.
-  bool vertex_shader_loaded() const { return vertex_shader_loaded_; }
+  // Whether a vertex shader has loaded since this was last asked.
+  bool TakeVertexShaderLoaded() { return std::exchange(vertex_shader_loaded_, false); }
 
-  // The vertex constants DecodeNext has seen, as the GPU would hold them.
+  // The vertex constants DecodeRing has seen, as the GPU would hold them.
   const uint32_t* vertex_constants() const { return registers_.data() + (kFloatConstantRegister - kRegisterBase); }
 
   // The 32 fetch constants of a texture set, six dwords each.
@@ -100,13 +106,17 @@ class BakedLibrary {
   std::unordered_map<uint64_t, uint32_t> texture_sets_;
   std::unordered_map<uint64_t, uint32_t> dynamic_states_;
   std::vector<uint32_t> texture_set_data_;
-  void DecodeWords(const uint32_t* words, size_t count, BakedList& list, bool intern_textures);
+  size_t DecodeWords(const uint32_t* words, size_t count, BakedList& list, const uint8_t* physical_memory,
+                     const RingDraw* on_draw);
   void AddLiteral(const uint32_t* data);
+  void SetConstants(const uint32_t* data, uint32_t body);
+  void LoadConstants(const uint32_t* data, const uint8_t* physical_memory);
 
   std::vector<uint32_t> registers_;
   BakedDraw state_{};
   bool literals_open_[2] = {};
   bool vertex_shader_loaded_ = false;
+  uint64_t mask_ = ~0ull;
   DecodeStats stats_;
 };
 

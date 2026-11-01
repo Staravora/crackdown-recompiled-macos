@@ -13,6 +13,9 @@ constexpr uint32_t kFloatConstants = 0x4000;
 constexpr uint32_t kFetchConstants = 0x4800;
 constexpr uint32_t kStripOfSixteen = 0x00100006;
 
+// Stands in for guest physical memory.
+const uint8_t g_memory[0x10000] = {};
+
 uint32_t RegisterWrite(uint32_t address, uint32_t dwords) {
   return ((dwords - 1) << 16) | address;
 }
@@ -33,6 +36,21 @@ void AddLiterals(std::vector<uint32_t>& words, uint32_t address, uint32_t first_
   words.insert(words.end(), {Packet(0x2F, 3), address, first_dword, 16});
 }
 
+struct RingRead {
+  std::vector<BakedDraw> draws;
+  std::vector<uint32_t> fetch;
+  size_t used = 0;
+};
+
+RingRead ReadRing(BakedLibrary& library, const std::vector<uint32_t>& words, const uint8_t* memory = g_memory) {
+  RingRead read;
+  read.used = library.DecodeRing(words.data(), words.size(), memory, [&](const BakedDraw& draw, const uint32_t* fetch) {
+    read.draws.push_back(draw);
+    read.fetch.assign(fetch, fetch + 192);
+  });
+  return read;
+}
+
 void TestStateCarriesFromOneDrawToTheNext() {
   BakedLibrary library;
   std::vector<uint32_t> first;
@@ -41,21 +59,18 @@ void TestStateCarriesFromOneDrawToTheNext() {
   first.insert(first.end(), {RegisterWrite(kFetchConstants + 6, 1), 0x12345678});
   first.insert(first.end(), {RegisterWrite(kFloatConstants + 4, 1), 0x3F800000});
   AddDraw(first, 0x2000);
-  BakedList list;
-  CHECK(library.DecodeNext(first.data(), first.size(), list));
-  CHECK(library.vertex_shader_loaded());
+  CHECK(ReadRing(library, first).draws.size() == 1);
+  CHECK(library.TakeVertexShaderLoaded());
 
   std::vector<uint32_t> second;
   AddDraw(second, 0x3000);
-  BakedList next;
-  CHECK(library.DecodeNext(second.data(), second.size(), next));
-  CHECK(!library.vertex_shader_loaded());
+  const RingRead next = ReadRing(library, second);
+  CHECK(!library.TakeVertexShaderLoaded());
   CHECK(next.draws.size() == 1);
   CHECK(next.draws[0].index_buffer == 0x3000);
   CHECK(next.draws[0].vertex_shader == 0x1000);
   CHECK(next.draws[0].viewport[0] == 0x44200000);
-  CHECK(next.fetch_data.size() == 192);
-  CHECK(next.fetch_data[6] == 0x12345678);
+  CHECK(next.fetch[6] == 0x12345678);
   CHECK(library.vertex_constants()[4] == 0x3F800000);
 }
 
@@ -70,43 +85,51 @@ void TestAListStartsFromNothing() {
   CHECK(library.Decode(second.data(), second.size()).draws[0].vertex_shader == 0);
 }
 
-void TestOnlyTheLastDrawOfACallIsKept() {
+void TestEveryDrawInAStretchIsSeenInOrder() {
   BakedLibrary library;
   std::vector<uint32_t> words;
   AddDraw(words, 0x2000);
+  words.insert(words.end(), {RegisterWrite(kViewport, 1), 0x44200000});
   AddDraw(words, 0x3000);
-  BakedList list;
-  CHECK(library.DecodeNext(words.data(), words.size(), list));
-  CHECK(list.draws.size() == 1);
-  CHECK(list.draws[0].index_buffer == 0x3000);
-  CHECK(list.draws[0].fetch_constants == 0);
+  const RingRead read = ReadRing(library, words);
+  CHECK(read.draws.size() == 2);
+  CHECK(read.draws[0].index_buffer == 0x2000);
+  CHECK(read.draws[0].viewport[0] == 0);
+  CHECK(read.draws[1].index_buffer == 0x3000);
+  CHECK(read.draws[1].viewport[0] == 0x44200000);
+  CHECK(read.used == words.size());
 }
 
-void TestWordsWithNoDrawGiveNoDraw() {
+void TestAPacketCutOffIsLeftForNextTime() {
   BakedLibrary library;
-  const std::vector<uint32_t> words = {RegisterWrite(kViewport, 1), 0x44200000};
-  BakedList list;
-  CHECK(!library.DecodeNext(words.data(), words.size(), list));
+  std::vector<uint32_t> words;
+  AddDraw(words, 0x2000);
+  const size_t whole = words.size();
+  AddDraw(words, 0x3000);
+  words.resize(words.size() - 2);
+  const RingRead read = ReadRing(library, words);
+  CHECK(read.draws.size() == 1);
+  CHECK(read.used == whole);
 }
 
-void TestVerticesInTheRingStopTheRead() {
+void TestAMisreadRingStopsWithoutWritingRegisters() {
   BakedLibrary library;
   std::vector<uint32_t> first;
   first.insert(first.end(), {RegisterWrite(kViewport, 1), 0x44200000});
   AddDraw(first, 0x2000);
-  BakedList list;
-  CHECK(library.DecodeNext(first.data(), first.size(), list));
+  ReadRing(library, first);
 
   // A float that reads as packet type 1, then one that would be a register write if the read went on.
   std::vector<uint32_t> second = {0x4443D29C, 0, 0, RegisterWrite(kViewport, 1), 0x11111111};
   AddDraw(second, 0x3000);
-  BakedList next;
-  CHECK(!library.DecodeNext(second.data(), second.size(), next));
+  const RingRead stopped = ReadRing(library, second);
+  CHECK(stopped.draws.empty());
+  CHECK(stopped.used == second.size());
+  CHECK(library.stats().ring_desyncs == 1);
 
   std::vector<uint32_t> third;
   AddDraw(third, 0x4000);
-  CHECK(library.DecodeNext(third.data(), third.size(), next));
-  CHECK(next.draws[0].viewport[0] == 0x44200000);
+  CHECK(ReadRing(library, third).draws[0].viewport[0] == 0x44200000);
 }
 
 void TestAShaderKeepsEveryBlockOfLiterals() {
@@ -126,23 +149,40 @@ void TestAShaderKeepsEveryBlockOfLiterals() {
 
 void TestANewShaderReplacesOnlyItsOwnStagesLiterals() {
   BakedLibrary library;
-  std::vector<uint32_t> first;
-  AddLiterals(first, 0x5000, 0x7F0);
-  AddLiterals(first, 0x6000, 0x3F0);
-  AddVertexShader(first, 0x1000, 90);
-  AddDraw(first, 0x2000);
-  BakedList list;
-  CHECK(library.DecodeNext(first.data(), first.size(), list));
+  std::vector<uint32_t> words;
+  AddLiterals(words, 0x5000, 0x7F0);
+  AddLiterals(words, 0x6000, 0x3F0);
+  AddVertexShader(words, 0x1000, 90);
+  AddDraw(words, 0x2000);
+  AddLiterals(words, 0x7000, 0x3F0);
+  AddVertexShader(words, 0x1100, 90);
+  AddDraw(words, 0x3000);
+  const BakedList list = library.Decode(words.data(), words.size());
+  CHECK(list.draws[1].literal_count == 2);
+  CHECK(list.draws[1].literals[0].address == 0x5000);
+  CHECK(list.draws[1].literals[1].address == 0x7000);
+}
 
-  std::vector<uint32_t> second;
-  AddLiterals(second, 0x7000, 0x3F0);
-  AddVertexShader(second, 0x1100, 90);
-  AddDraw(second, 0x3000);
-  BakedList next;
-  CHECK(library.DecodeNext(second.data(), second.size(), next));
-  CHECK(next.draws[0].literal_count == 2);
-  CHECK(next.draws[0].literals[0].address == 0x5000);
-  CHECK(next.draws[0].literals[1].address == 0x7000);
+void TestTheRingLoadsConstantsFromMemoryAsTheGpuWould() {
+  uint8_t memory[0x10000] = {};
+  memory[0x5000] = 0x3F;
+  memory[0x5001] = 0x80;
+  BakedLibrary library;
+  std::vector<uint32_t> words;
+  AddLiterals(words, 0x5000, 0x10);
+  AddDraw(words, 0x2000);
+  const RingRead read = ReadRing(library, words, memory);
+  CHECK(library.vertex_constants()[0x10] == 0x3F800000);
+  CHECK(read.draws[0].literal_count == 0);
+}
+
+void TestTheRingSetsRegistersWithSetConstant() {
+  BakedLibrary library;
+  std::vector<uint32_t> words = {Packet(0x2D, 3), (4u << 16) | (kViewport - 0x2000), 0x44200000, 0x44000000};
+  AddDraw(words, 0x2000);
+  const RingRead read = ReadRing(library, words);
+  CHECK(read.draws[0].viewport[0] == 0x44200000);
+  CHECK(read.draws[0].viewport[1] == 0x44000000);
 }
 
 void TestAnImpossibleShaderSizeIsIgnored() {
@@ -168,11 +208,13 @@ void TestADrawWithoutAnIndexBufferReadsNoFurther() {
 int main() {
   TestStateCarriesFromOneDrawToTheNext();
   TestAListStartsFromNothing();
-  TestOnlyTheLastDrawOfACallIsKept();
-  TestWordsWithNoDrawGiveNoDraw();
-  TestVerticesInTheRingStopTheRead();
+  TestEveryDrawInAStretchIsSeenInOrder();
+  TestAPacketCutOffIsLeftForNextTime();
+  TestAMisreadRingStopsWithoutWritingRegisters();
   TestAShaderKeepsEveryBlockOfLiterals();
   TestANewShaderReplacesOnlyItsOwnStagesLiterals();
+  TestTheRingLoadsConstantsFromMemoryAsTheGpuWould();
+  TestTheRingSetsRegistersWithSetConstant();
   TestAnImpossibleShaderSizeIsIgnored();
   TestADrawWithoutAnIndexBufferReadsNoFurther();
   return check::Finish("baked_buffer_tests");

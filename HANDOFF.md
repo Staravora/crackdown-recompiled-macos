@@ -1,13 +1,16 @@
 # Session handoff
 
 ## 2026-11-01 — Direct draws in the Metal picture
-- **Result:** shadow mode records about 3,950 draws a frame on the rooftop, 2,350 of them direct, in game order. The player, pedestrians and car bodies appear. 0 GPU errors, 6 draws a frame with no shader. Costs 2-6 FPS beside the emulator on a warming Air. Tables in `docs/native-rendering-survey.md`, "Direct draws".
-- **How:** `native::probe::BeforeDraw` and `AfterDraw` read D3D's ring either side of the draw call, and `BakedLibrary::DecodeNext` keeps registers between calls. The ring pointer rests on the last word written, so a span starts 4 bytes past it.
-- **Rerun the shaders after pulling this:** `pull_vertices.py` changed the hash and the fetch code, and `manifest.txt` now holds address and swizzle pairs. Binding rewrites each fetch's swizzle, and patched copies of shaders live in the ring, so their code now travels with the draw. Bruce's local `native-shaders` is already rebuilt, 177 shaders.
+- **Result:** shadow mode records about 4,150 draws a frame on the rooftop, 2,880 of them direct, in game order. The player, pedestrians, car bodies, trees and sky dome appear. 0 GPU errors, 0 ring parse errors, 1 draw a frame with no shader, 3 render targets. Tables in `docs/native-rendering-survey.md`, "Direct draws".
+- **How:** `native::probe::ReadRing` reads D3D's ring as a stream with `BakedLibrary::DecodeRing`, after every draw and before every baked run, and a hook on `826BB1A0` reads the rest of a segment before it closes. A first version that read a span around each draw call lost draws and constants, which Bruce's drive showed as cars thrown apart and flicker.
+- **Flicker:** fixed in the frozen test. The sky dome was coming and going, and no longer does. Reading late wasn't the cause.
+- **Cars: not rechecked.** Stale constants are the likely cause, but no scripted spot had traffic in view. Bruce's next drive settles it.
+- **Rerun the shaders after pulling this:** `pull_vertices.py` changed the hash and the fetch code, and `manifest.txt` now holds address and swizzle pairs. Bruce's local `native-shaders` is already rebuilt, 177 shaders.
 - **Baked fix too:** a shader can load several literal blocks, and only the last was kept.
-- **Left out on purpose:** transparent draws (a blended draw with no depth write comes out as a solid sheet, which was the wedge across the player), non-indexed draws, and `BeginVertices` quads. Fullscreen passes are likely in those last two, and they'd cover a grey picture.
+- **Free camera:** a run started with `--crackdown_free_camera_start` now ignores the mouse, so the same flags give the same picture.
+- **Left out on purpose:** transparent draws (236 a frame, a blended draw with no depth write comes out as a solid sheet), non-list draws (342), and quads from ring vertices (about 340). Fullscreen passes are likely in those, and they'd cover a grey picture.
 - **Bruce's orbs:** the orb effects still show through things wrongly in the emulator (the older "orb occlusion" entry). He hopes Metal fixes it. Not traced, and grey mode can't show it, since they're transparent. Check it when pixel shaders and blending arrive.
-- **Not verified:** nobody has driven this build. Windows, Linux and the title update 6 guest aren't built with these changes.
+- **Not verified:** the cost hasn't been remeasured since the stream, and Windows, Linux and the title update 6 guest aren't built with these changes. `826BB1A0` is bound for the base guest only.
 - **Next:** Bruce drives with the window on, then real pixel shaders and textures through the page watch.
 - **To see it:** launch with `--crackdown_native_shadow=true --crackdown_native_shadow_window=true`.
 

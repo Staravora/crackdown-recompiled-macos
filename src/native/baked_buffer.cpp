@@ -1,6 +1,9 @@
 #include "baked_buffer.h"
 
 #include <algorithm>
+#include <bit>
+#include <cstring>
+#include <iterator>
 
 namespace crackdown::native {
 namespace {
@@ -25,6 +28,8 @@ constexpr uint32_t kFetchConstants = 0x4800;
 constexpr uint32_t kFetchDwords = 32 * 6;
 constexpr uint32_t kBoolConstants = 0x4900;
 constexpr uint32_t kPixelBoolConstants = 0x4904;
+constexpr uint32_t kLoopConstants = 0x4908;
+constexpr uint32_t kPhysicalMask = 0x1FFFFFFF;
 
 constexpr uint32_t kOpDraw = 0x22;
 constexpr uint32_t kOpShaderLoad = 0x27;
@@ -51,6 +56,13 @@ uint64_t HashRange(uint64_t hash, const uint32_t* words, size_t count) {
 
 uint32_t Intern(std::unordered_map<uint64_t, uint32_t>& table, uint64_t hash) {
   return table.try_emplace(hash, uint32_t(table.size())).first->second;
+}
+
+// Where each kind of constant lives in the register file.
+uint32_t ConstantBase(uint32_t type) {
+  constexpr uint32_t kBases[] = {kFloatConstants, kFetchConstants, kBoolConstants, kLoopConstants,
+                                 BakedLibrary::kRegisterBase};
+  return type < std::size(kBases) ? kBases[type] : 0;
 }
 
 }  // namespace
@@ -80,39 +92,55 @@ BakedList BakedLibrary::Decode(const uint32_t* words, size_t count) {
   registers_.assign(kRegisterEnd - kRegisterBase, 0);
   state_ = {};
   literals_open_[0] = literals_open_[1] = false;
+  mask_ = ~0ull;
   BakedList list;
-  DecodeWords(words, count, list, true);
+  DecodeWords(words, count, list, nullptr, nullptr);
   return list;
 }
 
-bool BakedLibrary::DecodeNext(const uint32_t* words, size_t count, BakedList& list) {
+size_t BakedLibrary::DecodeRing(const uint32_t* words, size_t count, const uint8_t* physical_memory,
+                                const RingDraw& on_draw) {
   if (registers_.empty()) {
     registers_.assign(kRegisterEnd - kRegisterBase, 0);
   }
-  vertex_shader_loaded_ = false;
-  DecodeWords(words, count, list, false);
-  if (list.draws.empty()) {
-    return false;
-  }
-  // The call adds one draw. Anything before it is a clear or a resolve, and constants come from vertex_constants().
-  BakedDraw draw = list.draws.back();
-  draw.fetch_constants = 0;
-  draw.first_constant_write = 0;
-  draw.constant_writes = 0;
-  list.draws.assign(1, draw);
-  list.constant_writes.clear();
-  list.constant_data.clear();
-  if (list.fetch_data.size() > kFetchDwords) {
-    list.fetch_data.erase(list.fetch_data.begin(), list.fetch_data.end() - kFetchDwords);
-  }
-  return true;
+  BakedList unused;
+  return DecodeWords(words, count, unused, physical_memory, &on_draw);
 }
 
-void BakedLibrary::DecodeWords(const uint32_t* words, size_t count, BakedList& list, bool intern_textures) {
+void BakedLibrary::SetConstants(const uint32_t* data, uint32_t body) {
+  const uint32_t base = ConstantBase((data[0] >> 16) & 0xFF);
+  if (!base) {
+    ++stats_.unknown_packets;
+    return;
+  }
+  const uint32_t first = base + (data[0] & 0x7FF);
+  for (uint32_t i = 0; i + 1 < body && first + i < kRegisterEnd; ++i) {
+    registers_[first + i - kRegisterBase] = data[1 + i];
+  }
+}
+
+void BakedLibrary::LoadConstants(const uint32_t* data, const uint8_t* physical_memory) {
+  const uint32_t base = ConstantBase((data[1] >> 16) & 0xFF);
+  const uint32_t address = data[0] & kPhysicalMask;
+  const uint32_t dwords = data[2] & 0xFFF;
+  if (!base || uint64_t(address) + dwords * 4ull > uint64_t(kPhysicalMask) + 1) {
+    ++stats_.unknown_packets;
+    return;
+  }
+  const uint32_t first = base + (data[1] & 0x7FF);
+  for (uint32_t i = 0; i < dwords && first + i < kRegisterEnd; ++i) {
+    uint32_t value;
+    std::memcpy(&value, physical_memory + address + size_t(i) * 4, sizeof(value));
+    registers_[first + i - kRegisterBase] = std::byteswap(value);
+  }
+}
+
+size_t BakedLibrary::DecodeWords(const uint32_t* words, size_t count, BakedList& list, const uint8_t* physical_memory,
+                                 const RingDraw* on_draw) {
+  // A list is self-contained. The ring is everything the GPU does, in order, so registers are all there is to go on.
+  const bool from_ring = on_draw != nullptr;
   const auto reg = [this](uint32_t address) -> uint32_t& { return registers_[address - kRegisterBase]; };
 
-  // Lists without a mask packet run in every tile.
-  uint64_t mask = ~0ull;
   uint32_t first_constant_write = 0;
   uint32_t last_texture_set = ~0u;
 
@@ -129,15 +157,18 @@ void BakedLibrary::DecodeWords(const uint32_t* words, size_t count, BakedList& l
     }
     if (kind == 1) {
       ++stats_.unknown_packets;
-      // D3D never writes this packet type, so in the ring it means vertices written in place, and what follows isn't
-      // packets. Reading on would turn those floats into register writes.
-      if (!intern_textures) {
-        break;
+      // D3D never writes this packet type, so the ring has been misread. Reading on would turn data into register writes.
+      if (from_ring) {
+        ++stats_.ring_desyncs;
+        return count;
       }
       at += 3;
       continue;
     }
     if (at + 1 + body > count) {
+      if (from_ring) {
+        return at;
+      }
       ++stats_.truncated_packets;
       break;
     }
@@ -165,19 +196,25 @@ void BakedLibrary::DecodeWords(const uint32_t* words, size_t count, BakedList& l
 
     switch ((header >> 8) & 0x7F) {
       case kOpBinMaskLow:
-        mask = (mask & 0xFFFFFFFF00000000ull) | data[0];
+        mask_ = (mask_ & 0xFFFFFFFF00000000ull) | data[0];
         break;
       case kOpBinMaskHigh:
-        mask = (mask & 0xFFFFFFFFull) | (uint64_t(data[0]) << 32);
+        mask_ = (mask_ & 0xFFFFFFFFull) | (uint64_t(data[0]) << 32);
         break;
       case kOpSetConstant:
-        // These only move the tile's window offset, which collapses along with the tiles.
-        if (((data[0] >> 16) & 0xFF) != kSetConstantRegisters) {
+        // In lists these only move the tile's window offset, which collapses along with the tiles.
+        if (from_ring) {
+          SetConstants(data, body);
+        } else if (((data[0] >> 16) & 0xFF) != kSetConstantRegisters) {
           ++stats_.unknown_packets;
         }
         break;
       case kOpLoadConstants:
-        AddLiteral(data);
+        if (from_ring) {
+          LoadConstants(data, physical_memory);
+        } else {
+          AddLiteral(data);
+        }
         break;
       case kOpShaderLoad:
         // More than the hardware's 4096 instructions means these words aren't really a packet.
@@ -211,7 +248,7 @@ void BakedLibrary::DecodeWords(const uint32_t* words, size_t count, BakedList& l
         break;
       case kOpDraw: {
         BakedDraw draw = state_;
-        draw.mask = mask;
+        draw.mask = mask_;
         draw.initiator = data[1];
         // A draw with no index buffer ends at the initiator.
         draw.index_buffer = body > 2 ? data[2] : 0;
@@ -227,6 +264,11 @@ void BakedLibrary::DecodeWords(const uint32_t* words, size_t count, BakedList& l
         draw.depth_info = reg(kDepthInfo);
         std::copy_n(&reg(kViewport), 6, draw.viewport);
 
+        if (from_ring) {
+          (*on_draw)(draw, &reg(kFetchConstants));
+          break;
+        }
+
         // Formats and sample counts only: the EDRAM bases and pitches aren't pipeline state.
         uint64_t pipeline = 0xCBF29CE484222325ull;
         pipeline = Mix(pipeline, draw.vertex_shader);
@@ -240,17 +282,14 @@ void BakedLibrary::DecodeWords(const uint32_t* words, size_t count, BakedList& l
         pipeline = Mix(pipeline, draw.initiator & 0x3F);
         draw.pipeline = Intern(pipelines_, pipeline);
 
-        // Direct draws point at vertex buffers that change every frame, so interning them would grow without end.
-        if (intern_textures) {
-          const size_t known_sets = texture_sets_.size();
-          draw.textures =
-              Intern(texture_sets_, HashRange(0xCBF29CE484222325ull, &reg(kFetchConstants), kFetchDwords));
-          if (texture_sets_.size() != known_sets) {
-            texture_set_data_.insert(texture_set_data_.end(), &reg(kFetchConstants),
-                                     &reg(kFetchConstants) + kFetchDwords);
-          }
+        const size_t known_sets = texture_sets_.size();
+        draw.textures =
+            Intern(texture_sets_, HashRange(0xCBF29CE484222325ull, &reg(kFetchConstants), kFetchDwords));
+        if (texture_sets_.size() != known_sets) {
+          texture_set_data_.insert(texture_set_data_.end(), &reg(kFetchConstants),
+                                   &reg(kFetchConstants) + kFetchDwords);
         }
-        if (!intern_textures || draw.textures != last_texture_set) {
+        if (draw.textures != last_texture_set) {
           last_texture_set = draw.textures;
           list.fetch_data.insert(list.fetch_data.end(), &reg(kFetchConstants), &reg(kFetchConstants) + kFetchDwords);
         }
@@ -276,6 +315,7 @@ void BakedLibrary::DecodeWords(const uint32_t* words, size_t count, BakedList& l
     }
     at += 1 + body;
   }
+  return at;
 }
 
 }  // namespace crackdown::native

@@ -34,12 +34,19 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 constexpr uint32_t kDeviceRing = 48;
+constexpr uint32_t kDeviceRingSegment = 14552;
+constexpr uint32_t kDeviceRecordingFlags = 10812;
+constexpr uint8_t kDeviceRecording = 0x80;
 constexpr uint32_t kDeviceVertexConstants = 1792;
 constexpr uint32_t kDevicePixelConstants = 5888;
 constexpr uint32_t kDeviceColorTarget = 12160;
 constexpr uint32_t kDeviceDepthTarget = 12176;
 constexpr uint32_t kDeviceBinMaskLow = 12428;
 constexpr uint32_t kDeviceBinMaskHigh = 12432;
+constexpr uint32_t kDeviceTileCount = 12468;
+constexpr uint32_t kDeviceTileRects = 12472;
+constexpr uint32_t kMaxTiles = 16;
+constexpr uint32_t kSurfaceSize = 36;
 constexpr uint32_t kConstantsPerStage = 256;
 constexpr uint32_t kDwordsPerConstant = 4;
 constexpr uint32_t kCameraConstants = 12;
@@ -53,7 +60,8 @@ constexpr uint32_t kMaxListDwords = 1 << 16;
 constexpr uint32_t kSampleDwords = 64;
 constexpr uint32_t kAluDwords = 2048;
 constexpr size_t kReportRows = 16;
-constexpr uint32_t kMaxDrawRingBytes = 1 << 20;
+constexpr uint32_t kMaxRingStretchBytes = 1 << 24;
+constexpr uint32_t kFetchDwords = 192;
 constexpr uint32_t kEveryPass = ~0u;
 
 struct Buffer {
@@ -93,6 +101,8 @@ BakedLibrary g_library;
 BakedLibrary g_ring;
 std::vector<uint32_t> g_ring_words;
 std::shared_ptr<const std::vector<uint8_t>> g_vertex_code;
+uint32_t g_ring_segment = 0;
+uint32_t g_ring_read = 0;
 std::unordered_map<uint32_t, Buffer> g_buffers;
 std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, uint64_t> g_select;
 
@@ -147,6 +157,77 @@ uint32_t SampleOf(const Buffer& entry) {
     hash = (hash ^ entry.sample_host[i]) * 16777619u;
   }
   return hash;
+}
+
+// A surface knows its size, but a tiled one holds a single tile, and the tiles give the height of the whole picture.
+shadow::Targets TargetsOf(uint32_t device, const uint8_t* base) {
+  shadow::Targets targets;
+  targets.color = Load32(base, device + kDeviceColorTarget);
+  targets.depth = Load32(base, device + kDeviceDepthTarget);
+  const uint32_t surface = targets.color ? targets.color : targets.depth;
+  if (!surface) {
+    return targets;
+  }
+  const uint32_t size = Load32(base, surface + kSurfaceSize);
+  targets.width = ((size >> 18) & 0x1FFF) + 1;
+  targets.height = ((size >> 3) & 0x1FFF) + 1;
+  const uint32_t tiles = std::min(Load32(base, device + kDeviceTileCount), kMaxTiles);
+  for (uint32_t i = 0; i < tiles; ++i) {
+    const uint32_t rect = device + kDeviceTileRects + i * 16;
+    if (Load32(base, rect + 8) == targets.width) {
+      targets.height = std::max(targets.height, Load32(base, rect + 12));
+    }
+  }
+  return targets;
+}
+
+void OnRingDraw(uint32_t device, const uint8_t* base, const BakedDraw& draw, const uint32_t* fetch_constants) {
+  // A shader bound to a new vertex format is patched into a copy in the ring, which has moved on by the time a frame is
+  // drawn, so the code goes along with the draw.
+  if (g_ring.TakeVertexShaderLoaded()) {
+    if (const uint8_t* code = HostOfList(draw.vertex_shader, draw.vertex_shader_dwords)) {
+      g_vertex_code = std::make_shared<const std::vector<uint8_t>>(code, code + size_t(draw.vertex_shader_dwords) * 4);
+    } else {
+      g_vertex_code = nullptr;
+    }
+  }
+  auto lists = std::make_shared<std::vector<BakedList>>(1);
+  BakedList& list = lists->front();
+  list.draws.push_back(draw);
+  list.fetch_data.assign(fetch_constants, fetch_constants + kFetchDwords);
+  shadow::CountDirectDraw();
+  shadow::Capture(std::move(lists), kEveryPass, g_ring.vertex_constants(), TargetsOf(device, base), g_vertex_code);
+}
+
+// Reads the ring up to where D3D has got to. Words go from the current segment's start to the word the write pointer rests
+// on, which is the last one written. A list being recorded lands here too, but it's decoded when it runs.
+void ReadRing(uint32_t device, const uint8_t* base) {
+  const uint32_t segment = Load32(base, device + kDeviceRingSegment);
+  const uint32_t end = Load32(base, device + kDeviceRing) + 4;
+  if (segment != g_ring_segment) {
+    g_ring_segment = segment;
+    g_ring_read = segment;
+  }
+  if (end <= g_ring_read || end - g_ring_read > kMaxRingStretchBytes) {
+    return;
+  }
+  const size_t dwords = (end - g_ring_read) / 4;
+  if (*GuestPointer(base, device + kDeviceRecordingFlags) & kDeviceRecording) {
+    g_ring_read = end;
+    return;
+  }
+  g_ring_words.resize(dwords);
+  std::memcpy(g_ring_words.data(), GuestPointer(base, g_ring_read), dwords * 4);
+  for (uint32_t& word : g_ring_words) {
+    word = std::byteswap(word);
+  }
+  const uint8_t* physical_memory = rex::system::kernel_state()->memory()->TranslatePhysical<const uint8_t*>(0);
+  const size_t used = g_ring.DecodeRing(g_ring_words.data(), dwords, physical_memory,
+                                        [&](const BakedDraw& draw, const uint32_t* fetch_constants) {
+                                          OnRingDraw(device, base, draw, fetch_constants);
+                                        });
+  g_ring_read += uint32_t(used) * 4;
+  shadow::SetRingDesyncs(g_ring.stats().ring_desyncs);
 }
 
 // Copies the words out and decodes the copy. Pointers inside a list are never followed: doing that from a game hook is
@@ -278,6 +359,9 @@ void OnRunCommandBuffer(uint32_t device, uint32_t buffer, uint32_t predication, 
     return;
   }
   std::lock_guard lock(g_mutex);
+  if (shadow::Enabled()) {
+    ReadRing(device, base);
+  }
   const Clock::time_point run_start = Clock::now();
 
   auto [it, added] = g_buffers.try_emplace(buffer);
@@ -297,8 +381,7 @@ void OnRunCommandBuffer(uint32_t device, uint32_t buffer, uint32_t predication, 
 
   if (shadow::Enabled()) {
     CopyDeviceConstants(device, base, kDeviceVertexConstants, kConstantsPerStage, 0);
-    shadow::Capture(entry.lists, predication, g_device_constants.data(), Load32(base, device + kDeviceColorTarget),
-                    Load32(base, device + kDeviceDepthTarget));
+    shadow::Capture(entry.lists, predication, g_device_constants.data(), TargetsOf(device, base));
   }
   if (!timed) {
     return;
@@ -336,45 +419,15 @@ void OnRunCommandBuffer(uint32_t device, uint32_t buffer, uint32_t predication, 
   ++g_totals.runs;
 }
 
-uint32_t BeforeDraw(uint32_t device, const uint8_t* base) {
-  return shadow::Enabled() ? Load32(base, device + kDeviceRing) : 0;
+void AfterDraw(uint32_t device, const uint8_t* base) {
+  if (shadow::Enabled()) {
+    std::lock_guard lock(g_mutex);
+    ReadRing(device, base);
+  }
 }
 
-void AfterDraw(uint32_t device, uint32_t ring_before, const uint8_t* base) {
-  if (!ring_before) {
-    return;
-  }
-  const uint32_t ring_after = Load32(base, device + kDeviceRing);
-  if (ring_after <= ring_before || ring_after - ring_before > kMaxDrawRingBytes) {
-    shadow::CountDirectDraw(shadow::DirectDraw::kRingWrapped);
-    return;
-  }
-  const size_t dwords = (ring_after - ring_before) / 4;
-  std::lock_guard lock(g_mutex);
-  g_ring_words.resize(dwords);
-  // The pointer rests on the last word written, not the next free one.
-  std::memcpy(g_ring_words.data(), GuestPointer(base, ring_before + 4), dwords * 4);
-  for (uint32_t& word : g_ring_words) {
-    word = std::byteswap(word);
-  }
-  auto list = std::make_shared<std::vector<BakedList>>(1);
-  if (!g_ring.DecodeNext(g_ring_words.data(), dwords, list->front())) {
-    shadow::CountDirectDraw(shadow::DirectDraw::kNoDrawPacket);
-    return;
-  }
-  shadow::CountDirectDraw(shadow::DirectDraw::kCaptured);
-  const BakedDraw& draw = list->front().draws.front();
-  // A shader bound to a new vertex format is patched into a copy in the ring, which has moved on by the time a frame is
-  // drawn, so the code goes along with the draw.
-  if (g_ring.vertex_shader_loaded()) {
-    if (const uint8_t* code = HostOfList(draw.vertex_shader, draw.vertex_shader_dwords)) {
-      g_vertex_code = std::make_shared<const std::vector<uint8_t>>(code, code + size_t(draw.vertex_shader_dwords) * 4);
-    } else {
-      g_vertex_code = nullptr;
-    }
-  }
-  shadow::Capture(std::move(list), kEveryPass, g_ring.vertex_constants(), Load32(base, device + kDeviceColorTarget),
-                  Load32(base, device + kDeviceDepthTarget), g_vertex_code);
+void OnRingSegmentEnding(uint32_t device, const uint8_t* base) {
+  AfterDraw(device, base);
 }
 
 void Write(const std::filesystem::path& path, const std::string& label) {

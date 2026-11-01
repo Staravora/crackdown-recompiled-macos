@@ -59,7 +59,6 @@ constexpr uint32_t kCaptureFrames = 300;
 constexpr uint32_t kCheckFrames = 300;
 constexpr uint32_t kCheckBytes = 4096;
 constexpr uint32_t kMaxShaderDwords = 1 << 14;
-constexpr uint32_t kMinTargetSize = 16;
 constexpr uint32_t kMaxTargetSize = 4096;
 
 constexpr uint32_t kSourceAutoIndex = 2;
@@ -80,8 +79,7 @@ struct Run {
   std::shared_ptr<const std::vector<BakedList>> lists;
   uint32_t pass_select = 0;
   bool clear = false;
-  uint32_t color_target = 0;
-  uint32_t depth_target = 0;
+  Targets targets;
   std::shared_ptr<const std::vector<uint8_t>> vertex_code;
   std::array<uint32_t, kVertexConstantDwords> constants{};
 };
@@ -122,8 +120,7 @@ uint64_t g_guest_frames = 0;
 uint64_t g_dropped = 0;
 uint64_t g_capture_ns = 0;
 uint64_t g_direct_draws = 0;
-uint64_t g_direct_wrapped = 0;
-uint64_t g_direct_no_draw = 0;
+uint64_t g_ring_desyncs = 0;
 bool g_clear_pending = false;
 
 // Render thread only from here down.
@@ -328,17 +325,16 @@ struct TargetKey {
 };
 std::map<TargetKey, int> g_targets;
 
-// The viewport gives a target's size: surfaces say only their pitch, in tiles that collapse here.
 MetalViewport ViewportOf(const BakedDraw& draw) {
   const std::array<float, 6> v = std::bit_cast<std::array<float, 6>>(draw.viewport);
   const float width = std::abs(v[0]) * 2.0f, height = std::abs(v[2]) * 2.0f;
   return {v[1] - width / 2.0f, v[3] - height / 2.0f, width, height};
 }
 
-int TargetOf(MetalDevice& device, const Run& run, const MetalViewport& viewport) {
-  const TargetKey key = {run.color_target, run.depth_target, uint32_t(viewport.width), uint32_t(viewport.height)};
-  if (key.width < kMinTargetSize || key.height < kMinTargetSize || key.width > kMaxTargetSize ||
-      key.height > kMaxTargetSize) {
+int TargetOf(MetalDevice& device, const Run& run) {
+  const Targets& targets = run.targets;
+  const TargetKey key = {targets.color, targets.depth, targets.width, targets.height};
+  if (!key.width || !key.height || key.width > kMaxTargetSize || key.height > kMaxTargetSize) {
     return -1;
   }
   const auto found = g_targets.find(key);
@@ -349,6 +345,11 @@ int TargetOf(MetalDevice& device, const Run& run, const MetalViewport& viewport)
   REXLOG_INFO("Native shadow: target {}x{}, colour {:08X}, depth {:08X}", key.width, key.height, key.color, key.depth);
   g_targets[key] = target;
   return target;
+}
+
+bool InsideTarget(const MetalViewport& viewport, const Targets& targets) {
+  return viewport.width > 0 && viewport.height > 0 && viewport.x >= -1 && viewport.y >= -1 &&
+         viewport.x + viewport.width <= float(targets.width) + 1 && viewport.y + viewport.height <= float(targets.height) + 1;
 }
 
 // Blending with what's already there, without writing depth.
@@ -409,7 +410,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
           continue;
         }
         const MetalViewport viewport = ViewportOf(draw);
-        const int target = TargetOf(device, run, viewport);
+        const int target = InsideTarget(viewport, run.targets) ? TargetOf(device, run) : -1;
         if (target < 0) {
           ++g_totals.no_target_draws;
           continue;
@@ -421,7 +422,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
           ++g_totals.passes;
         }
         run_cleared = false;
-        if (run.color_target) {
+        if (run.targets.color) {
           ++color_draws[target];
         }
 
@@ -488,7 +489,7 @@ uint32_t Percentile(const std::vector<uint32_t>& sorted, double share) {
 void Report(const MetalDevice& device) {
   std::vector<uint32_t> sorted = g_encode_us;
   std::sort(sorted.begin(), sorted.end());
-  uint64_t guest_frames, dropped, capture_ns, direct_draws, direct_wrapped, direct_no_draw;
+  uint64_t guest_frames, dropped, capture_ns, direct_draws, ring_desyncs;
   {
     // Each report covers the frames since the last one, so menus and loading don't blur a run.
     std::lock_guard lock(g_mutex);
@@ -496,15 +497,14 @@ void Report(const MetalDevice& device) {
     dropped = g_dropped;
     capture_ns = std::exchange(g_capture_ns, 0);
     direct_draws = std::exchange(g_direct_draws, 0);
-    direct_wrapped = std::exchange(g_direct_wrapped, 0);
-    direct_no_draw = std::exchange(g_direct_no_draw, 0);
+    ring_desyncs = g_ring_desyncs;
   }
   const MetalGpuTotals gpu = device.gpu_totals();
   const double frames = double(std::max<uint64_t>(g_totals.frames, 1));
   std::ofstream out(g_path);
   out << fmt::format(
       R"({{"guest_frames":{},"frames":{},"dropped":{},"draws_per_frame":{:.1f},"skipped_draws_per_frame":{:.1f},"no_room":{},)"
-      R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"no_target_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},"other_index_order_draws_per_frame":{:.1f},"transparent_draws_per_frame":{:.1f},"direct_draws_per_frame":{:.1f},"direct_wrapped_per_frame":{:.2f},"direct_no_draw_per_frame":{:.2f},"passes_per_frame":{:.1f},"targets":{},)"
+      R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"no_target_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},"other_index_order_draws_per_frame":{:.1f},"transparent_draws_per_frame":{:.1f},"direct_draws_per_frame":{:.1f},"ring_desyncs":{},"passes_per_frame":{:.1f},"targets":{},)"
       R"("shaders_found":{},"shaders_missing":{},"shaders_failed":{},"index_copy_ms_per_frame":{:.3f},)"
       R"("capture_ms_per_frame":{:.4f},"wait_ms_per_frame":{:.3f},"encode_ms_p50":{:.3f},"encode_ms_p95":{:.3f},"encode_ms_max":{:.3f},)"
       R"("gpu_frames":{},"gpu_errors":{},"gpu_ms_per_frame":{:.3f},"gpu_ms_worst":{:.3f},)"
@@ -512,8 +512,7 @@ void Report(const MetalDevice& device) {
       guest_frames, g_totals.frames, dropped, g_totals.draws / frames, g_totals.skipped_draws / frames, g_totals.no_room,
       g_totals.recorded_draws / frames, g_totals.recorded_indices / frames, g_totals.no_shader_draws / frames,
       g_totals.no_target_draws / frames, g_totals.other_primitive_draws / frames, g_totals.other_index_order_draws / frames,
-      g_totals.transparent_draws / frames, direct_draws / double(std::max<uint64_t>(guest_frames, 1)), direct_wrapped / double(std::max<uint64_t>(guest_frames, 1)),
-      direct_no_draw / double(std::max<uint64_t>(guest_frames, 1)),
+      g_totals.transparent_draws / frames, direct_draws / double(std::max<uint64_t>(guest_frames, 1)), ring_desyncs,
       g_totals.passes / frames, g_targets.size(), g_totals.shaders_found, g_totals.shaders_missing, g_totals.shaders_failed,
       g_totals.index_copy_ns / 1e6 / frames,
       capture_ns / 1e6 / double(std::max<uint64_t>(guest_frames, 1)), g_totals.wait_ns / 1e6 / frames,
@@ -627,13 +626,18 @@ void OnClear() {
   }
 }
 
-void CountDirectDraw(DirectDraw outcome) {
+void CountDirectDraw() {
   std::lock_guard lock(g_mutex);
-  ++(outcome == DirectDraw::kCaptured ? g_direct_draws : outcome == DirectDraw::kRingWrapped ? g_direct_wrapped : g_direct_no_draw);
+  ++g_direct_draws;
+}
+
+void SetRingDesyncs(uint64_t desyncs) {
+  std::lock_guard lock(g_mutex);
+  g_ring_desyncs = desyncs;
 }
 
 void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_select, const uint32_t* vertex_constants,
-             uint32_t color_target, uint32_t depth_target, std::shared_ptr<const std::vector<uint8_t>> vertex_code) {
+             const Targets& targets, std::shared_ptr<const std::vector<uint8_t>> vertex_code) {
   const Clock::time_point start = Clock::now();
   std::lock_guard lock(g_mutex);
   Run& run = g_current->runs.emplace_back();
@@ -641,8 +645,7 @@ void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_
   run.pass_select = pass_select;
   run.clear = g_clear_pending;
   g_clear_pending = false;
-  run.color_target = color_target;
-  run.depth_target = depth_target;
+  run.targets = targets;
   run.vertex_code = std::move(vertex_code);
   std::memcpy(run.constants.data(), vertex_constants, sizeof(run.constants));
   g_capture_ns += Since(start);

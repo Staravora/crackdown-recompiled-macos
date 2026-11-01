@@ -14,10 +14,11 @@ bool Enabled();
 void Begin();
 void OnGuestFrame();
 
-// D3D writes a draw to its ring as only what changed since the last one, so shadow mode reads the ring either side of
-// the draw call. BeforeDraw's result goes to AfterDraw.
-uint32_t BeforeDraw(uint32_t device, const uint8_t* base);
-void AfterDraw(uint32_t device, uint32_t ring_before, const uint8_t* base);
+// D3D's ring holds what the GPU will do, in order, as only what changed. Shadow mode reads it as a stream, which picks up
+// every draw once. D3D breaks it into segments around the data it keeps in the same memory, so OnRingSegmentEnding has to
+// run before one closes.
+void AfterDraw(uint32_t device, const uint8_t* base);
+void OnRingSegmentEnding(uint32_t device, const uint8_t* base);
 void OnRunCommandBuffer(uint32_t device, uint32_t buffer, uint32_t predication, const uint8_t* base);
 void Write(const std::filesystem::path& path, const std::string& label);
 

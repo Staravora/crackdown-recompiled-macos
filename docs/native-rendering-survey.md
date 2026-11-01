@@ -319,45 +319,54 @@ Shadow mode now costs about 2 FPS, 3 ms on the median frame and 260 MB, on top o
 
 ## Direct draws (2026-11-01)
 
-Shadow mode now records direct draws alongside baked ones, in the order the game made them. The player, pedestrians and car bodies appear, which settles the guess in [Every pass](#every-pass-2026-10-31): those were direct draws.
+Shadow mode now records direct draws alongside baked ones, in the order the game made them. The player, pedestrians, car bodies, trees and the sky dome appear, which settles the guess in [Every pass](#every-pass-2026-10-31): those were direct draws.
 
-**How they're read: from D3D's ring, not its device.** The hook reads the ring pointer (`device + 48`) either side of `826B9FF8` and `826B9C08`, and the words between hold exactly what changed since the last draw, in the packets the baked decoder already knows. `BakedLibrary::DecodeNext` keeps its registers between calls, so it tracks what the GPU would hold, and D3D sends the whole register set again after each baked buffer, which keeps that right. Nothing about the device's layout had to be worked out beyond the pointer and the two surfaces. A takeover removes the ring, so this is a shadow mode shortcut: the same state has to come from the device then.
+**How they're read: as a stream, the way the GPU reads them.** D3D's ring holds everything the GPU will do, as only what changed, in the packets the baked decoder already knows. `BakedLibrary::DecodeRing` keeps its registers between calls and does what the GPU would to them, including `SET_CONSTANT` and loads from memory, so it always knows what the GPU would hold. Commands sit in contiguous segments, from `device + 14552` to the write pointer at `device + 48`, and D3D keeps its transient data, such as patched shaders and vertices, in the same memory between them. `826BB1A0` closes a segment, so a hook there reads the rest of it first. The stream is read after every draw and before every baked run, which keeps the two in order. Nothing about the device's layout had to be worked out beyond those fields. A takeover removes the ring, so this is a shadow mode shortcut: the same state has to come from the device then.
 
-**Things that were found the hard way:**
+**Reading a span around each draw call didn't work.** That was the first version, and it looked right until a drive. A span could hold a stretch of other work, including transient data, so a draw call's words weren't always its own. Only the last draw was kept, and parsing stopped at the data. That lost draws, constants and whole objects, and left registers stale. Bruce's drive showed cars thrown apart and flickering.
 
-- **The ring pointer rests on the last word written**, not the next free one, so a draw's words start 4 bytes past it. Read without that, spans began with the previous draw's last word and lost their own, and the parser drifted out of step.
-- **A shader bound to a new vertex format is often patched into a copy in the ring.** Those are gone by the time the render thread runs, and they looked like dozens of unknown shaders. Their code now travels with the draw, and they're cached by content.
+**Other things that were found the hard way:**
+
+- **The ring pointer rests on the last word written**, not the next free one.
+- **A shader bound to a new vertex format is often patched into a copy in the ring.** Those are gone by the time the render thread runs, so their code now travels with the draw, and they're cached by content.
 - **Binding also rewrites each fetch's destination swizzle**, for example to swap red and blue or to force W to 1. The hash now ignores it, and the translated shaders, which are fixed to the shipped swizzle, get a per-element remap (`select`) built from the shipped and live swizzles. **That changed `manifest.txt` and the metallibs:** rerun `pull_vertices.py` after updating, and old shaders won't work with this build. 177 shaders now, down from 191, since some differed only in swizzle.
-- **One shader can load several blocks of literals,** and the decoder kept only the last, so some baked draws had partly wrong constants. It now keeps up to six, per stage. No difference in the picture was looked for.
-- **A few ring spans hold raw vertices** that aren't in any packet, about 6 a frame. They read as packet type 1, which D3D never writes, so reading stops there. Without that, floats became register writes. Those draws are lost, and their state changes with them until the next full send.
-- **Transparent draws are left out of the grey view.** A blended draw that doesn't write depth comes out as a solid sheet with no pixel shader: a spiky wedge across the player turned out to be one, alpha blended with depth writes off. About 150 a frame.
+- **One shader can load several blocks of literals,** and the baked decoder kept only the last, so some baked draws had partly wrong constants. It now keeps up to six, per stage. No difference in the picture was looked for.
+- **Surfaces know their size.** `surface + 36` holds width and height, and a tiled surface holds one tile, so the tile rects give the whole height. Targets are keyed on the surfaces and no longer guessed from viewports, which gave up to 53 targets in place of 3.
+- **Transparent draws are left out of the grey view.** A blended draw that doesn't write depth comes out as a solid sheet with no pixel shader: a spiky wedge across the player turned out to be one, alpha blended with depth writes off.
 
-| Rooftop, per frame, three runs | |
+**Ruled out for the flicker:** reading late. Holding the game at each frame's end until Metal finished didn't change it. With time frozen and the camera still, the old build jumped by about 100,000 pixels every so often, because the sky dome came and went. The stream build held 1,500-2,300 pixels between all eight frozen pairs, which is pedestrians, who don't freeze. A few draws a frame were also going to bogus targets.
+
+| Rooftop, one run, last 300 frames | |
 | --- | --- |
-| Drawn | 3,930-3,980 draws, about 2,350 of them direct, 1.97 million indices, 5 passes, 6-7 targets |
-| Left out as transparent | 142-154 |
-| Direct, no draw packet read | about 6 |
-| Draws with no matching shader | 6 |
-| Render thread, recording, p50 / p95 | 4.4-8.5 / 6.9-11.0 ms |
-| Game thread, capture | 1.0-1.8 ms |
-| GPU | 1.8-2.2 ms, worst 12.5 ms, 0 errors |
-| Dropped frames in a 300-frame window | 0-3 |
+| Drawn | 4,149 draws, 2,878 of them direct, 1.99 million indices, 5 passes, 3 targets |
+| Left out as transparent | 236 |
+| Left out as not indexed lists or strips | 342 |
+| No matching shader | 1 |
+| No target | 0 |
+| Ring parse errors | 0 |
+| Render thread, recording, p50 | 3.5 ms |
+| Game thread, capture | 0.88 ms |
+| GPU errors | 0 |
+| Dropped frames | 4 in the run |
 
-| Benchmark, interleaved | Average FPS | Median frame |
+Before the stream, 2,380 direct draws were captured a frame on the same spot. The interleaved cost below was measured on that earlier build and hasn't been repeated:
+
+| Benchmark, interleaved, earlier build | Average FPS | Median frame |
 | --- | --- | --- |
 | Off | 28.12, 22.48, 20.05 | 35.3, 39.4, 45.9 ms |
 | On | 22.70, 20.51, 14.06 | 40.9, 42.6, 69.2 ms |
 
-The Air warmed through these runs, so compare each pair rather than the rows: on is 2-6 FPS below the run before it. Recording also slowed from 4.4 to 8.5 ms as it warmed. Peak memory wasn't measured: resident size didn't separate the two.
+The Air warmed through those runs, so compare each pair rather than the rows: on is 2-6 FPS below the run before it. Peak memory wasn't measured: resident size didn't separate the two.
 
-**Not drawn yet:** about 160 non-indexed and non-strip draws a frame, and everything written straight into the ring (`BeginVertices`, about 340 quads). Fullscreen passes are likely among them, and they'd paint over a grey picture, so they're better added with pixel shaders.
+**Not drawn yet:** the 342 above, and quads drawn from vertices in the ring (`DRAW_INDX_2`, about 340). Fullscreen passes are likely among them, and they'd paint over a grey picture, so they're better added with pixel shaders.
 
 **Other limits:**
 
+- **Cars haven't been rechecked in a drive with the stream.** No scripted spot had traffic in view, so stale constants are the likely cause of the thrown-apart cars, not a proven one.
 - Vertex data is read a frame late from live memory, so a buffer rewritten every frame could tear. Nothing has been seen to do so.
 - Baked shaders are cached by address, so one streamed out and replaced at the same address would stay wrong.
-- The sizes of targets still come from viewports, which is a guess for direct draws. Viewports under 16 pixels are skipped, 1-25 draws a frame, and their cause isn't known.
-- Compared by eye with the emulator's camera only on the rooftop, not side by side. Bruce hasn't driven this build.
+- The hook on `826BB1A0` is bound for the base guest only. The title update 6 guest hasn't got it, and these device offsets haven't been checked there.
+- A list being recorded is skipped in the stream, on the flag at `device + 10812`, because it's decoded when it runs. Nothing has shown one being recorded.
 
 ## Free camera (2026-10-31)
 
