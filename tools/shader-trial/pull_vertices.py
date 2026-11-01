@@ -32,6 +32,7 @@ EXEC_OPCODES = {1, 2, 3, 4, 5, 6, 13, 14}
 SCREEN_DEFINES = """
 #define g_ScreenScale (*(reinterpret_cast<device float2*>(g_PushConstants.SharedConstants + 280)))
 #define g_ScreenOffset (*(reinterpret_cast<device float2*>(g_PushConstants.SharedConstants + 288)))
+#define g_DepthOffset (*(reinterpret_cast<device float*>(g_PushConstants.SharedConstants + 296)))
 """
 
 PREAMBLE = """
@@ -235,7 +236,7 @@ def rewrite(source, elements):
     a = "\toutput.oPos.xy += g_HalfPixelOffset * output.oPos.w;\n"
     if source.count(a) != 1:
         raise ValueError("no position line")
-    source = source.replace(a, "#ifdef __air__\n\toutput.oPos.xy = output.oPos.xy * g_ScreenScale + g_ScreenOffset * output.oPos.w;\n#else\n" + a + "#endif\n")
+    source = source.replace(a, "#ifdef __air__\n\toutput.oPos.xy = output.oPos.xy * g_ScreenScale + g_ScreenOffset * output.oPos.w;\n\toutput.oPos.z += g_DepthOffset * output.oPos.w;\n#else\n" + a + "#endif\n")
     a = "\tfloat4 r0 = 0.0;\n"
     if source.count(a) != 1:
         raise ValueError("no r0")

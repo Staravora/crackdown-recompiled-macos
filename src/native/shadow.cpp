@@ -61,6 +61,7 @@ constexpr size_t kBooleansOffset = 256;
 constexpr size_t kAlphaThresholdOffset = 272;
 constexpr size_t kScreenScaleOffset = 280;
 constexpr size_t kScreenOffsetOffset = 288;
+constexpr size_t kDepthOffsetOffset = 296;
 constexpr size_t kSamplerTableOffset = 192;
 constexpr std::array<size_t, 3> kTextureTableOffsets = {0, 64, 128};
 constexpr size_t kFetchConstantDwords = 6;
@@ -851,11 +852,13 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         out.stencil_front = draw.stencil_front;
         out.stencil_back = draw.stencil_back;
         out.mode_control = draw.mode_control;
-        // Offsets are in units of the 24-bit depth buffer's last place, and slopes are per sixteenth of a pixel.
+        // Slopes are per sixteenth of a pixel. Metal scales a constant bias with a float depth's exponent, so the shader
+        // adds that.
+        float depth_offset = 0.0f;
         if (draw.mode_control & (kPolygonOffsetFront | kPolygonOffsetBack)) {
           const uint32_t side = (draw.mode_control & kPolygonOffsetFront) ? 0 : 2;
           out.depth_bias_slope = std::bit_cast<float>(draw.polygon_offset[side]) / 16.0f;
-          out.depth_bias = std::bit_cast<float>(draw.polygon_offset[side + 1]) * float(1 << 24);
+          depth_offset = std::bit_cast<float>(draw.polygon_offset[side + 1]);
         }
         out.primitive = primitive == kPrimitiveTriangleStrip ? MetalPrimitive::kTriangleStrip : MetalPrimitive::kTriangleList;
         out.vertex_constants = used;
@@ -874,6 +877,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
                          : std::array<float, 4>{1.0f, 1.0f, 0.0f, 0.0f};
         std::memcpy(shared + kScreenScaleOffset, screen.data(), sizeof(float) * 2);
         std::memcpy(shared + kScreenOffsetOffset, screen.data() + 2, sizeof(float) * 2);
+        std::memcpy(shared + kDepthOffsetOffset, &depth_offset, sizeof(depth_offset));
         // Translated shaders read these as count, start and step.
         for (uint32_t i = 0; i < kLoopConstants; ++i) {
           const uint32_t loop = run.loops[i];
@@ -886,11 +890,11 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
           ++g_totals.shaded_draws;
           for (const PixelSlot& slot : pixel.slots) {
             const uint32_t* fetch = fetch_constants + size_t(slot.slot) * kFetchConstantDwords;
-            // Only 2D and stacks load so far, and the tables start out pointing at the dummies.
-            if (slot.kind <= 1 && slot.slot < textures.size()) {
+            // 3D means a stack of depth maps. The tables start out pointing at the dummies.
+            if (slot.slot < textures.size()) {
               const uint32_t tiles = uint32_t(draw.mask);
               const int tile = tiles == kFirstTileMask ? 0 : tiles == kSecondTileMask ? 1 : -1;
-              const int texture = slot.kind == 0 ? g_textures->FindTexture(fetch, tile) : g_textures->FindStack(fetch);
+              const int texture = slot.kind == 1 ? g_textures->FindStack(fetch) : g_textures->FindTexture(fetch, tile);
               textures[texture_count++] = texture;
               std::memcpy(shared + kTextureTableOffsets[slot.kind] + slot.slot * 4, &texture, sizeof(texture));
             }

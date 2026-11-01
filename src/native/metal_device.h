@@ -62,6 +62,7 @@ struct MetalTextureDesc {
   uint32_t width = 0;
   uint32_t height = 0;
   uint32_t levels = 1;
+  bool cube = false;
   uint8_t swizzle[4] = {0, 1, 2, 3};  // Xenos's: 0-3 pick a component, 4 is zero and 5 is one.
 };
 
@@ -113,7 +114,6 @@ struct MetalDraw {
   uint32_t stencil_front = 0;
   uint32_t stencil_back = 0;
   uint32_t mode_control = 0;
-  float depth_bias = 0.0f;
   float depth_bias_slope = 0.0f;
   uint32_t blend_control = 0;
   uint32_t color_mask = 0;
@@ -154,9 +154,9 @@ class MetalDevice {
   virtual int AddPixelShader(const std::filesystem::path& library, std::string& error) = 0;
 
   // Adds a texture and returns its descriptor, or -1. Descriptor 0 is a dummy. Fill gives a mip level its data, as one row
-  // of blocks after another.
+  // of blocks after another. Only a cube has more than face 0.
   virtual int AddTexture(const MetalTextureDesc& desc) = 0;
-  virtual void FillTexture(int descriptor, uint32_t level, uint32_t width, uint32_t height, const void* data,
+  virtual void FillTexture(int descriptor, uint32_t level, uint32_t face, uint32_t width, uint32_t height, const void* data,
                            size_t bytes_per_row) = 0;
   virtual int AddSampler(const MetalSamplerDesc& desc) = 0;
 

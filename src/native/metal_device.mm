@@ -51,6 +51,7 @@ constexpr size_t kMaxTextures = 16384;
 constexpr size_t kMaxSamplers = 64;
 constexpr int kTextureHeap = 0;
 constexpr int kStackHeap = 1;
+constexpr int kCubeHeap = 2;
 constexpr int kSamplerHeap = 3;
 constexpr uint32_t kAlphaTestConstant = 1 << 1;
 
@@ -364,6 +365,9 @@ class MetalDeviceImpl final : public MetalDevice {
                                                                                           width:desc.width
                                                                                          height:desc.height
                                                                                       mipmapped:NO];
+    if (desc.cube) {
+      descriptor.textureType = MTLTextureTypeCube;
+    }
     descriptor.mipmapLevelCount = desc.levels;
     descriptor.usage = MTLTextureUsageShaderRead;
     descriptor.storageMode = MTLStorageModeShared;
@@ -376,16 +380,18 @@ class MetalDeviceImpl final : public MetalDevice {
     const int index = int(next_texture_++);
     textures_.resize(next_texture_);
     textures_[size_t(index)] = texture;
-    static_cast<MTLResourceID*>(heaps_[kTextureHeap].contents)[index] = texture.gpuResourceID;
+    static_cast<MTLResourceID*>(heaps_[desc.cube ? kCubeHeap : kTextureHeap].contents)[index] = texture.gpuResourceID;
     return index;
   }
 
-  void FillTexture(int descriptor, uint32_t level, uint32_t width, uint32_t height, const void* data,
+  void FillTexture(int descriptor, uint32_t level, uint32_t face, uint32_t width, uint32_t height, const void* data,
                    size_t bytes_per_row) override {
     [textures_[size_t(descriptor)] replaceRegion:MTLRegionMake2D(0, 0, width, height)
                                      mipmapLevel:level
+                                           slice:face
                                        withBytes:data
-                                     bytesPerRow:bytes_per_row];
+                                     bytesPerRow:bytes_per_row
+                                   bytesPerImage:0];
   }
 
   int AddSampler(const MetalSamplerDesc& desc) override {
@@ -646,7 +652,6 @@ class MetalDeviceImpl final : public MetalDevice {
     has_depth_state_ = false;
     current_mode_ = UINT32_MAX;
     current_viewport_ = {};
-    current_bias_ = 0.0f;
     current_bias_slope_ = 0.0f;
   }
 
@@ -694,9 +699,8 @@ class MetalDeviceImpl final : public MetalDevice {
       const uint32_t back = (draw.depth_control & kBackFaceEnable) ? draw.stencil_back : draw.stencil_front;
       [encoder_ setStencilFrontReferenceValue:draw.stencil_front & 0xFF backReferenceValue:back & 0xFF];
     }
-    if (draw.depth_bias != current_bias_ || draw.depth_bias_slope != current_bias_slope_) {
-      [encoder_ setDepthBias:draw.depth_bias slopeScale:draw.depth_bias_slope clamp:0.0f];
-      current_bias_ = draw.depth_bias;
+    if (draw.depth_bias_slope != current_bias_slope_) {
+      [encoder_ setDepthBias:0.0f slopeScale:draw.depth_bias_slope clamp:0.0f];
       current_bias_slope_ = draw.depth_bias_slope;
     }
     const uint32_t mode = draw.mode_control & (kCullFront | kCullBack | kFrontClockwise);
@@ -951,7 +955,6 @@ class MetalDeviceImpl final : public MetalDevice {
   DepthKey current_depth_{};
   bool has_depth_state_ = false;
   uint32_t current_mode_ = UINT32_MAX;
-  float current_bias_ = 0.0f;
   float current_bias_slope_ = 0.0f;
   std::atomic<bool> layer_ready_{false};
   std::atomic<uint64_t> completed_{0};

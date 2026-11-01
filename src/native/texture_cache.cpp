@@ -30,6 +30,7 @@ constexpr uint32_t kMirrorFirstPage = 0xE0000;
 constexpr uint32_t kPictureWidth = 1280;
 constexpr uint32_t kPictureHeight = 720;
 constexpr uint32_t kTileHeight = 484;
+constexpr uint32_t kCubeFaces = 6;
 
 // Bumped each time a page changes, so a texture can tell by adding up its pages. Written from the page watch's fault
 // handler, so nothing here can take a lock.
@@ -93,9 +94,10 @@ std::array<Range, 2> RangesOf(const xenos::xe_gpu_texture_fetch_t& fetch) {
   const xenos::TextureFormat format = xenos::TextureFormat(uint32_t(fetch.format));
   const uint32_t width = uint32_t(fetch.size_2d.width) + 1, height = uint32_t(fetch.size_2d.height) + 1;
   const uint32_t mip_address = uint32_t(fetch.mip_address) << 12;
+  const bool cube = fetch.dimension == xenos::DataDimension::kCube;
   const texture_util::TextureGuestLayout layout = texture_util::GetGuestTextureLayout(
-      xenos::DataDimension::k2DOrStacked, fetch.pitch, width, height, 1, fetch.tiled, format, fetch.packed_mips, true,
-      mip_address ? uint32_t(fetch.mip_max_level) : 0);
+      cube ? xenos::DataDimension::kCube : xenos::DataDimension::k2DOrStacked, fetch.pitch, width, height, cube ? kCubeFaces : 1,
+      fetch.tiled, format, fetch.packed_mips, true, mip_address ? uint32_t(fetch.mip_max_level) : 0);
   return {Range{(uint32_t(fetch.base_address) << 12) & kPhysicalMask, layout.base.level_data_extent_bytes},
           Range{mip_address & kPhysicalMask, mip_address ? layout.mips_total_extent_bytes : 0}};
 }
@@ -407,11 +409,13 @@ int TextureCache::FindTexture(const uint32_t* fetch, int tile) {
 int TextureCache::Load(const uint32_t* fetch_dwords, int existing) {
   xenos::xe_gpu_texture_fetch_t fetch;
   std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
-  if (fetch.type != xenos::FetchConstantType::kTexture || fetch.dimension != xenos::DataDimension::k2DOrStacked ||
-      fetch.stacked) {
+  const bool cube = fetch.dimension == xenos::DataDimension::kCube;
+  if (fetch.type != xenos::FetchConstantType::kTexture || (fetch.dimension != xenos::DataDimension::k2DOrStacked && !cube) ||
+      (fetch.stacked && !cube)) {
     ++textures_skipped_;
     return kDummyDescriptor;
   }
+  const uint32_t faces = cube ? kCubeFaces : 1;
   const xenos::TextureFormat format = xenos::TextureFormat(uint32_t(fetch.format));
   const std::optional<MetalTextureFormat> metal_format =
       MetalFormatOf(format, fetch.sign_x == xenos::TextureSign::kGamma);
@@ -434,7 +438,7 @@ int TextureCache::Load(const uint32_t* fetch_dwords, int existing) {
 
   size_t needed = 0;
   for (uint32_t level = 0; level < levels; ++level) {
-    needed += size_t(BlocksOf(width, level, block_width)) * BlocksOf(height, level, block_height) * block_bytes;
+    needed += size_t(BlocksOf(width, level, block_width)) * BlocksOf(height, level, block_height) * block_bytes * faces;
   }
   if (needed > upload_budget_) {
     upload_budget_ = 0;
@@ -446,6 +450,7 @@ int TextureCache::Load(const uint32_t* fetch_dwords, int existing) {
   desc.width = width;
   desc.height = height;
   desc.levels = levels;
+  desc.cube = cube;
   for (uint32_t i = 0; i < 4; ++i) {
     desc.swizzle[i] = uint8_t((fetch.swizzle >> (i * 3)) & 7);
   }
@@ -456,8 +461,8 @@ int TextureCache::Load(const uint32_t* fetch_dwords, int existing) {
   }
 
   const texture_util::TextureGuestLayout layout =
-      texture_util::GetGuestTextureLayout(xenos::DataDimension::k2DOrStacked, fetch.pitch, width, height, 1, fetch.tiled,
-                                          format, fetch.packed_mips, true, levels - 1);
+      texture_util::GetGuestTextureLayout(cube ? xenos::DataDimension::kCube : xenos::DataDimension::k2DOrStacked, fetch.pitch, width,
+                                          height, faces, fetch.tiled, format, fetch.packed_mips, true, levels - 1);
   const uint32_t block_bytes_log2 = std::bit_width(block_bytes) - 1;
   const size_t base_address = (size_t(uint32_t(fetch.base_address)) << 12) & (guest_bytes_ - 1);
   const size_t mips_address = size_t(mip_address) & (guest_bytes_ - 1);
@@ -474,20 +479,23 @@ int TextureCache::Load(const uint32_t* fetch_dwords, int existing) {
     const uint32_t blocks_x = BlocksOf(width, level, block_width), blocks_y = BlocksOf(height, level, block_height);
     const uint32_t pitch_blocks = guest.row_pitch_bytes / block_bytes;
     output.resize(size_t(blocks_x) * blocks_y * block_bytes);
-    for (uint32_t y = 0; y < blocks_y; ++y) {
-      for (uint32_t x = 0; x < blocks_x; ++x) {
-        const size_t offset = fetch.tiled ? size_t(texture_util::GetTiledOffset2D(int32_t(x + offset_x), int32_t(y + offset_y),
-                                                                                  pitch_blocks, block_bytes_log2))
-                                          : size_t(y + offset_y) * guest.row_pitch_bytes + size_t(x + offset_x) * block_bytes;
-        uint8_t* target = output.data() + (size_t(y) * blocks_x + x) * block_bytes;
-        if (address + offset + block_bytes <= guest_bytes_) {
-          std::memcpy(target, guest_memory_ + address + offset, block_bytes);
-          SwapBlock(target, block_bytes, xenos::Endian(uint32_t(fetch.endianness)));
+    for (uint32_t face = 0; face < faces; ++face) {
+      const size_t face_address = address + size_t(face) * guest.array_slice_stride_bytes;
+      for (uint32_t y = 0; y < blocks_y; ++y) {
+        for (uint32_t x = 0; x < blocks_x; ++x) {
+          const size_t offset = fetch.tiled ? size_t(texture_util::GetTiledOffset2D(int32_t(x + offset_x), int32_t(y + offset_y),
+                                                                                    pitch_blocks, block_bytes_log2))
+                                            : size_t(y + offset_y) * guest.row_pitch_bytes + size_t(x + offset_x) * block_bytes;
+          uint8_t* target = output.data() + (size_t(y) * blocks_x + x) * block_bytes;
+          if (face_address + offset + block_bytes <= guest_bytes_) {
+            std::memcpy(target, guest_memory_ + face_address + offset, block_bytes);
+            SwapBlock(target, block_bytes, xenos::Endian(uint32_t(fetch.endianness)));
+          }
         }
       }
+      device_.FillTexture(descriptor, level, face, std::max(width >> level, 1u), std::max(height >> level, 1u), output.data(),
+                          size_t(blocks_x) * block_bytes);
     }
-    device_.FillTexture(descriptor, level, std::max(width >> level, 1u), std::max(height >> level, 1u), output.data(),
-                        size_t(blocks_x) * block_bytes);
   }
   upload_budget_ -= needed;
   textures_loaded_ += existing < 0;
