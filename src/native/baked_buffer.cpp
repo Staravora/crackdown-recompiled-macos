@@ -29,7 +29,7 @@ constexpr uint32_t kFetchConstants = 0x4800;
 constexpr uint32_t kFetchDwords = 32 * 6;
 constexpr uint32_t kBoolConstants = 0x4900;
 constexpr uint32_t kPixelBoolConstants = 0x4904;
-constexpr uint32_t kLoopConstants = 0x4908;
+constexpr uint32_t kLoopConstants = BakedLibrary::kLoopConstantRegister;
 constexpr uint32_t kPhysicalMask = 0x1FFFFFFF;
 
 constexpr uint32_t kOpDraw = 0x22;

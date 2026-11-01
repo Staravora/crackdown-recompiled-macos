@@ -31,8 +31,9 @@ void Install(rex::memory::Memory* memory, const std::filesystem::path& shader_di
 void OnGuestFrame();
 void OnClear();
 // vertex_code holds a direct draw's vertex shader, whose copy in guest memory may not last until the frame is drawn.
-void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_select, const uint32_t* vertex_constants,
-             const Targets& targets, std::shared_ptr<const std::vector<uint8_t>> vertex_code = nullptr);
+void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_select, const uint32_t* float_constants,
+             const uint32_t* loop_constants, const Targets& targets,
+             std::shared_ptr<const std::vector<uint8_t>> vertex_code = nullptr);
 void CountDirectDraw();
 // The game has resolved into this texture object.
 void OnResolve(uint32_t texture, const uint8_t* base);
@@ -44,7 +45,7 @@ inline bool Enabled() {
 inline void Install(rex::memory::Memory*, const std::filesystem::path&, const std::filesystem::path&) {}
 inline void OnGuestFrame() {}
 inline void OnClear() {}
-inline void Capture(std::shared_ptr<const std::vector<BakedList>>, uint32_t, const uint32_t*, const Targets&,
+inline void Capture(std::shared_ptr<const std::vector<BakedList>>, uint32_t, const uint32_t*, const uint32_t*, const Targets&,
                     std::shared_ptr<const std::vector<uint8_t>> = nullptr) {}
 inline void CountDirectDraw() {}
 inline void OnResolve(uint32_t, const uint8_t*) {}

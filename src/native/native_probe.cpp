@@ -38,6 +38,8 @@ constexpr uint32_t kDeviceRingSegment = 14552;
 constexpr uint32_t kDeviceRecordingFlags = 10812;
 constexpr uint8_t kDeviceRecording = 0x80;
 constexpr uint32_t kDeviceVertexConstants = 1792;
+constexpr uint32_t kDeviceLoopConstants = 2504 * 4;
+constexpr uint32_t kLoopConstants = 32;
 constexpr uint32_t kDevicePixelConstants = 5888;
 constexpr uint32_t kDeviceColorTarget = 12160;
 constexpr uint32_t kDeviceDepthTarget = 12176;
@@ -204,7 +206,8 @@ void OnRingDraw(uint32_t device, const uint8_t* base, const BakedDraw& draw, con
   list.draws.push_back(draw);
   list.fetch_data.assign(fetch_constants, fetch_constants + kFetchDwords);
   shadow::CountDirectDraw();
-  shadow::Capture(std::move(lists), kEveryPass, g_ring.float_constants(), TargetsOf(device, base), g_vertex_code);
+  shadow::Capture(std::move(lists), kEveryPass, g_ring.float_constants(), g_ring.loop_constants(), TargetsOf(device, base),
+                  g_vertex_code);
 }
 
 // Reads the ring up to where D3D has got to. Words go from the current segment's start to the word the write pointer rests
@@ -390,7 +393,12 @@ void OnRunCommandBuffer(uint32_t device, uint32_t buffer, uint32_t predication, 
   if (shadow::Enabled()) {
     CopyDeviceConstants(device, base, kDeviceVertexConstants, kConstantsPerStage, 0);
     CopyDeviceConstants(device, base, kDevicePixelConstants, kConstantsPerStage, kConstantsPerStage * kDwordsPerConstant);
-    shadow::Capture(entry.lists, predication, g_device_constants.data(), TargetsOf(device, base));
+    std::array<uint32_t, kLoopConstants> loops;
+    std::memcpy(loops.data(), GuestPointer(base, device + kDeviceLoopConstants), sizeof(loops));
+    for (uint32_t& loop : loops) {
+      loop = std::byteswap(loop);
+    }
+    shadow::Capture(entry.lists, predication, g_device_constants.data(), loops.data(), TargetsOf(device, base));
   }
   if (!timed) {
     return;

@@ -5,7 +5,7 @@
 - **Added:** `src/native/texture_cache.cpp`, pipelines with real blending and alpha test in `metal_device.mm`, pixel constants per draw, and `tools/shader-trial/build_pixels.py`, which writes `ps_*.metallib` and `pixel-manifest.txt` to `native-shaders`. Rerun it after pulling, or draws stay grey. Bruce's local folder is built.
 - **Texture updates:** a texture reloads when bound after its memory changes, from the page watch and `Resolve`, with a raw hash to rule out false alarms from 16 KB host pages. Not seen working in a drive: nothing changed on the still rooftop.
 - **Big gaps:** resolved targets over 256 KB aren't in guest memory, so they need native resolves. Only 2D loads (so no real-time shadows or environment reflections), no post-processing, HUD or particles. Blended draws now run for real, so Bruce's orb issue can finally be looked at.
-- **Bruce saw a white-out** in a dark stairwell after five minutes, before textures updated. Cause unknown. The main target is 8-bit in the game too, so it isn't clipping, and constants are live, which leaves texture contents. Needs a long drive on this build.
+- **Washout at sunset:** Bruce saw it start at sunset, change with the view and leave trees alone. Loop constants were missing: shaders read past the end of the shared block. Fixed, not yet driven past sunset. Stale textures and clipping were wrong guesses.
 - **Not verified:** compared by eye on the rooftop only, not driven. Windows, Linux and title update 6 aren't built with this.
 - **Next:** native resolves, then the non-list draws, ring quads and depth and cube textures.
 

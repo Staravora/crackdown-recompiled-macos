@@ -78,6 +78,7 @@ class BakedLibrary {
  public:
   static constexpr uint32_t kRegisterBase = 0x2000;
   static constexpr uint32_t kFloatConstantRegister = 0x4000;
+  static constexpr uint32_t kLoopConstantRegister = 0x4908;
 
   // Decodes one list of host-order packets. Keep the result: this is the slow path, and it interns as it goes.
   BakedList Decode(const uint32_t* words, size_t count);
@@ -97,6 +98,9 @@ class BakedLibrary {
 
   // The float constants DecodeRing has seen, vertex then pixel, as the GPU would hold them.
   const uint32_t* float_constants() const { return registers_.data() + (kFloatConstantRegister - kRegisterBase); }
+
+  // The 32 loop constants, the same way.
+  const uint32_t* loop_constants() const { return registers_.data() + (kLoopConstantRegister - kRegisterBase); }
 
   // The 32 fetch constants of a texture set, six dwords each.
   const uint32_t* texture_set(uint32_t id) const { return texture_set_data_.data() + size_t(id) * 192; }

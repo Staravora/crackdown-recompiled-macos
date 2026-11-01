@@ -47,7 +47,9 @@ constexpr uint32_t kAluDwords = 2048;
 constexpr size_t kConstantBytes = kAluDwords * 4;
 constexpr size_t kPixelConstantsOffset = 1024 * 4;
 constexpr size_t kFetchBytes = 192 * 4;
-constexpr size_t kSharedBytes = 512;
+constexpr size_t kLoopTableOffset = 512;
+constexpr uint32_t kLoopConstants = 32;
+constexpr size_t kSharedBytes = kLoopTableOffset + kLoopConstants * 16;
 constexpr size_t kBooleansOffset = 256;
 constexpr size_t kAlphaThresholdOffset = 272;
 constexpr size_t kSamplerTableOffset = 192;
@@ -91,6 +93,7 @@ struct Run {
   Targets targets;
   std::shared_ptr<const std::vector<uint8_t>> vertex_code;
   std::array<uint32_t, kAluDwords> constants{};
+  std::array<uint32_t, kLoopConstants> loops{};
 };
 
 struct Frame {
@@ -526,6 +529,12 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         std::memset(shared, 0, kSharedBytes);
         std::memcpy(shared + kBooleansOffset, &draw.booleans, sizeof(draw.booleans));
         std::memcpy(shared + kAlphaThresholdOffset, &draw.alpha_reference, sizeof(draw.alpha_reference));
+        // Translated shaders read these as count, start and step.
+        for (uint32_t i = 0; i < kLoopConstants; ++i) {
+          const uint32_t loop = run.loops[i];
+          const std::array<int32_t, 4> values = {int32_t(loop & 0xFF), int32_t((loop >> 8) & 0xFF), int32_t(int8_t(loop >> 16)), 0};
+          std::memcpy(shared + kLoopTableOffset + i * 16, values.data(), sizeof(values));
+        }
         std::array<int, 32> textures;
         uint32_t texture_count = 0;
         if (pixel.handle >= 0) {
@@ -781,8 +790,8 @@ void SetRingDesyncs(uint64_t desyncs) {
   g_ring_desyncs = desyncs;
 }
 
-void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_select, const uint32_t* vertex_constants,
-             const Targets& targets, std::shared_ptr<const std::vector<uint8_t>> vertex_code) {
+void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_select, const uint32_t* float_constants,
+             const uint32_t* loop_constants, const Targets& targets, std::shared_ptr<const std::vector<uint8_t>> vertex_code) {
   const Clock::time_point start = Clock::now();
   std::lock_guard lock(g_mutex);
   Run& run = g_current->runs.emplace_back();
@@ -792,7 +801,8 @@ void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_
   g_clear_pending = false;
   run.targets = targets;
   run.vertex_code = std::move(vertex_code);
-  std::memcpy(run.constants.data(), vertex_constants, sizeof(run.constants));
+  std::memcpy(run.constants.data(), float_constants, sizeof(run.constants));
+  std::memcpy(run.loops.data(), loop_constants, sizeof(run.loops));
   g_capture_ns += Since(start);
 }
 

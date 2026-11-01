@@ -176,6 +176,14 @@ void TestTheRingLoadsConstantsFromMemoryAsTheGpuWould() {
   CHECK(read.draws[0].literal_count == 0);
 }
 
+void TestTheRingTracksLoopConstants() {
+  BakedLibrary library;
+  std::vector<uint32_t> words = {RegisterWrite(0x4908 + 16, 1), 0x00010204};
+  AddDraw(words, 0x2000);
+  ReadRing(library, words);
+  CHECK(library.loop_constants()[16] == 0x00010204);
+}
+
 void TestTheRingSetsRegistersWithSetConstant() {
   BakedLibrary library;
   std::vector<uint32_t> words = {Packet(0x2D, 3), (4u << 16) | (kViewport - 0x2000), 0x44200000, 0x44000000};
@@ -243,6 +251,7 @@ int main() {
   TestAShaderKeepsEveryBlockOfLiterals();
   TestANewShaderReplacesOnlyItsOwnStagesLiterals();
   TestTheRingLoadsConstantsFromMemoryAsTheGpuWould();
+  TestTheRingTracksLoopConstants();
   TestTheRingSetsRegistersWithSetConstant();
   TestAnImpossibleShaderSizeIsIgnored();
   TestAVertexShaderInsideTheRingComesWithItsCode();
