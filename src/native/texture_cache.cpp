@@ -27,6 +27,9 @@ constexpr uint32_t kPageShift = 12;
 constexpr uint32_t kPages = 1 << 17;
 constexpr uint32_t kPhysicalMask = 0x1FFFFFFF;
 constexpr uint32_t kMirrorFirstPage = 0xE0000;
+constexpr uint32_t kPictureWidth = 1280;
+constexpr uint32_t kPictureHeight = 720;
+constexpr uint32_t kTileHeight = 484;
 
 // Bumped each time a page changes, so a texture can tell by adding up its pages. Written from the page watch's fault
 // handler, so nothing here can take a lock.
@@ -175,8 +178,14 @@ bool IsDepth(xenos::TextureFormat format) {
   return format == xenos::TextureFormat::k_24_8 || format == xenos::TextureFormat::k_24_8_FLOAT;
 }
 
-std::array<uint32_t, 4> ResolveKeyOf(const xenos::xe_gpu_texture_fetch_t& fetch) {
-  return {FirstPageOf(fetch), uint32_t(fetch.format), uint32_t(fetch.size_2d.width) + 1, uint32_t(fetch.size_2d.height) + 1};
+bool DecodedHoldsOneTile(const xenos::xe_gpu_texture_fetch_t& fetch) {
+  return uint32_t(fetch.size_2d.width) + 1 == kPictureWidth && uint32_t(fetch.size_2d.height) + 1 == kTileHeight &&
+         !IsDepth(xenos::TextureFormat(uint32_t(fetch.format)));
+}
+
+std::array<uint32_t, 5> ResolveKeyOf(const xenos::xe_gpu_texture_fetch_t& fetch, int tile) {
+  return {FirstPageOf(fetch), uint32_t(fetch.format), uint32_t(fetch.size_2d.width) + 1, uint32_t(fetch.size_2d.height) + 1,
+          DecodedHoldsOneTile(fetch) ? uint32_t(tile + 1) : 0};
 }
 
 uint64_t HashFetch(const uint32_t* fetch) {
@@ -237,7 +246,13 @@ bool TextureCache::NeedsNativeResolve(const uint32_t* fetch_dwords) {
   return g_resolved_elsewhere && g_resolved_elsewhere[FirstPageOf(fetch)].load(std::memory_order_relaxed);
 }
 
-int TextureCache::ResolveInto(const uint32_t* fetch_dwords) {
+bool TextureCache::HoldsOneTile(const uint32_t* fetch_dwords) {
+  xenos::xe_gpu_texture_fetch_t fetch;
+  std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
+  return DecodedHoldsOneTile(fetch);
+}
+
+int TextureCache::ResolveInto(const uint32_t* fetch_dwords, int tile) {
   xenos::xe_gpu_texture_fetch_t fetch;
   std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
   const xenos::TextureFormat format = xenos::TextureFormat(uint32_t(fetch.format));
@@ -245,12 +260,12 @@ int TextureCache::ResolveInto(const uint32_t* fetch_dwords) {
       (format != xenos::TextureFormat::k_8_8_8_8 && !IsDepth(format))) {
     return -1;
   }
-  Resolved& resolved = resolved_[ResolveKeyOf(fetch)];
+  Resolved& resolved = resolved_[ResolveKeyOf(fetch, tile)];
   if (resolved.resolve < 0) {
     const uint32_t width = uint32_t(fetch.size_2d.width) + 1, height = uint32_t(fetch.size_2d.height) + 1;
     const uint32_t mip_address = uint32_t(fetch.mip_address) << 12;
     const uint32_t levels = mip_address ? std::min(uint32_t(fetch.mip_max_level) + 1, uint32_t(std::bit_width(std::max(width, height)))) : 1;
-    resolved.resolve = device_.AddResolve(width, height, levels, IsDepth(format));
+    resolved.resolve = device_.AddResolve(width, tile < 0 && DecodedHoldsOneTile(fetch) ? kPictureHeight : height, levels, IsDepth(format));
   }
   resolved.live = resolved.resolve >= 0;
   return resolved.resolve;
@@ -259,24 +274,56 @@ int TextureCache::ResolveInto(const uint32_t* fetch_dwords) {
 void TextureCache::ForgetResolve(const uint32_t* fetch_dwords) {
   xenos::xe_gpu_texture_fetch_t fetch;
   std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
-  const auto found = resolved_.find(ResolveKeyOf(fetch));
-  if (found != resolved_.end()) {
-    found->second.live = false;
+  for (const int tile : {-1, 0, 1}) {
+    const auto found = resolved_.find(ResolveKeyOf(fetch, tile));
+    if (found != resolved_.end()) {
+      found->second.live = false;
+    }
   }
 }
 
 bool TextureCache::HasResolve(const uint32_t* fetch_dwords) const {
   xenos::xe_gpu_texture_fetch_t fetch;
   std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
-  const auto found = resolved_.find(ResolveKeyOf(fetch));
+  const auto found = resolved_.find(ResolveKeyOf(fetch, -1));
   return found != resolved_.end() && found->second.live;
 }
 
-int TextureCache::FindTexture(const uint32_t* fetch) {
+int TextureCache::FindStack(const uint32_t* fetch_dwords) {
+  xenos::xe_gpu_texture_fetch_t fetch;
+  std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
+  if (fetch.type != xenos::FetchConstantType::kTexture || !fetch.stacked || !IsDepth(xenos::TextureFormat(uint32_t(fetch.format)))) {
+    return kDummyDescriptor;
+  }
+  Stack& stack = stacks_[FirstPageOf(fetch)];
+  if (!stack.descriptor) {
+    const uint32_t width = uint32_t(fetch.size_2d.width) + 1, height = uint32_t(fetch.size_2d.height) + 1;
+    stack.slices = uint32_t(fetch.size_2d.stack_depth) + 1;
+    stack.pages_per_slice = width * height * 4 >> kPageShift;
+    stack.descriptor = device_.AddStack(width, height, stack.slices);
+  }
+  return stack.descriptor;
+}
+
+bool TextureCache::FindStackSlice(const uint32_t* fetch_dwords, int& stack, uint32_t& slice) const {
+  xenos::xe_gpu_texture_fetch_t fetch;
+  std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
+  const uint32_t page = FirstPageOf(fetch);
+  for (const auto& [first_page, entry] : stacks_) {
+    if (entry.descriptor && page >= first_page && page < first_page + entry.slices * entry.pages_per_slice) {
+      stack = entry.descriptor;
+      slice = (page - first_page) / entry.pages_per_slice;
+      return true;
+    }
+  }
+  return false;
+}
+
+int TextureCache::FindTexture(const uint32_t* fetch, int tile) {
   {
     xenos::xe_gpu_texture_fetch_t decoded;
     std::memcpy(&decoded, fetch, sizeof(decoded));
-    const auto resolved = resolved_.find(ResolveKeyOf(decoded));
+    const auto resolved = resolved_.find(ResolveKeyOf(decoded, tile));
     if (decoded.type == xenos::FetchConstantType::kTexture && resolved != resolved_.end() && resolved->second.live) {
       Resolved& entry = resolved->second;
       const bool gamma = decoded.sign_x == xenos::TextureSign::kGamma;

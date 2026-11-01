@@ -49,6 +49,7 @@ constexpr int kDescriptorHeaps = 4;
 constexpr size_t kMaxTextures = 16384;
 constexpr size_t kMaxSamplers = 64;
 constexpr int kTextureHeap = 0;
+constexpr int kStackHeap = 1;
 constexpr int kSamplerHeap = 3;
 constexpr uint32_t kAlphaTestConstant = 1 << 1;
 
@@ -447,6 +448,63 @@ class MetalDeviceImpl final : public MetalDevice {
     return index;
   }
 
+  int AddStack(uint32_t width, uint32_t height, uint32_t depth) override {
+    if (next_texture_ >= kMaxTextures) {
+      return 0;
+    }
+    MTLTextureDescriptor* descriptor = [MTLTextureDescriptor new];
+    descriptor.textureType = MTLTextureType3D;
+    descriptor.pixelFormat = MTLPixelFormatR32Float;
+    descriptor.width = width;
+    descriptor.height = height;
+    descriptor.depth = depth;
+    descriptor.usage = MTLTextureUsageShaderRead;
+    descriptor.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
+    const NSUInteger slice_bytes = NSUInteger(width) * height * 4;
+    if (!texture) {
+      return 0;
+    }
+    if (stack_buffer_.length < slice_bytes) {
+      stack_buffer_ = [device_ newBufferWithLength:slice_bytes options:MTLResourceStorageModePrivate];
+    }
+    const int index = int(next_texture_++);
+    textures_.resize(next_texture_);
+    textures_[size_t(index)] = texture;
+    static_cast<MTLResourceID*>(heaps_[kStackHeap].contents)[index] = texture.gpuResourceID;
+    return index;
+  }
+
+  // A depth format can't be 3D, and a depth plane only comes apart from stencil by way of a buffer.
+  void CopyDepthToStack(int target, int stack, uint32_t slice) override {
+    EndPass();
+    id<MTLTexture> from = targets_[size_t(target)].depth;
+    id<MTLTexture> to = textures_[size_t(stack)];
+    const MTLSize size = MTLSizeMake(std::min(from.width, to.width), std::min(from.height, to.height), 1);
+    const NSUInteger row = size.width * 4;
+    id<MTLBlitCommandEncoder> blit = [buffer_ blitCommandEncoder];
+    [blit copyFromTexture:from
+                     sourceSlice:0
+                     sourceLevel:0
+                    sourceOrigin:MTLOriginMake(0, 0, 0)
+                      sourceSize:size
+                        toBuffer:stack_buffer_
+               destinationOffset:0
+          destinationBytesPerRow:row
+        destinationBytesPerImage:row * size.height
+                         options:MTLBlitOptionDepthFromDepthStencil];
+    [blit copyFromBuffer:stack_buffer_
+               sourceOffset:0
+          sourceBytesPerRow:row
+        sourceBytesPerImage:row * size.height
+                 sourceSize:size
+                  toTexture:to
+           destinationSlice:0
+           destinationLevel:0
+          destinationOrigin:MTLOriginMake(0, 0, slice)];
+    [blit endEncoding];
+  }
+
   void CopyTarget(const MetalCopy& copy) override {
     EndPass();
     const Target& target = targets_[size_t(copy.target)];
@@ -817,6 +875,7 @@ class MetalDeviceImpl final : public MetalDevice {
   id<MTLCommandQueue> queue_ = nil;
   id<MTLBuffer> guest_ = nil;
   id<MTLBuffer> elements_ = nil;
+  id<MTLBuffer> stack_buffer_ = nil;
   id<MTLBuffer> frame_ = nil;
   id<MTLTexture> dummy_ = nil;
   id<MTLTexture> dummy_3d_ = nil;

@@ -27,13 +27,23 @@ class TextureCache {
   // emulator to copy back.
   static bool NeedsNativeResolve(const uint32_t* fetch);
 
+  // A texture one tile high holds the last tile resolved into it, and a draw for a tile reads that, so each tile has its
+  // own. Everything else draws across both, and reads them joined up at their real height, which tile -1 stands for.
+  static bool HoldsOneTile(const uint32_t* fetch);
+
   // Where to copy a resolve to, given the destination's fetch constant, or -1 if it's not a format that can be copied.
-  int ResolveInto(const uint32_t* fetch);
+  int ResolveInto(const uint32_t* fetch, int tile = -1);
   void ForgetResolve(const uint32_t* fetch);
   bool HasResolve(const uint32_t* fetch) const;
 
   // A descriptor for the six dwords of one fetch constant.
-  int FindTexture(const uint32_t* fetch);
+  int FindTexture(const uint32_t* fetch, int tile = -1);
+
+  // A stack of depth maps read as a 3D texture. Each is resolved on its own, so a resolve has to ask if it's in one, and
+  // the first frame to read a stack finds it empty.
+  int FindStack(const uint32_t* fetch);
+  bool FindStackSlice(const uint32_t* fetch, int& stack, uint32_t& slice) const;
+
   int FindSampler(const uint32_t* fetch);
 
   // Call at the start of each frame. Uploads are limited per frame so a burst of streaming can't stall the render thread.
@@ -65,6 +75,12 @@ class TextureCache {
     std::unordered_map<uint32_t, int> views;
   };
 
+  struct Stack {
+    int descriptor = 0;
+    uint32_t slices = 0;
+    uint32_t pages_per_slice = 0;
+  };
+
   int Load(const uint32_t* fetch, int descriptor);
 
   MetalDevice& device_;
@@ -74,7 +90,8 @@ class TextureCache {
   std::unordered_map<uint64_t, Entry> textures_;
   std::unordered_map<uint32_t, int> samplers_;
   // The game reuses memory for different resolves within a frame, so these go by first page, format and size.
-  std::map<std::array<uint32_t, 4>, Resolved> resolved_;
+  std::map<std::array<uint32_t, 5>, Resolved> resolved_;
+  std::map<uint32_t, Stack> stacks_;  // By first page.
   size_t upload_budget_ = 0;
   uint64_t frame_ = 0;
   uint64_t textures_loaded_ = 0;

@@ -162,6 +162,9 @@ class MetalDevice {
   virtual int AddResolve(uint32_t width, uint32_t height, uint32_t levels, bool depth) = 0;
   virtual int ViewResolve(int resolve, bool gamma, const uint8_t* swizzle) = 0;
 
+  // A stack of depth maps, read as a 3D texture, and a descriptor for it.
+  virtual int AddStack(uint32_t width, uint32_t height, uint32_t depth) = 0;
+
   // Opens a window that shows every frame from here on.
   virtual void ShowWindow() = 0;
 
@@ -180,6 +183,7 @@ class MetalDevice {
 
   // Ends any open pass, so the next draw needs a BeginPass.
   virtual void CopyTarget(const MetalCopy& copy) = 0;
+  virtual void CopyDepthToStack(int target, int stack, uint32_t slice) = 0;
 
   // Which colour target this frame's window and capture show.
   virtual void ShowTarget(int target) = 0;

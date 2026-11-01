@@ -7,11 +7,16 @@ Shadow mode has to fill a shader's descriptor table for every draw, and working 
 reads from the ucode would mean parsing it, so the translated source says instead: each sampler has a define giving its
 place in the table, and the shader body names the ones it uses. Pixel shaders aren't patched by D3D, so their name in
 translated/ is the hash of their live code too.
+
+Scene shaders read the shadow mask at pixel position / (1280, 484), the size of one tile, which is
+right on the Xenos, where positions restart at each tile. Here one pass draws the whole picture and
+the mask is joined up to match, so that constant becomes 1 / 720.
 """
 import glob
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +24,10 @@ from concurrent.futures import ThreadPoolExecutor
 KINDS = {"Texture2D": 0, "Texture3D": 64, "TextureCube": 128}
 DEFINE = re.compile(r"#define (\w+?)_(Texture2D|Texture3D|TextureCube)DescriptorIndex \(\*\(reinterpret_cast<device uint\*>"
                     r"\(g_PushConstants\.SharedConstants \+ (\d+)\)\)\)")
+
+
+ONE_OVER_TILE_HEIGHT = "0x3B0767AB"
+ONE_OVER_PICTURE_HEIGHT = f"0x{struct.unpack('<I', struct.pack('<f', 1 / 720))[0]:08X}"
 
 
 def slots_of(source):
@@ -40,14 +49,18 @@ def compile_one(job):
 
 def main():
     translated, output = sys.argv[1:3]
-    os.makedirs(output, exist_ok=True)
+    work = os.path.join(output, "source")
+    os.makedirs(work, exist_ok=True)
     manifest = []
     jobs = []
     for path in sorted(glob.glob(os.path.join(translated, "ps_*.metal"))):
         name = os.path.basename(path)[:-6]
-        slots = slots_of(open(path, errors="ignore").read())
+        source = open(path, errors="ignore").read()
+        slots = slots_of(source)
         manifest.append(" ".join([name[3:]] + [f"{slot} {kind}" for slot, kind in slots]))
-        jobs.append((path, os.path.join(output, name + ".metallib")))
+        target = os.path.join(work, name + ".metal")
+        open(target, "w").write(source.replace(ONE_OVER_TILE_HEIGHT, ONE_OVER_PICTURE_HEIGHT))
+        jobs.append((target, os.path.join(output, name + ".metallib")))
     with open(os.path.join(output, "pixel-manifest.txt"), "w") as out:
         out.write("\n".join(manifest) + "\n")
     with ThreadPoolExecutor(6) as pool:

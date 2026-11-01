@@ -102,6 +102,9 @@ constexpr uint32_t kResolveSourceMask = 7;
 constexpr uint32_t kResolveDepth = 4;
 constexpr uint32_t kResolveClearColor = 1 << 8;
 constexpr uint32_t kResolveClearDepth = 1 << 9;
+constexpr int32_t kSecondTileTop = 480;
+constexpr uint32_t kFirstTileMask = 0x3;
+constexpr uint32_t kSecondTileMask = 0xC;
 
 using FetchConstant = std::array<uint32_t, kFetchConstantDwords>;
 
@@ -582,6 +585,13 @@ void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& draw
     g_textures->ForgetResolve(run.dest.data());
     return;
   }
+  int stack = 0;
+  uint32_t slice = 0;
+  if (depth && g_textures->FindStackSlice(run.dest.data(), stack, slice)) {
+    device.CopyDepthToStack(target, stack, slice);
+  }
+  // A tile's resolve names its own texture. The picture of them both keeps it at its real height.
+  const bool one_tile = TextureCache::HoldsOneTile(run.dest.data());
   MetalCopy out;
   out.target = target;
   out.depth = depth;
@@ -592,8 +602,15 @@ void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& draw
   out.right = copy.has_rect ? copy.rect[2] : int32_t(fetch.size_2d.width) + 1;
   out.bottom = copy.has_rect ? copy.rect[3] : int32_t(fetch.size_2d.height) + 1;
   out.dest_x = copy.dest_x;
-  out.dest_y = copy.dest_y;
+  out.dest_y = one_tile ? out.top : copy.dest_y;
   device.CopyTarget(out);
+  if (one_tile) {
+    out.resolve = g_textures->ResolveInto(run.dest.data(), out.top >= kSecondTileTop ? 1 : 0);
+    out.dest_y = copy.dest_y;
+    if (out.resolve >= 0) {
+      device.CopyTarget(out);
+    }
+  }
   current_target = -1;
   ++g_totals.native_resolves;
 }
@@ -828,11 +845,13 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
           ++g_totals.shaded_draws;
           for (const PixelSlot& slot : pixel.slots) {
             const uint32_t* fetch = fetch_constants + size_t(slot.slot) * kFetchConstantDwords;
-            // Only 2D loads so far, and the tables start out pointing at the dummies.
-            if (slot.kind == 0 && slot.slot < textures.size()) {
-              const int texture = g_textures->FindTexture(fetch);
+            // Only 2D and stacks load so far, and the tables start out pointing at the dummies.
+            if (slot.kind <= 1 && slot.slot < textures.size()) {
+              const uint32_t tiles = uint32_t(draw.mask);
+              const int tile = tiles == kFirstTileMask ? 0 : tiles == kSecondTileMask ? 1 : -1;
+              const int texture = slot.kind == 0 ? g_textures->FindTexture(fetch, tile) : g_textures->FindStack(fetch);
               textures[texture_count++] = texture;
-              std::memcpy(shared + kTextureTableOffsets[0] + slot.slot * 4, &texture, sizeof(texture));
+              std::memcpy(shared + kTextureTableOffsets[slot.kind] + slot.slot * 4, &texture, sizeof(texture));
             }
             const int sampler = g_textures->FindSampler(fetch);
             std::memcpy(shared + kSamplerTableOffset + slot.slot * 4, &sampler, sizeof(sampler));
