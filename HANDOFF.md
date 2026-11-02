@@ -1,5 +1,16 @@
 # Session handoff
 
+## 2026-11-02 — Metal-only preview built, waiting on the SDK rebuild
+- **What it is:** `--crackdown_native_only=true`. Metal draws the game in its own window, and the emulator draws nothing. The emulator's command processor still runs the ring, so fences, ring space, swaps and vblank carry on. That's the cheap route to seeing the takeover, not the takeover itself.
+- **What it turns on:** shadow mode, its window, `crackdown_native_pacing` and `crackdown_native_exposure`. It also sets the SDK's `vulkan_skip_guest_drawing` (new, patch `0015`), so draws and copies return at once, plus `occlusion_query_enable=false` and `query_occlusion_fake_sample_count=-1`, so the emulator leaves query results alone.
+- **Queries:** Metal writes each answer where the GPU would, as the game's get-data reads it: per tile, an end block then a begin block, little-endian, at the query's `+24` pointers (count at `+144`). The whole count goes in tile 0, and the first word is written last, since D3D's marker there means not ready. Total equals ZPass, as the emulator wrote, so corona fades still only go 0 or 1.
+- **What to expect:** the main window goes black or freezes, and the game shows in the Metal window. Keep the main window focused, since it gets the input. The 40+ ms present wait should go, because the emulator no longer draws.
+- **Known risks, untested:**
+  - A query whose frame Metal never draws stays not ready forever.
+  - Fences now come from the command processor ahead of Metal. Pacing holds the game a frame behind Metal, so memory Metal is still reading shouldn't be reused, but that isn't proven.
+  - Loading and menus haven't been tried.
+- **Blocked on:** the SDK build. The session's safety check won't let me build third-party code, so Bruce runs `crackdown/tools/stage-macos-sdk.sh` (new) with the game closed. It rebuilds the SDK libraries, installs them in `rexglue-mac/mac-arm64` and beside the game, refreshes the patch fingerprint and stamp, then builds and stages the game. Until then the game build stops at `crackdown_rexglue_check` ("SDK patches changed"), which is correct. The changed game files compile on their own.
+
 ## 2026-11-02 — Fences and pacing measured; Metal is ready to answer them
 - **How the game fences:** a fence is a ring segment. D3D bumps the counter at device `+10780` and the emulator writes the passed one to word 0 of the writeback block at `+10768`. About 12 a frame. `826BB4F0` waits on one (r3 device, r4 fence), done when `current - fence >= current - passed`. 27 call sites.
 - **What the game actually waits on in play:** one site, `826BD120`, inside Present. Each present waits for the previous present's fence (`+14564`), so the GPU is never more than a frame behind. In 60 s at the Shift+3 street spot nothing else waited: no mid-frame waits, no block-until-idle. Loading wasn't measured.

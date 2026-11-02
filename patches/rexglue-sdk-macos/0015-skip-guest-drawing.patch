@@ -1,0 +1,35 @@
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -84,6 +84,11 @@
+                     "they span, instead of ending the render pass at every query begin and end")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(vulkan_skip_guest_drawing, false, "GPU/Vulkan",
++                    "Process the ring for fences, waits and swaps but draw, clear and resolve nothing, for a "
++                    "title that renders elsewhere")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_STRING(vulkan_skip_pixel_shader, "", "GPU/Vulkan",
+                       "Skip draws using the pixel shader with this ucode hash, in hex (diagnostic)")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -3815,6 +3820,9 @@
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+ 
++  if (REXCVAR_GET(vulkan_skip_guest_drawing)) {
++    return true;
++  }
+   const RegisterFile& regs = *register_file_;
+   (void)index_buffer_info;
+   auto draw_fail = [&](const char* stage) {
+@@ -4701,6 +4709,9 @@
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+ 
++  if (REXCVAR_GET(vulkan_skip_guest_drawing)) {
++    return true;
++  }
+   if (!BeginSubmission(true)) {
+     return false;
+   }

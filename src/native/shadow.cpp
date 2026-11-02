@@ -47,6 +47,10 @@ REXCVAR_DEFINE_BOOL(crackdown_native_exposure, false, "Crackdown",
 REXCVAR_DEFINE_BOOL(crackdown_native_pacing, false, "Crackdown",
                     "With shadow mode on, the game waits for Metal to catch up instead of Metal dropping frames");
 
+REXCVAR_DEFINE_BOOL(crackdown_native_only, false, "Crackdown",
+                    "Preview: Metal draws the game in its own window and the emulator draws nothing. Turns on shadow mode, "
+                    "its window, pacing and exposure, and Metal answers occlusion queries");
+
 REXCVAR_DEFINE_BOOL(crackdown_native_shadow_debug, false, "Crackdown",
                     "Poll metal-debug.txt in the logs folder, so a running game can be examined from outside");
 
@@ -96,6 +100,12 @@ constexpr size_t kMaxPendingQueries = 8192;
 constexpr size_t kMaxQueryDisagreements = 32;
 constexpr uint64_t kSmallQuerySamples = 8;
 constexpr uint64_t kLargeQuerySamples = 64;
+constexpr uint32_t kQueryBlocks = 24;  // On a query object: a pointer per tile to where its counts go.
+constexpr uint32_t kQueryTileCount = 144;
+constexpr uint32_t kMaxQueryTiles = 30;
+constexpr uint32_t kQueryBlockWords = 16;  // The end block's eight counters, then the begin block's.
+constexpr uint32_t kQueryTotal = 0;
+constexpr uint32_t kQueryZPass = 4;
 constexpr uint32_t kDeviceWriteback = 10768;
 constexpr uint32_t kDeviceFence = 10780;
 constexpr uint64_t kMaxFramesBehind = 1;  // As D3D's present allows: each waits for the frame before it.
@@ -946,8 +956,12 @@ void SettleQuery(std::map<uint64_t, QueryAnswers>::iterator entry, uint32_t quer
 }
 
 uint32_t LoadGuestWord(uint32_t address) {
+  uint8_t* const base = g_virtual_guest.load(std::memory_order_relaxed);
+  if (!base) {
+    return 0;
+  }
   uint32_t value;
-  std::memcpy(&value, rex::memory::GuestPtr<const uint8_t*>(g_virtual_guest.load(std::memory_order_relaxed), address), sizeof(value));
+  std::memcpy(&value, rex::memory::GuestPtr<const uint8_t*>(base, address), sizeof(value));
   return std::byteswap(value);
 }
 
@@ -970,9 +984,33 @@ void OnFrameFinished(uint32_t fence, Clock::time_point handed_over) {
   g_frame_finished.notify_all();
 }
 
+// Writes a query's answer where the GPU would: per tile, an end block of counters followed by a begin block, little-endian.
+// The game sums end minus begin over the tiles, and takes the end block as not ready while its first four words still
+// hold D3D's marker, so the first word goes last.
+void AnswerQuery(uint32_t query, uint64_t samples) {
+  const uint32_t tiles = std::min(LoadGuestWord(query + kQueryTileCount), kMaxQueryTiles);
+  const uint32_t count = uint32_t(std::min<uint64_t>(samples, UINT32_MAX));
+  for (uint32_t tile = 0; tile < tiles; ++tile) {
+    const uint32_t block = LoadGuestWord(query + kQueryBlocks + tile * 4);
+    const uint32_t physical = (block & kGuestMask) + ((((block >> 20) & 0xFFF) + 512) & 0x1000);
+    if (!block || uint64_t(physical) + kQueryBlockWords * 4 > kGuestBytes) {
+      continue;
+    }
+    uint32_t* words = reinterpret_cast<uint32_t*>(g_guest + physical);
+    const uint32_t passed = tile == 0 ? count : 0;
+    std::fill(words + 1, words + kQueryBlockWords, 0u);
+    words[kQueryZPass] = passed;
+    __atomic_store_n(&words[kQueryTotal], passed, __ATOMIC_RELEASE);
+  }
+}
+
 void OnMetalSamples(const std::vector<QuerySlot>& slots, const uint64_t* samples) {
+  const bool answer = REXCVAR_GET(crackdown_native_only);
   std::lock_guard lock(g_query_mutex);
   for (size_t i = 0; i < slots.size(); ++i) {
+    if (answer) {
+      AnswerQuery(slots[i].query, samples[i]);
+    }
     const auto entry = g_query_answers.try_emplace(slots[i].id).first;
     entry->second.metal = samples[i];
     SettleQuery(entry, slots[i].query);
@@ -1709,6 +1747,18 @@ bool Enabled() {
 }
 
 void Install(rex::memory::Memory* memory, const std::filesystem::path& shader_dir, const std::filesystem::path& output_dir) {
+  if (REXCVAR_GET(crackdown_native_only)) {
+    // The emulator still runs the ring, so fences, waits and swaps carry on. With nothing drawn it would answer every
+    // query 0, so it leaves them to Metal.
+    for (const auto& [name, value] : {std::pair{"crackdown_native_shadow", "true"}, {"crackdown_native_shadow_window", "true"},
+                                      {"crackdown_native_pacing", "true"}, {"crackdown_native_exposure", "true"},
+                                      {"vulkan_skip_guest_drawing", "true"}, {"occlusion_query_enable", "false"},
+                                      {"query_occlusion_fake_sample_count", "-1"}}) {
+      if (!rex::cvar::SetFlagByName(name, value)) {
+        REXLOG_ERROR("Native only: couldn't set {}", name);
+      }
+    }
+  }
   if (!REXCVAR_GET(crackdown_native_shadow)) {
     return;
   }
