@@ -80,3 +80,4 @@
 | 2026-11-02 | Pace the game against Metal at the swap, one frame behind, behind `crackdown_native_pacing`. | It mirrors D3D's own present throttle, so once fences come early from a command processor that no longer draws, the game still can't reuse memory Metal is reading. |
 | 2026-11-02 | Preview Metal-only by having the emulator skip draws and copies, not by stopping its command processor. | Fences, ring space, swaps and vblank keep working unchanged, so the preview needs one SDK switch plus Metal's query answers, where a full takeover needs hooks around all of D3D. |
 | 2026-11-02 | Add `tools/stage-macos-sdk.sh` for SDK rebuilds. | The safety check stops me building third-party code, so Bruce runs SDK builds, and one command keeps the libraries, stamp, fingerprint and app in step. |
+| 2026-11-02 | Pace every frame rate on the host clock when Metal draws alone. | The emulator's vblank paced 30 and 60, and with nothing drawn it no longer does. |

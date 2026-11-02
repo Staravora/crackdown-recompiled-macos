@@ -1,15 +1,26 @@
 # Session handoff
 
-## 2026-11-02 — Metal-only preview runs: 47 FPS uncapped in the city
-- **What it is:** `--crackdown_native_only=true`. Metal draws the game in its own window and the emulator draws nothing. The emulator's command processor still runs the ring, so fences, ring space and swaps carry on. It's a preview, not the takeover.
-- **What it turns on:** shadow mode, its window, pacing and exposure, and the SDK's `vulkan_skip_guest_drawing` (patch `0015`). Under that switch the command processor skips draws and copies, and writes no occlusion results. Metal writes each answer where the GPU would: per tile, an end block then a begin block, little-endian, at the query's `+24` pointers (count at `+144`), with the first word last.
-- **First run, Shift+3 street:** reached the city, and Metal drew it correctly (`native-shadow` capture). The benchmark got 47.3 FPS on average, median 20.4 ms, 1% low 36.6, 13 of 2,835 frames over 33 ms. Present's fence wait disappeared, and Metal now sets the pace: the game was held on 293 of 300 frames, about 3 ms each.
-- **Bugs that run showed, fixed but needing the SDK rebuilt:**
-  - **Too fast:** at the 30 setting the game ran at 47 to 60, so Bruce saw everything sped up. 30 and 60 were paced by the emulator's vblank, which no longer happens. `frame_pacing.cpp` now paces every rate on the host clock when Metal draws alone (`HostPaced`).
-  - **Fake query counts:** the emulator still wrote its fake count of 1000 into query results before Metal's answer arrived. `query_occlusion_fake_sample_count` only accepts 1 to 100000, so it can't be switched off. `0015` now has the ZPD handler write nothing while the emulator isn't drawing.
-  - **Benchmark:** it finds the supply point picker by frame rate, which no longer drops. `crackdown_benchmark_picker_after_seconds` (15 works) waits a fixed time instead.
-- **Still to fix:** a green flash at least once before the main menu (Bruce). The main window is black, and input still goes to it.
-- **The game's own query reads:** the per-object queries now read real counts, up to 8910. Pairing them with Metal's answers is noisy now that Metal runs ahead, so `emulator_only` in the report means little in this mode.
+## 2026-11-02 — Metal-only preview: 29 FPS steady at the 30 setting, 52 uncapped
+- **What it is:** `--crackdown_native_only=true`. Metal draws the game in its own window and the emulator draws nothing. Its command processor still runs the ring for fences, ring space and swaps. A preview, not the takeover.
+- **What it turns on:** shadow mode, its window, pacing and exposure, and the SDK's `vulkan_skip_guest_drawing` (patch `0015`). Under that switch the command processor skips draws and copies and writes no occlusion results. Metal writes each answer where the GPU would: per tile, an end block then a begin block, little-endian, at the query's `+24` pointers (count at `+144`), with the first word last.
+- **Pacing:** with the emulator no longer drawing, its vblank no longer paced 30 and 60, and the game ran fast. That was the speed-up Bruce saw in the first run. `frame_pacing.cpp` now paces every rate on the host clock when Metal draws alone (`HostPaced`).
+- **Results, Shift+3 street, 60 s:**
+
+| Setting | Average FPS | Median | 1% low | Over 50 ms |
+|---|---|---|---|---|
+| Before, Metal and emulator | 15 to 19 | 45 to 63 ms | — | — |
+| Metal only, uncapped | 52.6 | 18.7 ms | 46.5 | 12 of 3,154 |
+| Metal only, 30 | 29.2 | 33.7 ms | 27.0 | 7 of 1,754 |
+
+- **Queries:** with the emulator writing nothing, Metal's answers and what the game read matched on all of them, with none Metal-only or emulator-only.
+- **Short of 30:** frames spread from 33 to 37 ms, peaking just over 33.3. A precise macOS wait (`mach_wait_until`) changed nothing, so it isn't the sleep. Something in the frame runs late. Not found yet.
+- **Not watched by eye:** the speed at 30 is right by the clock, but nobody has played it. Uncapped and above 30, Bruce saw things move too fast in the first run, which was uncapped. That's the high-frame-rate timing, not Metal, and is a separate job.
+- **Green flash:** at least once before the main menu (Bruce). Not looked at.
+- **Main window:** black, and it still takes the input.
+- **Benchmark gotchas:**
+  - A flag given twice makes the SDK's parser (CLI11) throw, and then every launch flag is dropped silently, so the game falls back to `crackdown.toml`. `bench-macos.sh` always passes `--crackdown_frame_rate`, so pass a rate with its new `-r` option, never as an extra argument.
+  - The supply point picker can't be found by frame rate in this mode: use `crackdown_benchmark_picker_after_seconds=15`.
+- **Try it:** `open -a "work/Crackdown Recompiled.app" --args --crackdown_native_only=true`.
 
 ## 2026-11-02 — Fences and pacing measured; Metal is ready to answer them
 - **How the game fences:** a fence is a ring segment. D3D bumps the counter at device `+10780` and the emulator writes the passed one to word 0 of the writeback block at `+10768`. About 12 a frame. `826BB4F0` waits on one (r3 device, r4 fence), done when `current - fence >= current - passed`. 27 call sites.

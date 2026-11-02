@@ -2,17 +2,21 @@
 # Repeatable gameplay benchmark on macOS: launches the app with crackdown_benchmark, which continues the saved game
 # with a virtual pad, stands still, records frame times and quits. Relaunches attempts that never reach gameplay.
 #
-# Usage: tools/bench-macos.sh [-n runs] [-l label] [-e VAR=value]... [-- extra game arguments]
+# Usage: tools/bench-macos.sh [-n runs] [-l label] [-r frame rate] [-e VAR=value]... [-- extra game arguments]
+# The frame rate defaults to 0, unlimited. Give it with -r and not as an extra argument: a flag given twice makes the
+# SDK's parser drop every launch flag.
 # Environment: CRACKDOWN_APP (the .app), CRACKDOWN_LOGS (its logs folder, where results are written).
 set -euo pipefail
 
 runs=3
 label=bench
+rate=0
 envs=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -n) runs=$2; shift 2 ;;
     -l) label=$2; shift 2 ;;
+    -r) rate=$2; shift 2 ;;
     -e) envs+=(--env "$2"); shift 2 ;;
     --) shift; break ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
@@ -29,7 +33,7 @@ while [ ${#results[@]} -lt "$runs" ] && [ $attempt -lt $max_attempts ]; do
   pkill -x crackdown 2>/dev/null || true
   sleep 2
   marker=$(mktemp)
-  open -W -n ${envs[@]+"${envs[@]}"} -a "$app" --args --crackdown_skip_launcher=true --crackdown_frame_rate=0 \
+  open -W -n ${envs[@]+"${envs[@]}"} -a "$app" --args --crackdown_skip_launcher=true --crackdown_frame_rate="$rate" \
     --crackdown_benchmark=true --crackdown_benchmark_label="$label" "$@" || true
   result=$(find "$logs" -name 'benchmark-*.json' -newer "$marker" -print | sort | tail -1)
   rm -f "$marker"
