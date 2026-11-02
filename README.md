@@ -108,7 +108,7 @@ If the system cannot mount AppImages with FUSE, the AppImage unpacks itself into
 
 **Preview.** A native Apple silicon build. Its Metal renderer is the default: faster than the emulated one, sharp at 1920×1080 on an M1, with a few effects still missing (see Known issues). The emulated renderer is one switch away on the **Graphics** page.
 
-1. Download **Crackdown-v0.6.2-macos-arm64.zip** from this repository's releases, open it, and drag **Crackdown Recompiled** to **Applications**.
+1. Download **Crackdown-v0.6.2-macos-arm64.zip** from the [Mac releases](https://github.com/Staravora/crackdown-xbox360-recompiled/releases/latest), open it, and drag **Crackdown Recompiled** to **Applications**.
 2. Open it. The launcher opens.
 3. On the **Play** page click **Install from disc image...** and pick your Crackdown `.iso`, or click **Install from folder...**. You can also drop either on the launcher window.
 4. Wait until **Ready to play** appears, then press **PLAY**.
@@ -221,7 +221,7 @@ The launcher's **Achievements** page shows the same list without starting the ga
 
 ## Reporting problems
 
-If the game does not start or crashes, please open an [issue](https://github.com/saulob/crackdown-xbox360-recompiled/issues). Attach the newest `crackdown_*.log` file from the `logs` folder next to the program (next to the AppImage on Linux), and say what you were doing when the problem happened. The launcher's **About** page opens that folder. **Detailed logging** is on by default; turned off, a normal session still writes a shorter log but discards it on exit, while a crash keeps it. After a crash on Windows the same log ends with a `CRASH REPORT` section; no separate crash file or minidump is written. For Linux reports, please also say your distribution and graphics card, and whether you start the AppImage from Steam.
+If the game does not start or crashes, please open an [issue](https://github.com/saulob/crackdown-xbox360-recompiled/issues). Attach the newest `crackdown_*.log` file from the `logs` folder next to the program (next to the AppImage on Linux), and say what you were doing when the problem happened. The launcher's **About** page opens that folder. **Detailed logging** is on by default; turned off, a normal session still writes a shorter log but discards it on exit, while a crash keeps it. After a crash on Windows the same log ends with a `CRASH REPORT` section; no separate crash file or minidump is written. For Linux reports, please also say your distribution and graphics card, and whether you start the AppImage from Steam. Problems with the Mac version go to its own [issues](https://github.com/Staravora/crackdown-xbox360-recompiled/issues); its logs are in `~/Library/Application Support/Crackdown Recompiled/logs`, and please say which Mac you have and whether the Metal or emulated renderer was on.
 
 ## Building it yourself
 

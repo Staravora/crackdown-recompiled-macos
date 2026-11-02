@@ -6,9 +6,13 @@
 # usage: package-macos.sh [--no-notarize]
 # Environment:
 #   CRACKDOWN_SIGN_IDENTITY  the signing identity; default: the keychain's only "Developer ID Application" one
-#   CRACKDOWN_NOTARY_PROFILE the notarytool keychain profile; default crackdown-notary. Make it once with
-#                            xcrun notarytool store-credentials crackdown-notary --apple-id <you> --team-id <team>
+#   CRACKDOWN_NOTARY_PROFILE the notarytool keychain profile; default zuhl-notary, shared by every app of the same team.
+#                            Made once per Mac with
+#                            xcrun notarytool store-credentials zuhl-notary --apple-id <you> --team-id <team>
 #                            which asks for an app-specific password and keeps it in the keychain, never in a file.
+#   CRACKDOWN_RELEASE_REPOSITORY the GitHub owner/name the release goes to; default Staravora/crackdown-xbox360-recompiled.
+#                            The game must be built with -DCRACKDOWN_MAC_UPDATE_REPOSITORY set to it, or the release
+#                            would never update itself, so the script refuses otherwise.
 #   CRACKDOWN_SHADERS        the native-shaders folder to bundle; default Crackdown Data/user_data/native-shaders
 set -eu
 W=${0:A:h:h:h}
@@ -17,9 +21,16 @@ SOURCE_APP="$W/Crackdown Recompiled.app"
 NOTARIZE=true
 [ "${1:-}" = "--no-notarize" ] && NOTARIZE=false
 SHADERS=${CRACKDOWN_SHADERS:-"$W/Crackdown Data/user_data/native-shaders"}
-PROFILE=${CRACKDOWN_NOTARY_PROFILE:-crackdown-notary}
+PROFILE=${CRACKDOWN_NOTARY_PROFILE:-zuhl-notary}
+REPOSITORY=${CRACKDOWN_RELEASE_REPOSITORY:-Staravora/crackdown-xbox360-recompiled}
 IDENTITY=${CRACKDOWN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)}
 [ -n "$IDENTITY" ] || { echo "No Developer ID Application identity in the keychain." >&2; exit 1; }
+grep -q "$REPOSITORY" "$SOURCE_APP/Contents/MacOS/crackdown" || {
+  echo "This build doesn't update from $REPOSITORY. Configure the game with" >&2
+  echo "  cmake -S crackdown -B game-build-macos -DCRACKDOWN_MAC_UPDATE_REPOSITORY=$REPOSITORY" >&2
+  echo "then rebuild and stage it." >&2
+  exit 1
+}
 [ -f "$SHADERS/manifest.txt" ] && [ -f "$SHADERS/pixel-manifest.txt" ] || { echo "No Metal shaders in $SHADERS." >&2; exit 1; }
 if $NOTARIZE && ! xcrun notarytool history --keychain-profile "$PROFILE" > /dev/null 2>&1; then
   echo "No notarytool profile '$PROFILE'. Make it once with:" >&2

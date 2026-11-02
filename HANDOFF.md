@@ -12,7 +12,9 @@
 - **Backdrop:** Bruce's ChatGPT reinterpretation of the dusk skyline now ships as `assets/launcher/backdrop-dusk.png` (Bruce approved it as his own image). A player's `launcher-backdrop.png` still wins.
 - **Release paperwork:** `THIRD-PARTY-LICENSES-MACOS.txt` (MoltenVK, Vulkan Loader, fonts) ships in `Resources/licenses`; the README has a macOS section; `tools/build-macos-shaders.sh` builds the Metal shaders for self-builders (not yet run end to end); the personal path is gone from `docs/macos-session.md`.
 - **Tests:** 57 of 58 pass; `packaging_tests` keeps its two known upstream failures.
-- **Still open:** Bruce's GitHub repo for releases (sets `CRACKDOWN_MAC_UPDATE_REPOSITORY` and the README links); notarization profile; README "Reporting problems" still points at Saulo's tracker; Metal gaps (green flash, water, supply beam).
+- **Release home:** a fork of saulob/crackdown-xbox360-recompiled at **Staravora/crackdown-xbox360-recompiled** (Bruce's GitHub). Not created yet. The README's Mac download and Mac issues links point there. The CMake default stays empty so dev and self-built copies never check; `package-macos.sh` refuses a build that wasn't configured with `-DCRACKDOWN_MAC_UPDATE_REPOSITORY=Staravora/crackdown-xbox360-recompiled`. Until the fork has a release, a build with it set shows "update check failed" in the launcher.
+- **Notarization:** already set up. The `zuhl-notary` keychain profile from Oculorum Studio works for any app of team 2PDAUA4SU2 (checked with `notarytool history`), and `package-macos.sh` now uses it by default.
+- **Still open:** creating the fork and its first release; Metal gaps (green flash, water, supply beam).
 
 ## 2026-11-02 — Mac release groundwork, and the launcher in the game's menu look
 - **App layout, signable:**
@@ -25,7 +27,7 @@
 - **`tools/package-macos.sh`:**
   - **What it does:** bundles the 334 shaders the manifests name, signs each library and then the app, verifies, notarizes with a `notarytool` keychain profile, staples, and zips `Crackdown-v<version>-macos-arm64.zip` with its `.sha256`.
   - **Tested:** with `--no-notarize` only, 32 MB.
-  - **To notarize:** Bruce has to make the profile once: `xcrun notarytool store-credentials crackdown-notary --apple-id <id> --team-id 2PDAUA4SU2`.
+  - **To notarize:** uses the existing `zuhl-notary` profile (see the evening entry).
 - **Launcher skin, patch `trg-launcher/0005-menu-skin.patch`:**
   - **What it is:** an optional `MenuSkin` in the shared library, from Bruce's handoff, the "Pause Menu" concept 1a. Panels with a chamfered corner and scanlines, glossy buttons with a hard gloss line, angled tabs, the bottom help strip with ⌘ hints and the hovered row's help, and a Michroma title and PLAY.
   - **Default:** off, so other games are untouched.
