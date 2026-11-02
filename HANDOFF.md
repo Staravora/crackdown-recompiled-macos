@@ -1,5 +1,12 @@
 # Session handoff
 
+## 2026-11-01 (late night) — Boss camera cause found
+- **Bruce on the controls:** "much much better and extremely viable with trackpad".
+- **Boss camera:** a third capture settled it. With `skip_ps=1B150680` the scene is back at full detail, and stopped just before that draw the picture is fine. The shader does nothing at strength 0, so it wasn't the shader. The game makes a depth-only `Clear` before that draw, and Metal turned every game clear into colour and depth at the next draw, which wiped the finished picture.
+- **Clear flags, read from all 12 call sites of `826C04A0`:** r4 holds them: `0x0F` colour targets, `0x30` depth and stencil. Seen: 15, 48, 49, 63. r6 is a colour pointer, f1 depth, r8 stencil. The clear colour and rects are still ignored: black, and the whole target.
+- **Fix:** `Run::clear` carries the flags, and a pass clears only what they say. **Built, staged when the game closed, not yet seen working.** The first draw on a target this frame still clears both. Check at the next boss kill, and watch for anything that relied on the old over-clearing, such as a stale picture left behind a depth-only clear.
+- **Wrong theories, in order:** fade quad, opaque copy, scissor on the save panel, c0 reading wrong. Rotating normal, skip and stop frames through one capture is what ended it.
+
 ## 2026-11-01 (night) — Config restored, lock-on aiming
 - **My mistake:** staging the controls build copied `config/crackdown.toml` over the app's own, which held nine Mac-only settings: `mnk_mode`, the 30 FPS cap, skip intro, frame rate logging, letterbox, both shader contractions, native GPU waits, upload hoisting and in-pass occlusion queries. Bruce's next session was badly slow, had the keyboard off, and logged no frame rates. Recovered from this session's transcript. The 52-second boot I blamed on his save was the lost skip intro.
 - **So it can't recur:** those settings are in `config/crackdown-macos.toml`. **Stage only with `tools/stage-macos.sh`,** which joins the two configs, copies the binary and keycaps, and refuses while the game is open.

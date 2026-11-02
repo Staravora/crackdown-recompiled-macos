@@ -51,7 +51,7 @@ using VertexCode = std::unordered_map<uint64_t, std::vector<uint8_t>>;
 bool Enabled();
 void Install(rex::memory::Memory* memory, const std::filesystem::path& shader_dir, const std::filesystem::path& output_dir);
 void OnGuestFrame();
-void OnClear();
+void OnClear(uint32_t flags);
 // vertex_code holds a direct draw's vertex shader, whose copy in guest memory may not last until the frame is drawn.
 void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_select, const uint32_t* float_constants,
              const uint32_t* loop_constants, const Targets& targets,
@@ -67,7 +67,7 @@ inline bool Enabled() {
 }
 inline void Install(rex::memory::Memory*, const std::filesystem::path&, const std::filesystem::path&) {}
 inline void OnGuestFrame() {}
-inline void OnClear() {}
+inline void OnClear(uint32_t) {}
 inline void Capture(std::shared_ptr<const std::vector<BakedList>>, uint32_t, const uint32_t*, const uint32_t*, const Targets&,
                     std::shared_ptr<const std::vector<uint8_t>> = nullptr, std::shared_ptr<const VertexCode> = nullptr) {}
 inline void CountDirectDraw() {}

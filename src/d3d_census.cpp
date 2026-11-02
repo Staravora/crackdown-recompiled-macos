@@ -637,7 +637,7 @@ void RingSegmentEnd(PPCContext& ctx, uint8_t* base, GuestFunction original) {
 }
 
 void CensusClear(PPCContext& ctx, uint8_t* base, GuestFunction original) {
-  native::shadow::OnClear();
+  native::shadow::OnClear(ctx.r4.u32);
   if (census::Counting()) {
     std::lock_guard lock(census::g_mutex);
     ++census::g_row.clears;

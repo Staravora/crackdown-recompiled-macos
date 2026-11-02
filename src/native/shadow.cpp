@@ -93,6 +93,8 @@ constexpr uint32_t kPrimitiveQuadList = 13;
 constexpr uint64_t kHashBasis = 0xCBF29CE484222325ull;
 constexpr uint64_t kHashPrime = 0x100000001B3ull;
 constexpr uint32_t kStencilEnable = 1 << 0;
+constexpr uint32_t kClearColorTargets = 0x0F;
+constexpr uint32_t kClearDepthStencil = 0x30;
 constexpr uint32_t kDepthEnable = 1 << 1;
 constexpr uint32_t kDepthWrite = 1 << 2;
 constexpr uint32_t kStencilWriteMask = 0xFF << 16;
@@ -131,7 +133,7 @@ struct Run {
   FetchConstant dest{};
   std::shared_ptr<const std::vector<BakedList>> lists;
   uint32_t pass_select = 0;
-  bool clear = false;
+  uint32_t clear = 0;  // What the game cleared since the last run, as D3DCLEAR flags.
   Targets targets;
   std::shared_ptr<const std::vector<uint8_t>> vertex_code;
   std::shared_ptr<const VertexCode> list_code;
@@ -186,7 +188,7 @@ uint64_t g_direct_draws = 0;
 uint64_t g_ring_desyncs = 0;
 std::vector<FetchConstant> g_resolved_this_frame;
 std::vector<FetchConstant> g_resolved_last_frame;
-bool g_clear_pending = false;
+uint32_t g_clear_pending = 0;
 std::array<uint32_t, BakedLibrary::kGammaEntries> g_gamma_ramp{};
 bool g_gamma_ramp_new = false;
 
@@ -847,7 +849,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
       continue;
     }
     std::memcpy(g_constants.data(), run.constants.data(), sizeof(run.constants));
-    bool run_cleared = run.clear;
+    uint32_t run_cleared = run.clear;
     for (const BakedList& list : *run.lists) {
       for (const BakedDraw& draw : list.draws) {
         // Constant writes aren't predicated, so they apply either way.
@@ -945,13 +947,15 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         const bool clear = run_cleared || first_use;
         if (target != current_target || clear) {
           MetalClear pass_clear;
-          pass_clear.color = pass_clear.depth = clear;
+          // The kill camera clears depth alone between two steps on the finished picture.
+          pass_clear.color = first_use || (run_cleared & kClearColorTargets);
+          pass_clear.depth = first_use || (run_cleared & kClearDepthStencil);
           pass_clear.depth_value = ClearDepthFor(draw);
           device.BeginPass(target, pass_clear);
           current_target = target;
           ++g_totals.passes;
         }
-        run_cleared = false;
+        run_cleared = 0;
         if (run.targets.color) {
           ++color_draws[target];
           last_color_target = target;
@@ -1329,10 +1333,10 @@ void OnGuestFrame() {
   g_wake.notify_one();
 }
 
-void OnClear() {
+void OnClear(uint32_t flags) {
   if (Enabled()) {
     std::lock_guard lock(g_mutex);
-    g_clear_pending = true;
+    g_clear_pending |= flags;
   }
 }
 
@@ -1384,7 +1388,7 @@ void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_
   run.lists = std::move(lists);
   run.pass_select = pass_select;
   run.clear = g_clear_pending;
-  g_clear_pending = false;
+  g_clear_pending = 0;
   run.targets = targets;
   run.vertex_code = std::move(vertex_code);
   run.list_code = std::move(list_code);
