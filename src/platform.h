@@ -45,6 +45,8 @@ const char* GraphicsBackendName();
 
 struct UiFontFiles {
   std::filesystem::path regular, semibold, bold;
+  std::filesystem::path display;  // the Mac launcher's title and PLAY; empty elsewhere
+  std::filesystem::path symbols;  // the Command and Return keys, merged into the others; empty elsewhere
 };
 UiFontFiles FindUiFonts();
 

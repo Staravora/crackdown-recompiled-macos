@@ -1,5 +1,30 @@
 # Session handoff
 
+## 2026-11-02 — Mac release groundwork, and the launcher in the game's menu look
+- **App layout, signable:**
+  - `Contents/MacOS` holds only the game and its libraries; everything else is in `Contents/Resources`, found through `ResourceFolder()`.
+  - The game points the Vulkan loader at `Resources/vulkan/icd.d` with `VK_DRIVER_FILES`.
+  - `stage-macos.sh` builds that layout and writes `Info.plist` from `packaging/macos/Info.plist`, with bundle ID `com.zuhlproductions.crackdown-recompiled`. The pinned Vulkan libraries' hashes are in `packaging/macos/vulkan-libs.sha256`.
+  - Signed with Bruce's Developer ID and the hardened runtime, the app verifies strictly and plays with no entitlements.
+- **Data:** in `~/Library/Application Support/Crackdown Recompiled`, unless a "Crackdown Data" folder is already beside the app, as on this Mac.
+- **Metal is the Mac default.** Emulated takes over when no Metal shaders are found. A local `user_data/native-shaders` set wins over the bundled one.
+- **`tools/package-macos.sh`:**
+  - **What it does:** bundles the 334 shaders the manifests name, signs each library and then the app, verifies, notarizes with a `notarytool` keychain profile, staples, and zips `Crackdown-v<version>-macos-arm64.zip` with its `.sha256`.
+  - **Tested:** with `--no-notarize` only, 32 MB.
+  - **To notarize:** Bruce has to make the profile once: `xcrun notarytool store-credentials crackdown-notary --apple-id <id> --team-id 2PDAUA4SU2`.
+- **Launcher skin, patch `trg-launcher/0005-menu-skin.patch`:**
+  - **What it is:** an optional `MenuSkin` in the shared library, from Bruce's handoff, the "Pause Menu" concept 1a. Panels with a chamfered corner and scanlines, glossy buttons with a hard gloss line, angled tabs, the bottom help strip with ⌘ hints and the hovered row's help, and a Michroma title and PLAY.
+  - **Default:** off, so other games are untouched.
+  - `Ui::Button` is public.
+  - **Demo:** it renders the skin with `--skin <fonts folder>`.
+  - **Keys:** ⌘S and ⌘Q work on the Mac. Before, the save shortcut only took the physical Control key.
+- **Game side:**
+  - Exo 2 and Michroma ship in `Resources/fonts`, with their OFL licences, from `packaging/fonts`. Exo 2 was downloaded from `NDISCOVER/Exo-2.0` with Bruce's OK; Michroma came from his Skin Games project.
+  - The Apple Symbols font supplies ⌘ and ⏎.
+  - The Play page has the "Game Files" and "Launch Options" sub-headers when skinned.
+- **Backdrop:** the launcher reads `launcher-backdrop.png` or `.jpg` from the user data folder, blurs it 3 px at 1232 wide, saturates it 1.1 times, and covers the window at 104%. None ships: Bruce's dusk skyline is Microsoft's artwork, so it's for his own copy only. **Follow-up:** save a pre-HUD Metal scene snapshot as the player's own backdrop.
+- **Not done:** the Mac in-app updater, the README macOS section, third-party notices for MoltenVK, removing the personal path in `docs/macos-session.md`, and the shader build automation for self-builders.
+
 ## 2026-11-02 — Game speed above 30 measured: correct. Mac release planned.
 - **Measured:** the title's logical tick (timing object +16, 1/30 s steps) against wall time, every 5 s, in Metal mode at 1280×720.
 

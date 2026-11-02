@@ -406,6 +406,15 @@ UiFontFiles FindUiFonts() {
       std::filesystem::path(length ? std::wstring(windows, length) : std::wstring(L"C:\\Windows")) / L"Fonts";
   return {fonts / "segoeui.ttf", fonts / "seguisb.ttf", fonts / "segoeuib.ttf"};
 #else
+#if defined(__APPLE__)
+  // The launcher's skin, the game's menus' look: Exo 2 and Michroma ship in the app. The system's symbol font has the
+  // keys the strip's hints show.
+  std::error_code bundled_ec;
+  if (const auto fonts = ResourceFolder() / "fonts"; std::filesystem::exists(fonts / "Exo2-Regular.ttf", bundled_ec)) {
+    return {fonts / "Exo2-Regular.ttf", fonts / "Exo2-SemiBold.ttf", fonts / "Exo2-SemiBold.ttf",
+            fonts / "Michroma-Regular.ttf", "/System/Library/Fonts/Apple Symbols.ttf"};
+  }
+#endif
   for (const FontFamily& family : kFontFamilies) {
     std::error_code ec;
     if (std::filesystem::exists(family.regular, ec)) {

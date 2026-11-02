@@ -98,6 +98,84 @@ trg::HeaderPainter LauncherHeader(ImTextureID art, float art_aspect) {
   };
 }
 
+// The Mac skin's backdrop: a picture the player keeps as launcher-backdrop.png or .jpg in their user data folder.
+// None ships with the app, as any Crackdown art is Microsoft's. Blurred 3 pixels in 1232 and saturated 1.1 times, as
+// the concept has it, once when it loads.
+struct Backdrop {
+  std::unique_ptr<rex::ui::ImmediateTexture> texture;
+  float aspect = 0.0f;
+};
+
+void BlurAndSaturate(std::vector<uint8_t>& pixels, int width, int height) {
+  const int radius = std::max(1, width * 3 / 1232);
+  std::vector<uint8_t> scratch(pixels.size());
+  // Three box blurs each way come close to a Gaussian.
+  for (int pass = 0; pass < 6; ++pass) {
+    const bool across = pass % 2 == 0;
+    const int lines = across ? height : width, length = across ? width : height;
+    for (int line = 0; line < lines; ++line) {
+      for (int channel = 0; channel < 3; ++channel) {
+        const auto at = [&](int i) -> size_t {
+          const int clamped = std::clamp(i, 0, length - 1);
+          return (across ? size_t(line) * width + clamped : size_t(clamped) * width + line) * 4 + channel;
+        };
+        int sum = 0;
+        for (int i = -radius; i <= radius; ++i) sum += pixels[at(i)];
+        for (int i = 0; i < length; ++i) {
+          scratch[at(i)] = uint8_t(sum / (radius * 2 + 1));
+          sum += pixels[at(i + radius + 1)] - pixels[at(i - radius)];
+        }
+      }
+    }
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+      std::copy_n(&scratch[i], 3, &pixels[i]);
+    }
+  }
+  for (size_t i = 0; i < pixels.size(); i += 4) {
+    const float luma = 0.2126f * pixels[i] + 0.7152f * pixels[i + 1] + 0.0722f * pixels[i + 2];
+    for (size_t c = 0; c < 3; ++c) {
+      pixels[i + c] = uint8_t(std::clamp(luma + (float(pixels[i + c]) - luma) * 1.1f, 0.0f, 255.0f));
+    }
+  }
+}
+
+Backdrop LoadBackdrop(rex::ui::ImmediateDrawer* drawer, const std::filesystem::path& user_dir) {
+  if (!drawer) {
+    return {};
+  }
+  for (const char* name : {"launcher-backdrop.png", "launcher-backdrop.jpg"}) {
+    std::ifstream in(user_dir / name, std::ios::binary);
+    if (!in) {
+      continue;
+    }
+    const std::vector<uint8_t> encoded((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    int width = 0, height = 0;
+    std::vector<uint8_t> pixels = rex::ui::DecodeImageRGBA(encoded.data(), encoded.size(), width, height);
+    if (pixels.empty() || width <= 0 || height <= 0) {
+      REXLOG_WARN("Launcher backdrop could not be decoded: {}", Utf8(user_dir / name));
+      continue;
+    }
+    BlurAndSaturate(pixels, width, height);
+    return {drawer->CreateTexture(uint32_t(width), uint32_t(height), rex::ui::ImmediateTextureFilter::kLinear, false,
+                                  pixels.data()),
+            float(width) / float(height)};
+  }
+  return {};
+}
+
+// Fills the window with the backdrop, cropped to fit and 4% larger so the blur's edges stay out of sight.
+trg::HeaderPainter BackdropPainter(ImTextureID texture, float aspect) {
+  return [texture, aspect](const trg::HeaderContext& c) {
+    const float w = c.max.x - c.min.x, h = c.max.y - c.min.y;
+    const float scale = std::max(w / aspect, h) * 1.04f;
+    const ImVec2 size(scale * aspect, scale), centre((c.min.x + c.max.x) * 0.5f, (c.min.y + c.max.y) * 0.5f);
+    c.draw->PushClipRect(c.min, c.max, true);
+    c.draw->AddImage(ImTextureRef(texture), ImVec2(centre.x - size.x * 0.5f, centre.y - size.y * 0.5f),
+                     ImVec2(centre.x + size.x * 0.5f, centre.y + size.y * 0.5f));
+    c.draw->PopClipRect();
+  };
+}
+
 std::unique_ptr<rex::ui::ImmediateTexture> LoadHeaderArt(rex::ui::ImmediateDrawer* drawer) {
   const std::filesystem::path path = LauncherHeaderArtPath(crackdown::ResourceFolder());
   if (!drawer) {
@@ -122,6 +200,7 @@ std::unique_ptr<rex::ui::ImmediateTexture> LoadHeaderArt(rex::ui::ImmediateDrawe
 }
 
 trg::Fonts g_fonts;
+ImFont* g_display_font = nullptr;  // the Mac skin's title and PLAY
 float g_font_density = 1.0f;
 
 GameFiles CheckAndLogGameFiles(const std::filesystem::path& game_dir) {
@@ -205,6 +284,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
       SelectWindowSizeForAspect();
     }
     header_art_ = LoadHeaderArt(game_.immediate_drawer);
+    backdrop_ = LoadBackdrop(game_.immediate_drawer, paths_.user_dir);
     content_ = std::make_unique<ContentPage>(
         paths_.user_dir, paths_.game_dir,
         FindGuestImage(content::GuestBuild::kTitleUpdate6) != nullptr, paths_.save_error,
@@ -485,12 +565,27 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     c.note = "Play applies the changes. Save keeps them without starting.";
     c.hints = "Enter  Play     Alt+F4  Quit     Ctrl+S  Save";
     c.fonts = g_fonts;
+#if defined(__APPLE__)
+    // The game's own menus' look, when its fonts are there to draw it.
+    if (g_display_font) {
+      c.skin = trg::MenuSkin::Blue();
+      c.skin.enabled = true;
+      c.skin.display = g_display_font;
+      c.skin.keys = {{"\xE2\x8F\x8E", "Play"}, {"\xE2\x8C\x98S", "Save"}, {"\xE2\x8C\x98Q", "Quit"}};
+      if (backdrop_.texture) {
+        c.skin.backdrop = BackdropPainter(reinterpret_cast<ImTextureID>(backdrop_.texture.get()), backdrop_.aspect);
+      }
+    }
+#endif
     c.branding.title = "CRACKDOWN";
     c.branding.subtitle_segments = {
         {"PC PORT   \xC2\xB7   ", ""},
         {"v" CRACKDOWN_PORT_VERSION "   \xC2\xB7   ", ""},
         {"BY SAULOB", kAuthorUrl},
     };
+    if (c.skin.enabled) {
+      c.branding.subtitle_segments = {{"PC Port \xC2\xB7 v" CRACKDOWN_PORT_VERSION " \xC2\xB7 by ", ""}, {"SauloB", kAuthorUrl}};
+    }
     const float art_aspect =
         header_art_ ? float(header_art_->width) / float(header_art_->height) : kHeaderArtAspect;
     c.branding.background = LauncherHeader(header_art_ ? reinterpret_cast<ImTextureID>(header_art_.get())
@@ -596,20 +691,27 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     if (paths_.game_dir.empty()) {
       ui.Help("No game folder was given: start the game with --game_data_root.");
     } else {
-      ui.Row("Game files",
+      // The game's menus' look groups the page under sub-headers, which name the rows.
+      const bool skin = ui.skin_enabled();
+      if (skin) {
+        ui.Heading("Game Files");
+      }
+      ui.Row(skin ? "" : "Game files",
              "Title ID: 4D5307DC. No game files are included with this port: the installer copies them (about 6 GB) "
              "from your own Crackdown disc image or from a folder with the disc's contents. You can also drop one "
              "on this window.");
       if (!ui.TaskProgress(install_)) {
         const bool ready = game_files_ == GameFiles::kReady;
-        if (ready ? ImGui::Button("Reinstall from disc image...", ImVec2(-FLT_MIN, 0))
-                  : ui.AccentButton("Install from disc image...")) {
+        if (ready ? ui.Button("Reinstall from disc image...") : ui.AccentButton("Install from disc image...")) {
           BrowseAndInstall(false);
         }
-        if (ImGui::Button("Install from folder...", ImVec2(-FLT_MIN, 0))) {
+        if (ui.Button("Install from folder...")) {
           BrowseAndInstall(true);
         }
       }
+    }
+    if (ui.skin_enabled()) {
+      ui.Heading("Launch Options");
     }
     ui.Info("Game version", content::SelectGuestBuild(content_->State()) == content::GuestBuild::kTitleUpdate6
                                 ? "Title Update 6"
@@ -1087,6 +1189,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
   std::vector<MonitorInfo> monitors_;
   std::vector<GraphicsAdapter> graphics_adapters_;
   std::unique_ptr<rex::ui::ImmediateTexture> header_art_;
+  Backdrop backdrop_;
   std::unique_ptr<ContentPage> content_;
   std::unique_ptr<trg::Launcher> launcher_;
   LauncherGamepad gamepad_;
@@ -1142,9 +1245,23 @@ void LoadLauncherFonts(ImFontAtlas* atlas, float density) {
     return atlas->AddFontFromFileTTF(Utf8(path).c_str(), g_fonts.size, &config, kRanges);
   };
   const UiFontFiles fonts = FindUiFonts();
+  // The Command and Return keys of the strip's hints, merged into a font just added.
+  auto add_symbols = [&] {
+    static const ImWchar kSymbols[] = {0x2318, 0x2318, 0x23CE, 0x23CE, 0};
+    std::error_code ec;
+    if (fonts.symbols.empty() || !std::filesystem::exists(fonts.symbols, ec)) {
+      return;
+    }
+    ImFontConfig merge = config;
+    merge.MergeMode = true;
+    atlas->AddFontFromFileTTF(Utf8(fonts.symbols).c_str(), g_fonts.size, &merge, kSymbols);
+  };
   g_fonts.regular = load(fonts.regular);
+  add_symbols();
   g_fonts.semibold = load(fonts.semibold);
-  g_fonts.bold = load(fonts.bold);
+  add_symbols();
+  g_fonts.bold = fonts.bold == fonts.semibold ? g_fonts.semibold : load(fonts.bold);
+  g_display_font = load(fonts.display);
 }
 
 void UpdateLauncherFonts(rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate_drawer, float density) {
@@ -1157,10 +1274,13 @@ void UpdateLauncherFonts(rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer*
   }
 
   ImGuiIO& io = drawer->GetIO();
-  for (ImFont* font : {g_fonts.regular, g_fonts.semibold, g_fonts.bold}) {
-    if (!font) {
+  std::vector<ImFont*> done;
+  for (ImFont* font : {g_fonts.regular, g_fonts.semibold, g_fonts.bold, g_display_font}) {
+    // Bold can be the semibold font itself.
+    if (!font || std::find(done.begin(), done.end(), font) != done.end()) {
       continue;
     }
+    done.push_back(font);
     const ImWchar fallback = font->FallbackChar;
     const ImWchar ellipsis = font->EllipsisChar;
     font->ClearOutputData();

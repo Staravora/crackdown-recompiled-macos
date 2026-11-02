@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Puts a finished build into the real app, laid out so it can be signed: programs and libraries in Contents/MacOS,
 # everything else in Contents/Resources. The binary, crackdown.toml with the Mac settings added, the keycap sheet, the
-# launcher art, MoltenVK's driver description, the icon and Info.plist. Refuses while the game is open. Run from anywhere.
+# launcher art and fonts, MoltenVK's driver description, the icon and Info.plist. Refuses while the game is open. Run from anywhere.
 # It doesn't build: run `cmake --build game-build-macos --target crackdown` from work/ first.
 set -eu
 W=${0:A:h:h:h}
@@ -13,12 +13,14 @@ if [ -n "$(pgrep -x crackdown || true)" ]; then
   echo "The game is open: close it first. Nothing was changed." >&2
   exit 1
 fi
-mkdir -p "$G/vulkan/lib" "$RES/glyphs" "$RES/assets/launcher" "$RES/vulkan/icd.d"
+mkdir -p "$G/vulkan/lib" "$RES/glyphs" "$RES/assets/launcher" "$RES/vulkan/icd.d" "$RES/fonts"
 rm -f "$G/crackdown"
 cp "$W/game-build-macos/crackdown" "$G/crackdown"
 cat "$R/config/crackdown.toml" "$R/config/crackdown-macos.toml" > "$RES/crackdown.toml"
 cp "$R/packaging/glyphs/button_glyphs.dds" "$R/packaging/glyphs/button_glyphs.toml" "$RES/glyphs/"
 cp "$R/assets/launcher/header-art.png" "$RES/assets/launcher/"
+# The launcher's skin: Exo 2 and Michroma, with their licences (SIL OFL 1.1).
+cp "$R/packaging/fonts/"*.ttf "$R/packaging/fonts/"*-OFL.txt "$RES/fonts/"
 # The Vulkan loader finds MoltenVK through this, which the game points it at (UseBundledVulkanDriver).
 cat > "$RES/vulkan/icd.d/MoltenVK_icd.json" <<'JSON'
 {

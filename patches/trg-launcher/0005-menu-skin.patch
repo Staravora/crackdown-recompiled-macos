@@ -1,0 +1,869 @@
+diff --git a/examples/demo/main.cpp b/examples/demo/main.cpp
+index a102e24..e9057ef 100644
+--- a/examples/demo/main.cpp
++++ b/examples/demo/main.cpp
+@@ -244,6 +244,7 @@ void WritePpm(const char* path, int w, int h) {
+ int main(int argc, char** argv) {
+   Demo demo;
+   std::string theme, screenshot;
++  std::string skin_fonts;  // --skin: a folder with Exo2-Regular/SemiBold.ttf and Michroma-Regular.ttf
+   int start_page = -1;
+   bool show_prompt = false;
+   for (int i = 1; i < argc; ++i) {
+@@ -252,6 +253,7 @@ int main(int argc, char** argv) {
+     else if (!std::strcmp(argv[i], "--screenshot") && i + 1 < argc) screenshot = argv[++i];
+     else if (!std::strcmp(argv[i], "--ready")) demo.force_ready = true;
+     else if (!std::strcmp(argv[i], "--prompt")) show_prompt = true;
++    else if (!std::strcmp(argv[i], "--skin") && i + 1 < argc) skin_fonts = argv[++i];
+   }
+   if (!theme.empty()) demo.settings.Set("theme", theme);
+ 
+@@ -310,6 +312,27 @@ int main(int argc, char** argv) {
+   trg::StandaloneHooks hooks;
+   hooks.on_start = [&](trg::Launcher& l) {
+     l.config().branding.icon = trg::CreateTextureRGBA(128, 128, demo.icon_pixels.data());
++    if (skin_fonts.empty()) return;
++    trg::LauncherConfig& c = l.config();
++    c.skin = trg::MenuSkin::Blue();
++    c.skin.enabled = true;
++    c.skin.keys = {{"\xE2\x8F\x8E", "Play"}, {"\xE2\x8C\x98S", "Save"}, {"\xE2\x8C\x98Q", "Quit"}};
++    c.branding.subtitle_segments = {{"PC Port \xC2\xB7 v1.1 \xC2\xB7 by ", ""}, {"TekRant", "https://example.com"}};
++    ImFontAtlas* atlas = ImGui::GetIO().Fonts;
++    // Exo 2 has no Command or Return symbols; the system's symbol font fills them in.
++    const auto font = [&](const char* file) {
++      ImFont* f = atlas->AddFontFromFileTTF((skin_fonts + "/" + file).c_str(), c.fonts.size);
++      static const ImWchar symbols[] = {0x2318, 0x2318, 0x23CE, 0x23CE, 0};
++      ImFontConfig merge;
++      merge.MergeMode = true;
++      atlas->AddFontFromFileTTF("/System/Library/Fonts/Apple Symbols.ttf", c.fonts.size, &merge, symbols);
++      return f;
++    };
++    if (ImFont* regular = font("Exo2-Regular.ttf")) {
++      c.fonts.regular = regular;
++      c.fonts.semibold = c.fonts.bold = font("Exo2-SemiBold.ttf");
++      c.skin.display = atlas->AddFontFromFileTTF((skin_fonts + "/Michroma-Regular.ttf").c_str(), c.fonts.size);
++    }
+   };
+   hooks.on_stop = [&](trg::Launcher& l) { trg::DestroyTexture(l.config().branding.icon); };
+   int frames = 0;
+diff --git a/include/trg/launcher.h b/include/trg/launcher.h
+index 00b405c..9fbb9a3 100644
+--- a/include/trg/launcher.h
++++ b/include/trg/launcher.h
+@@ -113,6 +113,43 @@ struct Branding {
+   ImU32 title_shadow = IM_COL32(0, 0, 0, 150);
+ };
+ 
++// ------------------------------------------------------------------- skin ---
++// A launcher drawn like a game's own menus: panels with one chamfered corner and scanlines, glossy bevelled buttons
++// with a hard gloss line, angled header tabs and a help strip along the bottom. Off unless `enabled`. With it on, the
++// header is a title line over a backdrop that fills the window, the sidebar and the page sit in panels, headings
++// become sub-tabs, and the footer is the strip, whose middle shows the help of the row under the mouse.
++struct GlossLook {
++  ImU32 border_top, border_bottom;
++  ImU32 face_top, face_upper, face_lower, face_bottom;  // above the gloss line, then below it
++  ImU32 text;
++};
++
++struct MenuSkin {
++  bool enabled = false;
++  ImFont* display = nullptr;  // the title and PLAY; nullptr: bold
++  HeaderPainter backdrop;     // fills the window, under everything; default: the panel colours
++  std::string nav_title = "Launcher";
++  // Strip hints, key then what it does: {"\xE2\x8C\x98S", "Save"}. The keys need their glyphs in the font.
++  std::vector<std::pair<std::string, std::string>> keys;
++
++  ImU32 shade_top, shade_bottom;  // over the backdrop
++  ImU32 title_glow;
++  ImU32 meta_text, meta_link;
++  ImU32 panel_border, panel_top, panel_bottom, scanline;
++  ImU32 tab_top, tab_middle, tab_bottom;  // a panel's header tab
++  ImU32 sub_tab_top, sub_tab_bottom;      // a Heading
++  ImU32 strip_top, strip_upper, strip_lower, strip_bottom, strip_edge, strip_line;
++  ImU32 hint, hint_strong, help_text;
++  ImU32 text, text_secondary, text_muted;
++  GlossLook normal, hot, selected, muted, primary;
++  ImU32 glow, primary_glow;
++  ImU32 orb_light, orb_mid, orb_dark, orb_glow;  // the status card's orb when ready
++  ImU32 orb_warn_light, orb_warn_mid, orb_warn_dark;
++
++  // Navy scanline panels and glossy blue buttons.
++  static MenuSkin Blue();
++};
++
+ // ------------------------------------------------------------------ pages ---
+ struct Page {
+   std::string name;   // sidebar entry and page title
+@@ -164,6 +201,7 @@ enum class Status { kReady, kAttention, kBusy };
+ struct LauncherConfig {
+   Branding branding;
+   Theme theme = Theme::Midnight();
++  MenuSkin skin;  // off by default
+   Fonts fonts;
+   SettingsStore* settings = nullptr;  // required; not owned
+   std::vector<Page> pages;
+@@ -233,6 +271,9 @@ class Ui {
+   void EndRows();
+   int Segmented(const char* id, const std::vector<std::string>& labels, int selected);
+   bool AccentButton(const char* label, ImVec2 size = ImVec2(-FLT_MIN, 0));
++  // A plain button, or an accent one; drawn glossy when the launcher has a MenuSkin.
++  bool Button(const char* label, ImVec2 size = ImVec2(-FLT_MIN, 0), bool accent = false);
++  bool skin_enabled() const { return skinned(); }
+   std::optional<ImGuiKey> KeyCapture(const char* id, const std::string& shown, float width = -FLT_MIN);
+   // The coloured card at the top of an install page. `progress` in 0..1 draws
+   // a bar under the title instead of `detail`.
+@@ -262,11 +303,13 @@ class Ui {
+   void LeaveRows() {
+     if (in_rows_) EndRows();
+   }
++  bool skinned() const;
+ 
+   Launcher* launcher_ = nullptr;
+   float scale_ = 1.0f;
+   bool in_rows_ = false;
+   int rows_id_ = 0;
++  std::vector<std::string> row_help_;  // each row's help in the open table, for the skin's strip
+   std::string capturing_;  // id of the key binding waiting for a key
+   int capture_frame_ = 0;
+ };
+@@ -309,6 +352,12 @@ class Launcher {
+   void DrawContent(ImVec2 size);
+   void DrawFooter(ImVec2 origin, float w, float h);
+   void DrawPlayButton(ImVec2 size, bool can_play);
++  // MenuSkin's layout.
++  void DrawSkinned(ImVec2 origin, float w, float h);
++  void DrawSkinnedHeader(ImVec2 origin, float w, float h);
++  void DrawSkinnedNav(ImVec2 min, ImVec2 max);
++  void DrawSkinnedContent(ImVec2 min, ImVec2 max);
++  void DrawSkinnedStrip(ImVec2 origin, float w, float h);
+   void HandleHotkeys();
+   void DrawPrompt();
+   Result TryPlay();
+@@ -327,6 +376,7 @@ class Launcher {
+   bool prompt_confirmed_ = false;  // a prompt button chose to play: skip before_play once
+   std::vector<std::string> restart_baseline_;
+   int autoplay_frames_ = -1;       // TRG_LAUNCHER_AUTOPLAY: frames left before PLAY
++  std::string hover_help_;         // the help of the row under the mouse, for the skin's strip
+ };
+ 
+ // Whether to show the launcher at startup: always when the game cannot start
+diff --git a/src/launcher.cpp b/src/launcher.cpp
+index e60714c..a327559 100644
+--- a/src/launcher.cpp
++++ b/src/launcher.cpp
+@@ -7,7 +7,9 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <string>
++#include <vector>
+ 
++#include "imgui_internal.h"  // ShadeVertsLinearColorGradientKeepAlpha, CalcItemSize, TableGetHoveredRow
+ #include "trg/platform.h"
+ 
+ namespace trg {
+@@ -82,6 +84,98 @@ ImFont* LoadFirstFont(std::initializer_list<std::string> paths, float size) {
+   return nullptr;
+ }
+ 
++// ---------------------------------------------------------- skin drawing --
++// A rectangle with its top-left corner cut at `chamfer` and its bottom edge `slant` short on the right, clockwise as
++// ImGui's anti-aliased fill wants.
++struct Shape {
++  ImVec2 p[5];
++};
++Shape Chamfered(ImVec2 a, ImVec2 b, float chamfer, float slant = 0.0f) {
++  return {{ImVec2(a.x + chamfer, a.y), ImVec2(b.x, a.y), ImVec2(b.x - slant, b.y), ImVec2(a.x, b.y), ImVec2(a.x, a.y + chamfer)}};
++}
++
++// Keeps the part of a convex polygon between y0 and y1.
++std::vector<ImVec2> ClipBand(const ImVec2* in, int n, float y0, float y1) {
++  std::vector<ImVec2> poly(in, in + n), out;
++  for (int edge = 0; edge < 2; ++edge) {
++    const float y = edge ? y1 : y0;
++    const auto inside = [&](const ImVec2& p) { return edge ? p.y <= y : p.y >= y; };
++    out.clear();
++    for (size_t i = 0; i < poly.size(); ++i) {
++      const ImVec2 a = poly[i], b = poly[(i + 1) % poly.size()];
++      if (inside(a)) out.push_back(a);
++      if (inside(a) != inside(b)) {
++        const float t = (y - a.y) / (b.y - a.y);
++        out.push_back(ImVec2(a.x + (b.x - a.x) * t, y));
++      }
++    }
++    poly.swap(out);
++    if (poly.size() < 3) break;
++  }
++  return poly;
++}
++
++// Fills the part of `shape` between y0 and y1 with a vertical gradient. Clipping first makes the gradient exact, so
++// stacked bands give hard steps such as a gloss line.
++void FillBand(ImDrawList* dl, const Shape& shape, float y0, float y1, ImU32 c0, ImU32 c1) {
++  const std::vector<ImVec2> part = ClipBand(shape.p, 5, y0, y1);
++  if (part.size() < 3) return;
++  const int start = dl->VtxBuffer.Size;
++  dl->AddConvexPolyFilled(part.data(), int(part.size()), c0);
++  ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, start, dl->VtxBuffer.Size, ImVec2(0, y0), ImVec2(0, y1), c0, c1);
++}
++
++// A soft glow around a shape, standing in for a CSS drop-shadow.
++// Faint filled shapes, each a little larger, so they add up to a halo that fades outwards. The button covers the middle.
++void Glow(ImDrawList* dl, ImVec2 a, ImVec2 b, float chamfer, ImU32 color, float radius) {
++  const int steps = 7;
++  const ImU32 c = (color & ~IM_COL32_A_MASK) | (ImU32(float((color >> IM_COL32_A_SHIFT) & 0xFF) * 0.09f) << IM_COL32_A_SHIFT);
++  for (int i = steps; i >= 1; --i) {
++    const float grow = radius * float(i) / float(steps);
++    const Shape s = Chamfered(ImVec2(a.x - grow, a.y - grow), ImVec2(b.x + grow, b.y + grow), chamfer + grow * 0.4f);
++    dl->AddConvexPolyFilled(s.p, 5, c);
++  }
++}
++
++// A glossy bevelled button face: a border layer, then the face with its hard gloss line between 48% and 52%.
++void GlossFace(ImDrawList* dl, ImVec2 a, ImVec2 b, float chamfer, float border, const GlossLook& look) {
++  const Shape outer = Chamfered(a, b, chamfer);
++  FillBand(dl, outer, a.y, b.y, look.border_top, look.border_bottom);
++  const ImVec2 fa(a.x + border, a.y + border), fb(b.x - border, b.y - border);
++  const Shape face = Chamfered(fa, fb, chamfer - border * 0.5f);
++  const float h = fb.y - fa.y;
++  FillBand(dl, face, fa.y, fa.y + h * 0.48f, look.face_top, look.face_upper);
++  FillBand(dl, face, fa.y + h * 0.48f, fa.y + h * 0.52f, look.face_upper, look.face_lower);
++  FillBand(dl, face, fa.y + h * 0.52f, fb.y, look.face_lower, look.face_bottom);
++}
++
++// An angled tab: a chamfered top-left corner and a slanted right end.
++void Tab(ImDrawList* dl, ImVec2 a, ImVec2 b, float chamfer, float slant, ImU32 top, ImU32 middle, ImU32 bottom) {
++  const Shape s = Chamfered(a, b, chamfer, slant);
++  const float mid = a.y + (b.y - a.y) * 0.6f;
++  FillBand(dl, s, a.y, mid, top, middle);
++  FillBand(dl, s, mid, b.y, middle, bottom);
++}
++
++// A panel: a border, then a body with a vertical gradient and scanlines, all with the top-left corner cut.
++void Panel(ImDrawList* dl, ImVec2 a, ImVec2 b, float chamfer, float border, float scale, const MenuSkin& skin) {
++  FillBand(dl, Chamfered(a, b, chamfer), a.y, b.y, skin.panel_border, skin.panel_border);
++  const ImVec2 ia(a.x + border, a.y + border), ib(b.x - border, b.y - border);
++  const float inner = chamfer - border * 0.5f;
++  FillBand(dl, Chamfered(ia, ib, inner), ia.y, ib.y, skin.panel_top, skin.panel_bottom);
++  for (float y = ia.y + 2 * scale; y < ib.y; y += 4 * scale) {
++    const float x0 = y < ia.y + inner ? ia.x + (inner - (y - ia.y)) : ia.x;
++    dl->AddLine(ImVec2(x0, y), ImVec2(ib.x, y), skin.scanline, 1.0f);
++  }
++}
++
++// Text with a one-pixel drop shadow, as the strip and buttons draw it.
++void ShadowText(ImDrawList* dl, ImFont* font, float size, ImVec2 pos, ImU32 color, const char* text,
++                ImU32 shadow = IM_COL32(0, 0, 0, 128)) {
++  dl->AddText(font, size, ImVec2(pos.x, pos.y + 1), shadow, text);
++  dl->AddText(font, size, pos, color, text);
++}
++
+ void PushAccent(const Theme& t) {
+   ImGui::PushStyleColor(ImGuiCol_Button, t.accent);
+   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, t.accent_hot);
+@@ -194,6 +288,118 @@ Theme Theme::WithAccent(ImVec4 colour) const {
+ }
+ 
+ // ------------------------------------------------------------------- fonts --
++MenuSkin MenuSkin::Blue() {
++  MenuSkin k;
++  k.shade_top = IM_COL32(4, 10, 48, 89);
++  k.shade_bottom = IM_COL32(4, 10, 48, 140);
++  k.title_glow = IM_COL32(80, 150, 255, 204);
++  k.meta_text = IM_COL32(0xCF, 0xE0, 0xFF, 255);
++  k.meta_link = IM_COL32(0x9C, 0xC0, 0xFF, 255);
++  k.panel_border = IM_COL32(0x4A, 0x72, 0xE6, 255);
++  k.panel_top = IM_COL32(12, 30, 110, 240);
++  k.panel_bottom = IM_COL32(7, 18, 82, 240);
++  k.scanline = IM_COL32(120, 160, 255, 18);
++  k.tab_top = IM_COL32(0x31, 0x59, 0xD6, 255);
++  k.tab_middle = IM_COL32(0x1B, 0x3A, 0xA8, 255);
++  k.tab_bottom = IM_COL32(0x14, 0x2E, 0x8F, 255);
++  k.sub_tab_top = IM_COL32(49, 89, 214, 191);
++  k.sub_tab_bottom = IM_COL32(20, 46, 143, 191);
++  k.strip_top = IM_COL32(0x0B, 0x36, 0xC0, 255);
++  k.strip_upper = IM_COL32(0x0D, 0x44, 0xD8, 255);
++  k.strip_lower = IM_COL32(0x0A, 0x2D, 0xA6, 255);
++  k.strip_bottom = IM_COL32(0x08, 0x1F, 0x7C, 255);
++  k.strip_edge = IM_COL32(0x3B, 0x74, 0xFF, 255);
++  k.strip_line = IM_COL32(140, 180, 255, 46);
++  k.hint = IM_COL32(0xB9, 0xCD, 0xFB, 255);
++  k.hint_strong = IM_COL32_WHITE;
++  k.help_text = IM_COL32_WHITE;
++  k.text = IM_COL32_WHITE;
++  k.text_secondary = IM_COL32(0xC3, 0xD3, 0xF7, 255);
++  k.text_muted = IM_COL32(0xA9, 0xBF, 0xF2, 255);
++  const ImU32 border_top = IM_COL32(0x9C, 0xC0, 0xFF, 255), border_bottom = IM_COL32(0x4B, 0x7C, 0xF0, 255);
++  k.normal = {border_top, border_bottom, IM_COL32(0x33, 0x66, 0xEA, 255), IM_COL32(0x1C, 0x44, 0xC4, 255),
++              IM_COL32(0x0F, 0x2A, 0x96, 255), IM_COL32(0x0C, 0x23, 0x80, 255), IM_COL32(0xE8, 0xEF, 0xFF, 255)};
++  k.hot = {border_top, border_bottom, IM_COL32(0x4A, 0x7C, 0xFF, 255), IM_COL32(0x25, 0x52, 0xD6, 255),
++           IM_COL32(0x16, 0x3A, 0xAE, 255), IM_COL32(0x11, 0x30, 0x8F, 255), IM_COL32_WHITE};
++  const ImU32 selected_border = IM_COL32(0xE8, 0xF0, 0xFF, 255);
++  k.selected = {selected_border, selected_border, IM_COL32(0x5A, 0x8E, 0xFF, 255), IM_COL32(0x2A, 0x5E, 0xE6, 255),
++                IM_COL32(0x1A, 0x44, 0xC8, 255), IM_COL32(0x16, 0x38, 0xAC, 255), IM_COL32_WHITE};
++  k.muted = {border_top, border_bottom, IM_COL32(0x6E, 0x82, 0xC0, 255), IM_COL32(0x4A, 0x5D, 0x9C, 255),
++             IM_COL32(0x4A, 0x5D, 0x9C, 255), IM_COL32(0x3D, 0x4F, 0x8A, 255), IM_COL32(0xE4, 0xEA, 0xFF, 255)};
++  k.primary = {IM_COL32_WHITE, IM_COL32_WHITE, IM_COL32(0x7F, 0xB6, 0xFF, 255), IM_COL32(0x3B, 0x7B, 0xFF, 255),
++               IM_COL32(0x20, 0x58, 0xE6, 255), IM_COL32(0x1A, 0x48, 0xC4, 255), IM_COL32_WHITE};
++  k.glow = IM_COL32(90, 160, 255, 242);
++  k.primary_glow = IM_COL32(110, 190, 255, 255);
++  k.orb_light = IM_COL32(0xD6, 0xF2, 0xFF, 255);
++  k.orb_mid = IM_COL32(0x59, 0xB8, 0xFF, 255);
++  k.orb_dark = IM_COL32(0x1A, 0x5E, 0xE0, 255);
++  k.orb_glow = IM_COL32(90, 180, 255, 230);
++  k.orb_warn_light = IM_COL32(0xFF, 0xF1, 0xC9, 255);
++  k.orb_warn_mid = IM_COL32(0xFF, 0xB5, 0x47, 255);
++  k.orb_warn_dark = IM_COL32(0xB3, 0x5A, 0x00, 255);
++  return k;
++}
++
++namespace {
++
++// A glossy button that takes input; true when clicked. Keyboard and controller focus look selected, as in the game.
++bool GlossButton(const MenuSkin& skin, const char* label, ImVec2 size, bool selected, ImFont* font, float font_size,
++                 float s, bool muted = false, bool centre = false) {
++  const ImVec2 a = ImGui::GetCursorScreenPos();
++  const bool clicked = ImGui::InvisibleButton(label, size);
++  const bool hot = ImGui::IsItemHovered() || ImGui::IsItemActive();
++  const bool focused = ImGui::IsItemFocused() && ImGui::GetIO().NavVisible;
++  const GlossLook& look = selected || focused ? skin.selected : hot ? skin.hot : muted ? skin.muted : skin.normal;
++  ImDrawList* dl = ImGui::GetWindowDrawList();
++  const ImVec2 b(a.x + size.x, a.y + size.y);
++  if (selected || focused) Glow(dl, a, b, 12 * s, skin.glow, 7 * s);
++  GlossFace(dl, a, b, 12 * s, 2 * s, look);
++  const char* end = ImGui::FindRenderedTextEnd(label);
++  const ImVec2 ts = font->CalcTextSizeA(font_size, FLT_MAX, 0.0f, label, end);
++  const float x = centre ? a.x + (size.x - ts.x) * 0.5f : a.x + 16 * s;
++  const float y = a.y + (size.y - ts.y) * 0.5f;
++  dl->AddText(font, font_size, ImVec2(x, y + 1), IM_COL32(0, 0, 0, 128), label, end);
++  dl->AddText(font, font_size, ImVec2(x, y), look.text, label, end);
++  return clicked;
++}
++
++// ImGui's own frames (combos, sliders, text boxes) in the skin's colours, square-cornered.
++void ApplySkin(const MenuSkin& k, float s) {
++  ImGuiStyle& st = ImGui::GetStyle();
++  st.ChildRounding = st.FrameRounding = st.PopupRounding = st.GrabRounding = st.TabRounding = 0;
++  st.ScrollbarRounding = 0;
++  st.FrameBorderSize = 1.0f;
++  st.PopupBorderSize = 1.0f;
++  st.FramePadding = ImVec2(14 * s, 8 * s);
++  ImVec4* c = st.Colors;
++  const auto v = [](ImU32 u) { return ImGui::ColorConvertU32ToFloat4(u); };
++  c[ImGuiCol_Text] = v(k.text);
++  c[ImGuiCol_TextDisabled] = v(k.text_muted);
++  c[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
++  c[ImGuiCol_PopupBg] = v(k.panel_bottom);
++  c[ImGuiCol_Border] = v(k.normal.border_top);
++  c[ImGuiCol_FrameBg] = v(k.normal.face_lower);
++  c[ImGuiCol_FrameBgHovered] = v(k.hot.face_upper);
++  c[ImGuiCol_FrameBgActive] = v(k.selected.face_upper);
++  c[ImGuiCol_Button] = v(k.normal.face_upper);
++  c[ImGuiCol_ButtonHovered] = v(k.hot.face_upper);
++  c[ImGuiCol_ButtonActive] = v(k.selected.face_upper);
++  c[ImGuiCol_Header] = v(k.selected.face_lower);
++  c[ImGuiCol_HeaderHovered] = v(k.hot.face_upper);
++  c[ImGuiCol_HeaderActive] = v(k.selected.face_upper);
++  c[ImGuiCol_SliderGrab] = v(k.selected.face_top);
++  c[ImGuiCol_SliderGrabActive] = v(k.selected.border_top);
++  c[ImGuiCol_CheckMark] = v(k.text);
++  c[ImGuiCol_PlotHistogram] = v(k.selected.face_top);
++  c[ImGuiCol_ScrollbarGrab] = v(k.normal.face_upper);
++  c[ImGuiCol_ScrollbarGrabHovered] = v(k.hot.face_upper);
++  c[ImGuiCol_ScrollbarGrabActive] = v(k.selected.face_upper);
++  c[ImGuiCol_TableBorderLight] = ImVec4(0, 0, 0, 0);
++  c[ImGuiCol_NavCursor] = ImVec4(0, 0, 0, 0);  // focus shows as the selected look instead
++}
++
++}  // namespace
++
+ Fonts LoadSystemFonts(float size) {
+   Fonts f;
+   f.size = size;
+@@ -235,11 +441,23 @@ void Ui::BeginPage() {
+ 
+ void Ui::EndPage() { LeaveRows(); }
+ 
++bool Ui::skinned() const { return launcher_->config_.skin.enabled; }
++
++bool Ui::Button(const char* label, ImVec2 size, bool accent) {
++  if (!skinned()) return accent ? AccentButton(label, size) : ImGui::Button(label, size);
++  const float font_size = 16 * scale_;
++  const float text_w = fonts().regular->CalcTextSizeA(font_size, FLT_MAX, 0.0f, label, ImGui::FindRenderedTextEnd(label)).x;
++  const ImVec2 sz = ImGui::CalcItemSize(size, text_w + 36 * scale_, 36 * scale_);
++  return GlossButton(launcher_->config_.skin, label, sz, accent, fonts().regular, font_size, scale_);
++}
++
+ void Ui::Row(const char* label, const char* help) {
+   if (!in_rows_) {
+     char id[32];
+     std::snprintf(id, sizeof id, "##rows%d", rows_id_++);
+-    in_rows_ = ImGui::BeginTable(id, 2, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp);
++    const ImGuiTableFlags lines = skinned() ? ImGuiTableFlags_None : ImGuiTableFlags_BordersInnerH;
++    in_rows_ = ImGui::BeginTable(id, 2, lines | ImGuiTableFlags_SizingStretchProp);
++    row_help_.clear();
+     if (in_rows_) {
+       ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthStretch, 0.46f);
+       ImGui::TableSetupColumn("control", ImGuiTableColumnFlags_WidthStretch, 0.54f);
+@@ -248,6 +466,28 @@ void Ui::Row(const char* label, const char* help) {
+   if (in_rows_) {
+     ImGui::TableNextRow();
+     ImGui::TableSetColumnIndex(0);
++    row_help_.push_back(help ? help : "");
++  }
++  if (skinned()) {
++    // The label at body size, the help small and muted under it.
++    const MenuSkin& k = launcher_->config_.skin;
++    if (label && *label) {
++      ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(k.text));
++      ImGui::TextUnformatted(label);
++      ImGui::PopStyleColor();
++    }
++    if (help && *help) {
++      ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(k.text_muted));
++      ImGui::PushFont(nullptr, 13 * scale_);
++      ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 24 * scale_);
++      ImGui::TextUnformatted(help);
++      ImGui::PopTextWrapPos();
++      ImGui::PopFont();
++      ImGui::PopStyleColor();
++    }
++    if (in_rows_) ImGui::TableSetColumnIndex(1);
++    ImGui::SetNextItemWidth(-FLT_MIN);
++    return;
+   }
+   if (label && *label) {
+     ImGui::PushFont(fonts().semibold, 0.0f);
+@@ -269,6 +509,9 @@ void Ui::Row(const char* label, const char* help) {
+ 
+ void Ui::EndRows() {
+   if (!in_rows_) return;
++  if (const int row = ImGui::TableGetHoveredRow(); skinned() && row >= 0 && size_t(row) < row_help_.size() &&
++                                                   !row_help_[size_t(row)].empty())
++    launcher_->hover_help_ = row_help_[size_t(row)];
+   ImGui::EndTable();
+   in_rows_ = false;
+ }
+@@ -277,12 +520,21 @@ int Ui::Segmented(const char* id, const std::vector<std::string>& labels, int se
+   if (labels.empty()) return -1;
+   ImGui::PushID(id);
+   const float avail = ImGui::GetContentRegionAvail().x;
+-  const float gap = 6 * scale_;
++  const float gap = (skinned() ? 8 : 6) * scale_;
+   const float bw = (avail - gap * float(labels.size() - 1)) / float(labels.size());
+   int clicked = -1;
+   for (size_t i = 0; i < labels.size(); ++i) {
+     if (i) ImGui::SameLine(0, gap);
+     const bool sel = int(i) == selected;
++    if (skinned()) {
++      ImGui::PushID(int(i));
++      if (GlossButton(launcher_->config_.skin, labels[i].c_str(), ImVec2(bw, 36 * scale_), sel, fonts().regular,
++                      16 * scale_, scale_) &&
++          !sel)
++        clicked = int(i);
++      ImGui::PopID();
++      continue;
++    }
+     if (sel) PushAccent(theme());
+     ImGui::PushID(int(i));
+     if (ImGui::Button(labels[i].c_str(), ImVec2(bw, 0)) && !sel) clicked = int(i);
+@@ -294,6 +546,7 @@ int Ui::Segmented(const char* id, const std::vector<std::string>& labels, int se
+ }
+ 
+ bool Ui::AccentButton(const char* label, ImVec2 size) {
++  if (skinned()) return Button(label, size, true);
+   PushAccent(theme());
+   const bool r = ImGui::Button(label, size);
+   ImGui::PopStyleColor(4);
+@@ -408,7 +661,7 @@ void Ui::Info(const char* label, const char* text) {
+ bool Ui::ButtonRow(const char* label, const char* help, const char* button, bool accent) {
+   Row(label, help);
+   ImGui::PushID(label);
+-  const bool r = accent ? AccentButton(button) : ImGui::Button(button, ImVec2(-FLT_MIN, 0));
++  const bool r = Button(button, ImVec2(-FLT_MIN, 0), accent);
+   ImGui::PopID();
+   return r;
+ }
+@@ -417,7 +670,7 @@ bool Ui::ConfirmRow(const char* label, const char* help, const char* button, con
+                     const char* confirm, const char* cancel) {
+   Row(label, help);
+   ImGui::PushID(label);
+-  if (ImGui::Button(button, ImVec2(-FLT_MIN, 0))) ImGui::OpenPopup("##confirm");
++  if (Button(button, ImVec2(-FLT_MIN, 0), false)) ImGui::OpenPopup("##confirm");
+   bool confirmed = false;
+   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24 * scale_, 20 * scale_));
+   const bool open = ImGui::BeginPopupModal("##confirm", nullptr,
+@@ -434,7 +687,7 @@ bool Ui::ConfirmRow(const char* label, const char* help, const char* button, con
+       ImGui::CloseCurrentPopup();
+     }
+     ImGui::SameLine();
+-    if (ImGui::Button(cancel, ImVec2(150 * scale_, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
++    if (Button(cancel, ImVec2(150 * scale_, 0), false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+       ImGui::CloseCurrentPopup();
+     ImGui::EndPopup();
+   }
+@@ -478,7 +731,7 @@ std::optional<ImGuiKey> Ui::KeyCapture(const char* id, const std::string& shown,
+         }
+       }
+     }
+-  } else if (ImGui::Button(shown.empty() ? "(none)" : shown.c_str(), ImVec2(width, 0))) {
++  } else if (Button(shown.empty() ? "(none)" : shown.c_str(), ImVec2(width, 0), false)) {
+     capturing_ = id;
+     capture_frame_ = ImGui::GetFrameCount();
+   }
+@@ -493,6 +746,54 @@ std::optional<ImGuiKey> Ui::KeyBindRow(const char* label, const char* help, cons
+ 
+ void Ui::StatusCard(Status status, const char* title, const char* detail, float progress) {
+   LeaveRows();
++  if (skinned()) {
++    // A glowing orb, then the title and one line of detail, as in the game's own menus.
++    const MenuSkin& k = launcher_->config_.skin;
++    const float s = scale_;
++    const ImVec2 p = ImGui::GetCursorScreenPos();
++    const float w = ImGui::GetContentRegionAvail().x, h = 62 * s;
++    ImDrawList* dl = ImGui::GetWindowDrawList();
++    const ImVec2 centre(p.x + 23 * s, p.y + h * 0.5f);
++    const float r = 23 * s;
++    const bool warn = status == Status::kAttention;
++    const ImU32 light = warn ? k.orb_warn_light : k.orb_light, mid = warn ? k.orb_warn_mid : k.orb_mid;
++    const ImU32 dark = warn ? k.orb_warn_dark : k.orb_dark;
++    const ImU32 halo = warn ? (k.orb_warn_mid & ~IM_COL32_A_MASK) | IM_COL32(0, 0, 0, 200) : k.orb_glow;
++    for (int i = 6; i >= 1; --i)
++      dl->AddCircleFilled(centre, r + float(i) * 3 * s,
++                          (halo & ~IM_COL32_A_MASK) | (ImU32(float((halo >> IM_COL32_A_SHIFT) & 0xFF) * 0.07f) << IM_COL32_A_SHIFT),
++                          48);
++    // A radial gradient: circles from the dark rim in to a highlight up and to the left of centre.
++    const int rings = 16;
++    for (int i = 0; i < rings; ++i) {
++      const float t = float(i) / float(rings - 1);
++      const ImVec2 c(centre.x - r * 0.1f * t, centre.y - r * 0.15f * t);
++      const ImU32 col = t < 0.6f ? ImGui::GetColorU32(ImLerp(ImGui::ColorConvertU32ToFloat4(dark),
++                                                             ImGui::ColorConvertU32ToFloat4(mid), t / 0.6f))
++                                 : ImGui::GetColorU32(ImLerp(ImGui::ColorConvertU32ToFloat4(mid),
++                                                             ImGui::ColorConvertU32ToFloat4(light), (t - 0.6f) / 0.4f));
++      dl->AddCircleFilled(c, r * (1.0f - t * 0.85f), col, 48);
++    }
++    if (status == Status::kBusy) {
++      const float a = float(ImGui::GetTime()) * 5.0f;
++      dl->PathArcTo(centre, r + 5 * s, a, a + 4.2f, 32);
++      dl->PathStroke(k.selected.border_top, 0, 3 * s);
++    }
++    const float x = p.x + 46 * s + 18 * s;
++    ImDrawList* text = dl;
++    ShadowText(text, fonts().semibold, 21 * s, ImVec2(x, p.y + 6 * s), k.text, title);
++    if (progress >= 0.0f) {
++      ImGui::SetCursorScreenPos(ImVec2(x, p.y + 36 * s));
++      ImGui::ProgressBar(progress, ImVec2(w - (x - p.x) - 18 * s, 8 * s), "");
++    } else if (detail && *detail) {
++      dl->PushClipRect(ImVec2(x, p.y), ImVec2(p.x + w - 12 * s, p.y + h), true);
++      dl->AddText(fonts().regular, 14 * s, ImVec2(x, p.y + 36 * s), k.text_muted, detail);
++      dl->PopClipRect();
++    }
++    ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + h + 10 * s));
++    ImGui::Dummy(ImVec2(0, 0));
++    return;
++  }
+   const Theme& t = theme();
+   const ImVec2 p = ImGui::GetCursorScreenPos();
+   const float w = ImGui::GetContentRegionAvail().x, h = 76 * scale_;
+@@ -546,6 +847,21 @@ bool Ui::TaskProgress(Task& task) {
+ 
+ void Ui::Heading(const char* text) {
+   LeaveRows();
++  if (skinned()) {
++    // A sub-tab across the page.
++    const MenuSkin& k = launcher_->config_.skin;
++    const float s = scale_;
++    ImGui::Dummy(ImVec2(0, 4 * s));
++    const ImVec2 a = ImGui::GetCursorScreenPos();
++    const ImVec2 b(a.x + ImGui::GetContentRegionAvail().x, a.y + 30 * s);
++    ImDrawList* dl = ImGui::GetWindowDrawList();
++    Tab(dl, a, b, 10 * s, 50 * s, k.sub_tab_top, k.sub_tab_bottom, k.sub_tab_bottom);
++    const float size = 17 * s;
++    ShadowText(dl, fonts().regular, size, ImVec2(a.x + 18 * s, a.y + (30 * s - size) * 0.5f), k.text, text);
++    ImGui::Dummy(ImVec2(b.x - a.x, 30 * s));
++    ImGui::Dummy(ImVec2(0, 2 * s));
++    return;
++  }
+   ImGui::Dummy(ImVec2(0, 4 * scale_));
+   ImGui::PushFont(fonts().semibold, fonts().size * 1.1f);
+   ImGui::TextUnformatted(text);
+@@ -554,7 +870,8 @@ void Ui::Heading(const char* text) {
+ 
+ void Ui::Paragraph(const char* text) {
+   LeaveRows();
+-  ImGui::PushStyleColor(ImGuiCol_Text, theme().dim);
++  ImGui::PushStyleColor(ImGuiCol_Text, skinned() ? ImGui::ColorConvertU32ToFloat4(launcher_->config_.skin.text_secondary)
++                                                 : theme().dim);
+   ImGui::PushTextWrapPos(0.0f);
+   ImGui::TextUnformatted(text);
+   ImGui::PopTextWrapPos();
+@@ -807,6 +1124,14 @@ Result Launcher::Frame() {
+   s_ = ImGui::GetFontSize() / fonts.size;
+   ui_.scale_ = s_;
+   ApplyTheme(config_.theme, s_);
++  if (config_.skin.enabled) {
++    // The skin is laid out at 1232 x 752 and scales with the window.
++    const ImVec2 size = ImGui::GetMainViewport()->Size;
++    s_ = ui_.scale_ = std::max(0.5f, std::min(size.x / 1232.0f, size.y / 752.0f));
++    ApplyTheme(config_.theme, s_);
++    ApplySkin(config_.skin, s_);
++    hover_help_.clear();
++  }
+ 
+   const ImGuiViewport* vp = ImGui::GetMainViewport();
+   ImGui::SetNextWindowPos(vp->Pos);
+@@ -817,21 +1142,25 @@ Result Launcher::Frame() {
+                    ImGuiWindowFlags_NoBringToFrontOnFocus);
+   ImGui::PopStyleVar();
+   const float w = vp->Size.x, h = vp->Size.y;
+-  const float header = std::clamp(h * 0.2f, 120 * s_, 190 * s_);
+-  const float footer = 78 * s_;
+-  const float margin = 22 * s_;
++  if (config_.skin.enabled) {
++    DrawSkinned(vp->Pos, w, h);
++  } else {
++    const float header = std::clamp(h * 0.2f, 120 * s_, 190 * s_);
++    const float footer = 78 * s_;
++    const float margin = 22 * s_;
+ 
+-  DrawHeader(vp->Pos, w, header);
++    DrawHeader(vp->Pos, w, header);
+ 
+-  const float body_top = header + margin * 0.6f;
+-  const float body_h = std::max(100 * s_, h - body_top - footer);
+-  const float sidebar_w = std::clamp(w * 0.17f, 170 * s_, 230 * s_);
+-  ImGui::SetCursorPos(ImVec2(margin, body_top));
+-  DrawSidebar(ImVec2(sidebar_w, body_h));
+-  ImGui::SetCursorPos(ImVec2(margin * 2 + sidebar_w, body_top));
+-  DrawContent(ImVec2(w - sidebar_w - margin * 3, body_h));
++    const float body_top = header + margin * 0.6f;
++    const float body_h = std::max(100 * s_, h - body_top - footer);
++    const float sidebar_w = std::clamp(w * 0.17f, 170 * s_, 230 * s_);
++    ImGui::SetCursorPos(ImVec2(margin, body_top));
++    DrawSidebar(ImVec2(sidebar_w, body_h));
++    ImGui::SetCursorPos(ImVec2(margin * 2 + sidebar_w, body_top));
++    DrawContent(ImVec2(w - sidebar_w - margin * 3, body_h));
+ 
+-  DrawFooter(ImVec2(vp->Pos.x + margin, vp->Pos.y + h - footer), w - margin * 2, footer);
++    DrawFooter(ImVec2(vp->Pos.x + margin, vp->Pos.y + h - footer), w - margin * 2, footer);
++  }
+   HandleHotkeys();
+   DrawPrompt();
+   ImGui::End();
+@@ -1059,14 +1388,215 @@ void Launcher::DrawPlayButton(ImVec2 size, bool can_play) {
+   if (clicked) want_play_ = true;
+ }
+ 
++// ------------------------------------------------------------ skin layout --
++void Launcher::DrawSkinned(ImVec2 origin, float w, float h) {
++  const MenuSkin& k = config_.skin;
++  const float s = s_;
++  ImDrawList* dl = ImGui::GetWindowDrawList();
++  const ImVec2 max(origin.x + w, origin.y + h);
++  const HeaderContext ctx{dl, origin, max, float(ImGui::GetTime()), s, config_.theme};
++  if (k.backdrop) {
++    k.backdrop(ctx);
++  } else {
++    dl->AddRectFilledMultiColor(origin, max, k.tab_bottom, k.tab_bottom, k.strip_bottom, k.strip_bottom);
++  }
++  dl->AddRectFilledMultiColor(origin, max, k.shade_top, k.shade_top, k.shade_bottom, k.shade_bottom);
++
++  const float header = 92 * s, strip = 104 * s, side = 32 * s, nav_w = 290 * s, gap = 22 * s;
++  DrawSkinnedHeader(origin, w, header);
++  const float top = origin.y + header + 4 * s, bottom = max.y - strip - 22 * s;
++  DrawSkinnedNav(ImVec2(origin.x + side, top), ImVec2(origin.x + side + nav_w, bottom));
++  DrawSkinnedContent(ImVec2(origin.x + side + nav_w + gap, top), ImVec2(max.x - side, bottom));
++  DrawSkinnedStrip(ImVec2(origin.x, max.y - strip), w, strip);
++}
++
++void Launcher::DrawSkinnedHeader(ImVec2 origin, float w, float h) {
++  const MenuSkin& k = config_.skin;
++  const Branding& b = config_.branding;
++  const float s = s_;
++  ImDrawList* dl = ImGui::GetWindowDrawList();
++  ImFont* display = k.display ? k.display : config_.fonts.bold;
++  const float size = 34 * s, bottom = origin.y + h - 14 * s;
++  const float y = bottom - size;
++  dl->PushClipRect(origin, ImVec2(origin.x + w, origin.y + h), true);
++  // The title, two pixels apart a letter, with a blue glow and a drop shadow.
++  const auto title = [&](float x0, float dy, ImU32 color) {
++    float x = x0;
++    for (const char* c = b.title.c_str(); *c;) {
++      unsigned int ch = 0;
++      const char* next = c + ImTextCharFromUtf8(&ch, c, nullptr);
++      dl->AddText(display, size, ImVec2(x, y + dy), color, c, next);
++      x += display->CalcTextSizeA(size, FLT_MAX, 0.0f, c, next).x + 2 * s;
++      c = next;
++    }
++    return x;
++  };
++  const float x0 = origin.x + 32 * s;
++  const ImU32 halo = (k.title_glow & ~IM_COL32_A_MASK) | IM_COL32(0, 0, 0, 40);
++  for (int i = 0; i < 8; ++i) {
++    const float a = float(i) * 0.785f;
++    title(x0 + std::cos(a) * 3 * s, std::sin(a) * 3 * s, halo);
++  }
++  title(x0, 2 * s, IM_COL32(0, 0, 0, 150));
++  float x = title(x0, 0.0f, IM_COL32_WHITE) + 20 * s;
++  const float meta = 16 * s, my = bottom - meta - 3 * s;
++  if (b.subtitle_segments.empty()) {
++    ShadowText(dl, config_.fonts.regular, meta, ImVec2(x, my), k.meta_text, b.subtitle.c_str());
++  } else {
++    int n = 0;
++    for (const SubtitleSegment& seg : b.subtitle_segments) {
++      char id[24];
++      std::snprintf(id, sizeof id, "##meta%d", n++);
++      x += LinkText(dl, id, ImVec2(x, my), config_.fonts.regular, meta, seg.url.empty() ? k.meta_text : k.meta_link,
++                    seg.text.c_str(), seg.url);
++    }
++  }
++  dl->PopClipRect();
++}
++
++void Launcher::DrawSkinnedNav(ImVec2 a, ImVec2 b) {
++  const MenuSkin& k = config_.skin;
++  const float s = s_;
++  ImDrawList* dl = ImGui::GetWindowDrawList();
++  Panel(dl, a, b, 26 * s, 2 * s, s, k);
++  const ImVec2 ta(a.x + 14 * s, a.y + 12 * s), tb(b.x - 14 * s, a.y + 48 * s);
++  Tab(dl, ta, tb, 12 * s, 44 * s, k.tab_top, k.tab_middle, k.tab_bottom);
++  ShadowText(dl, config_.fonts.regular, 21 * s, ImVec2(ta.x + 18 * s, ta.y + 6 * s), k.text, k.nav_title.c_str());
++  float y = tb.y + 12 * s;
++  for (int i = 0; i < int(config_.pages.size()); ++i) {
++    const Page& page = config_.pages[size_t(i)];
++    ImGui::SetCursorScreenPos(ImVec2(ta.x, y));
++    ImGui::PushID(i);
++    if (GlossButton(k, page.name.c_str(), ImVec2(tb.x - ta.x, 40 * s), page_ == i, config_.fonts.regular, 19 * s, s))
++      GoToPage(i);
++    ImGui::PopID();
++    if (page.needs_attention && page.needs_attention())
++      dl->AddCircleFilled(ImVec2(tb.x - 18 * s, y + 20 * s), 5 * s, Col(config_.theme.warn_dot));
++    y += 48 * s;
++  }
++}
++
++void Launcher::DrawSkinnedContent(ImVec2 a, ImVec2 b) {
++  const MenuSkin& k = config_.skin;
++  const float s = s_;
++  ImDrawList* dl = ImGui::GetWindowDrawList();
++  Panel(dl, a, b, 26 * s, 2 * s, s, k);
++  if (config_.pages.empty()) return;
++  const Page& page = config_.pages[size_t(page_)];
++  const ImVec2 ta(a.x + 14 * s, a.y + 12 * s), tb(b.x - 14 * s, a.y + 48 * s);
++  Tab(dl, ta, tb, 12 * s, 60 * s, k.tab_top, k.tab_middle, k.tab_bottom);
++  ShadowText(dl, config_.fonts.regular, 21 * s, ImVec2(ta.x + 18 * s, ta.y + 6 * s), k.text, page.name.c_str());
++
++  // The page, inset like the tab's title; headings reach back out to the panel's width.
++  ImGui::SetCursorScreenPos(ImVec2(ta.x, tb.y + 14 * s));
++  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
++  ImGui::BeginChild("##page_body", ImVec2(tb.x - ta.x, b.y - 18 * s - (tb.y + 14 * s)), ImGuiChildFlags_None);
++  ImGui::PopStyleVar();
++  ImGui::PushFont(config_.fonts.regular, 16 * s);
++  ImGui::PushID(page_);
++  ImGui::Indent(18 * s);
++  ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(0, 6 * s));
++  ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
++  ui_.BeginPage();
++  if (page.draw) page.draw(ui_);
++  ui_.EndPage();
++  ImGui::PopTextWrapPos();
++  ImGui::PopStyleVar();
++  ImGui::Unindent(18 * s);
++  ImGui::PopID();
++  ImGui::Dummy(ImVec2(0, 8 * s));
++  ImGui::PopFont();
++  ImGui::EndChild();
++}
++
++void Launcher::DrawSkinnedStrip(ImVec2 origin, float w, float h) {
++  const MenuSkin& k = config_.skin;
++  const float s = s_;
++  ImDrawList* dl = ImGui::GetWindowDrawList();
++  const ImVec2 a = origin, b(origin.x + w, origin.y + h);
++  const Shape band = Chamfered(a, b, 0.0f);
++  FillBand(dl, band, a.y, a.y + h * 0.22f, k.strip_top, k.strip_upper);
++  FillBand(dl, band, a.y + h * 0.22f, a.y + h * 0.55f, k.strip_upper, k.strip_lower);
++  FillBand(dl, band, a.y + h * 0.55f, b.y, k.strip_lower, k.strip_bottom);
++  dl->AddRectFilled(a, ImVec2(b.x, a.y + 2 * s), k.strip_edge);
++  dl->AddRectFilled(ImVec2(a.x, a.y + h * 0.38f), ImVec2(b.x, a.y + h * 0.38f + 2 * s), k.strip_line);
++  const float cy = a.y + h * 0.5f;
++
++  // Hints on the left: the key in white, then what it does.
++  float x = a.x + 32 * s;
++  const float hint = 13 * s;
++  for (const auto& [key, action] : k.keys) {
++    ShadowText(dl, config_.fonts.bold, hint, ImVec2(x, cy - hint * 0.5f), k.hint_strong, key.c_str());
++    x += config_.fonts.bold->CalcTextSizeA(hint, FLT_MAX, 0.0f, key.c_str()).x + 4 * s;
++    ShadowText(dl, config_.fonts.regular, hint, ImVec2(x, cy - hint * 0.5f), k.hint, action.c_str());
++    x += config_.fonts.regular->CalcTextSizeA(hint, FLT_MAX, 0.0f, action.c_str()).x + 16 * s;
++  }
++
++  // Quit, Save and PLAY on the right.
++  const float play_w = 170 * s, play_h = 52 * s, bw = 100 * s, bh = 40 * s, gap = 12 * s;
++  const float play_x = b.x - 32 * s - play_w, save_x = play_x - gap - bw, quit_x = save_x - gap - bw;
++  ImGui::SetCursorScreenPos(ImVec2(quit_x, cy - bh * 0.5f));
++  if (GlossButton(k, "Quit##strip", ImVec2(bw, bh), false, config_.fonts.regular, 19 * s, s, true, true)) want_quit_ = true;
++  ImGui::SetCursorScreenPos(ImVec2(save_x, cy - bh * 0.5f));
++  if (GlossButton(k, "Save##strip", ImVec2(bw, bh), false, config_.fonts.regular, 19 * s, s, false, true)) Save();
++  ImGui::SetCursorScreenPos(ImVec2(play_x, cy - play_h * 0.5f));
++  const PlayCheck check = config_.can_play ? config_.can_play() : PlayCheck{};
++  {
++    const ImVec2 pa = ImGui::GetCursorScreenPos(), pb(pa.x + play_w, pa.y + play_h);
++    const bool clicked = ImGui::InvisibleButton("##play", ImVec2(play_w, play_h));
++    const bool hot = ImGui::IsItemHovered() || (ImGui::IsItemFocused() && ImGui::GetIO().NavVisible);
++    if (check.ok) Glow(dl, pa, pb, 14 * s, k.primary_glow, (hot ? 14 : 10) * s);
++    GlossFace(dl, pa, pb, 14 * s, 2 * s, check.ok ? k.primary : k.muted);
++    ImFont* display = k.display ? k.display : config_.fonts.bold;
++    const float fs = 20 * s, tri = 14 * s, spacing = 3 * s;
++    float tw = 0.0f;
++    for (const char* c = "PLAY"; *c; ++c) tw += display->CalcTextSizeA(fs, FLT_MAX, 0.0f, c, c + 1).x + spacing;
++    float tx = pa.x + (play_w - (tw + 8 * s + tri * 0.8f)) * 0.5f;
++    const float ty = pa.y + (play_h - fs) * 0.5f;
++    for (const char* c = "PLAY"; *c; ++c) {
++      dl->AddText(display, fs, ImVec2(tx, ty + 1), IM_COL32(0, 0, 40, 150), c, c + 1);
++      dl->AddText(display, fs, ImVec2(tx, ty), IM_COL32_WHITE, c, c + 1);
++      tx += display->CalcTextSizeA(fs, FLT_MAX, 0.0f, c, c + 1).x + spacing;
++    }
++    const float ax = tx + 8 * s, ay = pa.y + play_h * 0.5f;
++    dl->AddTriangleFilled(ImVec2(ax, ay - tri * 0.5f), ImVec2(ax, ay + tri * 0.5f), ImVec2(ax + tri * 0.8f, ay), IM_COL32_WHITE);
++    if (clicked) want_play_ = true;
++  }
++
++  // The middle: a status line while one shows, else the help of the row under the mouse, else the page's own line.
++  const bool show_status = !status_.empty() && ImGui::GetTime() < status_until_;
++  const std::string& text = show_status       ? status_
++                            : !hover_help_.empty() ? hover_help_
++                            : config_.pages.empty() ? config_.note
++                                                    : config_.pages[size_t(page_)].blurb;
++  const float left = x + 8 * s, right = quit_x - 24 * s, fs = 19 * s;
++  if (right > left && !text.empty()) {
++    const ImVec2 ts = config_.fonts.regular->CalcTextSizeA(fs, right - left, right - left, text.c_str());
++    dl->PushClipRect(ImVec2(left, a.y), ImVec2(right, b.y), true);
++    const float tx = std::max(left, left + (right - left - ts.x) * 0.5f);
++    dl->AddText(config_.fonts.regular, fs, ImVec2(tx, cy - ts.y * 0.5f + 1), IM_COL32(0, 0, 0, 150), text.c_str(), nullptr,
++                right - left);
++    dl->AddText(config_.fonts.regular, fs, ImVec2(tx, cy - ts.y * 0.5f), k.help_text, text.c_str(), nullptr, right - left);
++    dl->PopClipRect();
++  }
++}
++
+ void Launcher::HandleHotkeys() {
+   const ImGuiIO& io = ImGui::GetIO();
+   if (capturing_key() || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) return;
+-  const bool ctrl = ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
++  bool ctrl = ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
++#if defined(__APPLE__)
++  // A Mac's shortcuts are on Command.
++  ctrl = ctrl || ImGui::IsKeyDown(ImGuiKey_LeftSuper) || ImGui::IsKeyDown(ImGuiKey_RightSuper);
++#endif
+   if (ctrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) {
+     Save();
+     return;
+   }
++  if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
++    want_quit_ = true;
++    return;
++  }
+   if (io.WantTextInput) return;
+   if (ImGui::IsKeyPressed(ImGuiKey_GamepadStart, false)) {
+     want_play_ = true;
