@@ -362,12 +362,27 @@ std::string LooseKey(const uint8_t* code, uint32_t dwords) {
 
 // Which of the fetched x, y, z, w, 0 or 1 each lane of input should hold, so that a translated shader, which swizzles
 // input the way the shipped ucode did, ends up with what the live ucode's swizzle asks for. Binding rewrites that to suit
-// the format, such as swapping red and blue. A lane nothing reads stays as fetched.
+// the format, such as swapping red and blue. A lane nothing reads stays as fetched. A lane the shipped ucode fixed at 0 or
+// 1 reads the next lane spare, as unfreeze_constants in pull_vertices.py expects.
 uint32_t SelectFor(uint32_t shipped, uint32_t live) {
   std::array<uint32_t, 4> select = {0, 1, 2, 3};
+  std::array<bool, 4> taken = {};
+  for (uint32_t i = 0; i < 4; ++i) {
+    const uint32_t from = (shipped >> (i * 3)) & 7;
+    if (from < 4) {
+      taken[from] = true;
+    }
+  }
+  uint32_t spare = 0;
   for (uint32_t i = 0; i < 4; ++i) {
     const uint32_t from = (shipped >> (i * 3)) & 7, to = (live >> (i * 3)) & 7;
-    if (from < 4 && (to < 4 || to == 4 || to == 5)) {
+    if (from == 4 || from == 5) {
+      while (taken[spare]) {
+        ++spare;
+      }
+      taken[spare] = true;
+      select[spare] = to <= 5 ? to : from;
+    } else if (from < 4 && to <= 5) {
       select[from] = to;
     }
   }

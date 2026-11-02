@@ -20,6 +20,10 @@ Effects read their curves from small textures with coordinates in texels and poi
 fetch instruction can ask for and the translator ignores. use_texel_fetches finds those instructions
 in the ucode and sends their calls to a helper that does it.
 
+A shipped shader can fetch a lane as a constant, or nothing but constants, and binding patches in what the vertex format
+really has. The road's vertex colour says how far a surface is indoors, and it comes that way. The translator writes
+those as plain numbers, so unfreeze_constants puts the fetch back.
+
 Vertex shaders read textures too, from fetch constants 16 to 19, and the constant table numbers those
 from 0, the same as a pixel shader's. Both stages share one table, so vertex textures move to a table
 of their own, and vertex-textures.txt says which each shader reads.
@@ -246,7 +250,24 @@ def elements_of(path):
     return code, elements
 
 
+def unfreeze_constants(source, elements):
+    """Points lanes the shipped swizzle fixed at 0 or 1 at spare lanes of the fetch, which SelectFor in shadow.cpp fills."""
+    start = source.index("float tfetchLod")
+    for element in elements:
+        lanes = [(element["swizzle"] >> (i * 3)) & 7 for i in range(4)]
+        spare = [lane for lane in range(4) if lane not in lanes]
+        for i, lane in enumerate(lanes):
+            if lane not in (4, 5):
+                continue
+            taken = spare.pop(0)
+            frozen = f"\tr{element['dest']}.{'xyzw'[i]} = {lane - 4}.0;\n"
+            name = f"i{USAGES[element['usage']]}{element['index']}"
+            source = source[:start] + source[start:].replace(frozen, f"\tr{element['dest']}.{'xyzw'[i]} = input.{name}.{'xyzw'[taken]};\n", 1)
+    return source
+
+
 def rewrite(source, elements):
+    source = unfreeze_constants(source, elements)
     source = re.sub(r" \[\[attribute\(\d+\)\]\]", "", source)
     # Declared as uint4 for a vertex descriptor's integer format. The fetch gives the same numbers as floats.
     source = source.replace("uint4 iBlendIndices", "float4 iBlendIndices")
