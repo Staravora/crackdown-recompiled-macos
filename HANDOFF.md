@@ -14,7 +14,7 @@
 - **Updater, from reading the code:** the client checks GitHub `releases/latest` for `saulob/crackdown-xbox360-recompiled` (`src/update_config.cpp:18-20`) and verifies by SHA-256. On a Mac it falls into the AppImage branch and reports updates as unsupported. A signed Mac app must be swapped whole after checking its signature, not file by file. The zip extractor also drops symlinks and exec bits (`src/updater/update_zip.cpp:144-171`).
 - **Release work:**
   1. data and settings in `~/Library/Application Support`, and a bundle layout that signs: non-code files in `Resources`, nothing written inside the app;
-  2. the Metal shaders built into the app for the download, and automated or skipped for builders, with Emulated as the fallback when they're missing;
+  2. the Metal shaders built into the app for the download, and automated or skipped for builders. **Metal is the default renderer on the Mac (Bruce's call)**, with Emulated taking over by itself when the shaders are missing;
   3. `package-macos.sh`: Developer ID signing, notarization, stapling, a zip with its `.sha256`;
   4. the Mac updater: a whole-app swap after a codesign check, and the fork's own releases address;
   5. launcher Mac polish: ⌘ shortcuts and hints, each renderer showing only its own rows, the app menu, Show in Finder;
