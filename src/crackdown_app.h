@@ -96,11 +96,17 @@ class CrackdownApp : public rex::ReXApp {
       }
     }
 #endif
+    crackdown::UseBundledVulkanDriver();
     return rex::ReXApp::SetupEnvironment();
   }
 
   void OnConfigurePaths(rex::PathConfig& paths) override {
     RestoreHeldPathFlags(paths);
+    // ReXGlue looks beside the executable, and a Mac app keeps it in Resources.
+    if (const std::filesystem::path shipped = crackdown::ResourceFolder() / paths.config_path.filename();
+        shipped != paths.config_path && std::filesystem::exists(shipped)) {
+      paths.config_path = shipped;
+    }
     shipped_config_ = paths.config_path;
     if (const auto inherited = crackdown::TakeInheritedSessionLog()) {
       rex::cvar::SetFlagFromCommandLine("log_file", crackdown::Utf8(*inherited));
@@ -282,8 +288,12 @@ class CrackdownApp : public rex::ReXApp {
         crackdown::benchmark::Install(input, runtime()->virtual_membase(), LogsDir(user_data_root()));
         crackdown::native::textures::Install(runtime()->memory(), runtime()->virtual_membase(),
                                              LogsDir(user_data_root()));
-        crackdown::native::shadow::Install(runtime()->memory(), user_data_root() / "native-shaders",
-                                           LogsDir(user_data_root()));
+        // A set built locally wins over the one the app ships with, so shader work can be tried without repackaging.
+        const std::filesystem::path local_shaders = user_data_root() / "native-shaders";
+        const std::filesystem::path shaders = std::filesystem::exists(local_shaders / "manifest.txt")
+                                                  ? local_shaders
+                                                  : crackdown::ResourceFolder() / "native-shaders";
+        crackdown::native::shadow::Install(runtime()->memory(), shaders, LogsDir(user_data_root()));
       }
     }
     if (window()) {

@@ -99,7 +99,7 @@ trg::HeaderPainter LauncherHeader(ImTextureID art, float art_aspect) {
 }
 
 std::unique_ptr<rex::ui::ImmediateTexture> LoadHeaderArt(rex::ui::ImmediateDrawer* drawer) {
-  const std::filesystem::path path = LauncherHeaderArtPath(rex::filesystem::GetExecutableFolder());
+  const std::filesystem::path path = LauncherHeaderArtPath(crackdown::ResourceFolder());
   if (!drawer) {
     REXLOG_WARN("Launcher header art unavailable without an immediate drawer: {}", Utf8(path));
     return nullptr;
@@ -864,10 +864,10 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
   void PageGraphics(trg::Ui& ui) {
 #if defined(__APPLE__)
     ui.Toggle("Renderer",
-              "Metal draws the game natively instead of the emulated GPU. A preview: faster, and still missing a few "
-              "effects. Render resolution, internal resolution and multisampling don't apply to it; it has its own "
-              "resolution below.",
-              "crackdown_native_only", false, "Emulated", "Metal (preview)");
+              "Metal draws the game natively, faster than the emulated GPU, with a few effects still missing. Emulated is "
+              "the slower reference. Render resolution, internal resolution and multisampling apply to Emulated only; "
+              "Metal has its own resolution below.",
+              "crackdown_native_only", true, "Emulated", "Metal");
     ui.Choice("Metal resolution",
               "With the Metal renderer, how many pixels the scene is drawn with. The game's own is 1280\xC3\x97" "720. More is "
               "sharper and costs GPU time in proportion: 1920\xC3\x97" "1080 is over twice the work.",

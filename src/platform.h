@@ -18,8 +18,17 @@ namespace crackdown {
 std::string Utf8(const std::filesystem::path& path);
 std::filesystem::path PathFromUtf8(const std::string& utf8);
 
-// The folder the player sees the program in: the executable's, or the AppImage's.
+// The folder the player sees the program in: the executable's, or the AppImage's. On a Mac the app keeps its data in
+// Application Support, or in a "Crackdown Data" folder beside the app if one is there already.
 std::filesystem::path PortFolder();
+
+// Read-only files that ship with the program: the config, button glyphs, launcher art, the Vulkan driver's description and
+// the Metal shaders. A Mac app's Resources folder, else the executable's folder.
+std::filesystem::path ResourceFolder();
+
+// A Mac app keeps MoltenVK's driver description in Resources, where the Vulkan loader doesn't look, so this tells it.
+// Call before Vulkan starts. A no-op elsewhere.
+void UseBundledVulkanDriver();
 
 // The next free <name>_NNN.log in `folder`, which is created. Empty when it cannot be created.
 std::filesystem::path NextLogFile(const std::filesystem::path& folder, std::string_view name);

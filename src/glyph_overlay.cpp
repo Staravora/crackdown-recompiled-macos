@@ -30,6 +30,7 @@
 #include "font_rerender.h"
 #include "guest_layout.h"
 #include "guest_memory.h"
+#include "platform.h"
 #include "sha256.h"
 
 namespace {
@@ -316,7 +317,7 @@ void crackdown::InstallGlyphOverlay(rex::filesystem::VirtualFileSystem* file_sys
                                     const std::filesystem::path& game_root,
                                     const std::filesystem::path& user_data_root, std::string_view language_key) {
   const std::filesystem::path source = game_root / "Local" / std::string(language_key);
-  const std::filesystem::path sheet_folder = rex::filesystem::GetExecutableFolder() / "glyphs";
+  const std::filesystem::path sheet_folder = crackdown::ResourceFolder() / "glyphs";
   const auto abc = ReadFile(source / kFontFiles[0]);
   const auto dds = ReadFile(source / kFontFiles[1]);
   const auto manifest = ReadFile(sheet_folder / "button_glyphs.toml");

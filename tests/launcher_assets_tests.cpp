@@ -30,7 +30,8 @@ void TestInstalledRoot() {
 void TestWiring() {
   const std::filesystem::path src = CRACKDOWN_SRC_DIR;
   const std::string launcher = check::ReadText(src / "launcher.cpp");
-  CHECK(launcher.find("LauncherHeaderArtPath(rex::filesystem::GetExecutableFolder())") != std::string::npos);
+  // The executable's folder, or a Mac app's Resources.
+  CHECK(launcher.find("LauncherHeaderArtPath(crackdown::ResourceFolder())") != std::string::npos);
 
   const std::string app = check::ReadText(src / "crackdown_app.h");
   CHECK(app.find("game_settings_, {nullptr, immediate_drawer(), nullptr}") != std::string::npos);

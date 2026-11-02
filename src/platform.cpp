@@ -48,6 +48,14 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 namespace crackdown {
 namespace {
 
+#if defined(__APPLE__)
+// Contents/MacOS of an .app bundle.
+bool InAppBundle(const std::filesystem::path& executable) {
+  return executable.filename() == "MacOS" && executable.parent_path().filename() == "Contents" &&
+         executable.parent_path().parent_path().extension() == ".app";
+}
+#endif
+
 #if defined(_WIN32)
 constexpr char kGraphicsUnavailableText[] =
     "The graphics system could not start. Crackdown needs a graphics driver with Direct3D 12. Update the driver and "
@@ -172,7 +180,12 @@ constexpr StickKey kStickKeys[] = {
 
 #else
 
+#if defined(__APPLE__)
+// The Mac app's own bundle identifier, packaging/macos/Info.plist.
+constexpr char kApplicationId[] = "com.zuhlproductions.crackdown-recompiled";
+#else
 constexpr char kApplicationId[] = "io.github.saulob.crackdown";
+#endif
 constexpr char kIconName[] = "crackdown.png";
 
 struct ButtonKey {
@@ -276,12 +289,48 @@ std::filesystem::path PortFolder() {
 #endif
 #if defined(__APPLE__)
   const auto executable = rex::filesystem::GetExecutableFolder();
-  if (executable.filename() == "MacOS" && executable.parent_path().filename() == "Contents" &&
-      executable.parent_path().parent_path().extension() == ".app") {
-    return executable.parent_path().parent_path().parent_path() / "Crackdown Data";
+  if (InAppBundle(executable)) {
+    // Earlier builds kept everything beside the app, and that stays in use. Otherwise it goes where Mac apps keep theirs:
+    // /Applications isn't the player's to write to.
+    const auto beside = executable.parent_path().parent_path().parent_path() / "Crackdown Data";
+    std::error_code ec;
+    const char* home = std::getenv("HOME");
+    if (std::filesystem::is_directory(beside, ec) || !home || !*home) {
+      return beside;
+    }
+    return std::filesystem::path(home) / "Library" / "Application Support" / "Crackdown Recompiled";
   }
 #endif
   return rex::filesystem::GetExecutableFolder();
+}
+
+std::filesystem::path ResourceFolder() {
+  const auto executable = rex::filesystem::GetExecutableFolder();
+#if defined(__APPLE__)
+  // A build staged before the app had a Resources layout keeps everything beside the executable.
+  std::error_code ec;
+  if (const auto resources = executable.parent_path() / "Resources";
+      InAppBundle(executable) && std::filesystem::exists(resources / "crackdown.toml", ec)) {
+    return resources;
+  }
+#endif
+  return executable;
+}
+
+void UseBundledVulkanDriver() {
+#if defined(__APPLE__)
+  std::error_code ec;
+  const auto driver = ResourceFolder() / "vulkan" / "icd.d" / "MoltenVK_icd.json";
+  if (!std::filesystem::exists(driver, ec)) {
+    return;
+  }
+  const std::string path = Utf8(driver);
+  for (const char* name : {"VK_DRIVER_FILES", "VK_ICD_FILENAMES"}) {
+    if (const char* set = std::getenv(name); !set || !*set) {
+      setenv(name, path.c_str(), 1);
+    }
+  }
+#endif
 }
 
 void ApplyGameWindowAspect(int width, int height) {

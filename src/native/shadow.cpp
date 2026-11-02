@@ -49,9 +49,9 @@ REXCVAR_DEFINE_BOOL(crackdown_native_exposure, false, "Crackdown",
 REXCVAR_DEFINE_BOOL(crackdown_native_pacing, false, "Crackdown",
                     "With shadow mode on, the game waits for Metal to catch up instead of Metal dropping frames");
 
-REXCVAR_DEFINE_BOOL(crackdown_native_only, false, "Crackdown",
-                    "Preview: Metal draws the game in its own window and the emulator draws nothing. Turns on shadow mode, "
-                    "its window, pacing and exposure, and Metal answers occlusion queries");
+REXCVAR_DEFINE_BOOL(crackdown_native_only, true, "Crackdown",
+                    "Metal draws the game and the emulator draws nothing. The Mac's default renderer. Turns on shadow mode, "
+                    "pacing and exposure, and Metal answers occlusion queries. Without its shaders the emulator draws instead");
 
 REXCVAR_DEFINE_INT32(crackdown_metalfx_upscale, 1, "Crackdown",
                      "With the Metal renderer, MetalFX upscales the picture this many times before the window scales it: 1 or 2");
@@ -2263,6 +2263,12 @@ bool DrawsAlone() {
 }
 
 void Install(rex::memory::Memory* memory, const std::filesystem::path& shader_dir, const std::filesystem::path& output_dir) {
+  // A build without the shaders, as one made from source without the shader steps, falls back rather than draw nothing.
+  std::error_code ec;
+  if (REXCVAR_GET(crackdown_native_only) && !std::filesystem::exists(shader_dir / "manifest.txt", ec)) {
+    REXLOG_WARN("Native only: no Metal shaders in {}, so the emulator draws", shader_dir.string());
+    rex::cvar::SetFlagByName("crackdown_native_only", "false");
+  }
   if (REXCVAR_GET(crackdown_native_only)) {
     // The emulator still runs the ring, so fences, waits and swaps carry on. It leaves query answers to Metal (SDK patch
     // 0015).
