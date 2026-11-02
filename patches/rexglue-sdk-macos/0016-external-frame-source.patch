@@ -1,0 +1,218 @@
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -501,6 +501,9 @@
+     uint32_t half_pixel_offset;
+   };
+   bool EnsureSwapFxaaSourceImage(uint32_t width, uint32_t height);
++  // Uploads the picture of a renderer outside the emulator, if one has been set with
++  // rex_gpu_set_external_frame_source, and returns a view of it to swap instead of the front buffer.
++  VkImageView UploadExternalFrame(uint32_t& width, uint32_t& height);
+   void DestroySwapFxaaSourceImage();
+ 
+   void UpdateDynamicState(const draw_util::ViewportInfo& viewport_info, bool primitive_polygonal,
+@@ -711,6 +714,20 @@
+   VkDeviceMemory resolve_downscale_buffer_memory_ = VK_NULL_HANDLE;
+   uint32_t resolve_downscale_buffer_size_ = 0;
+ 
++  VkImage external_frame_image_ = VK_NULL_HANDLE;
++  VkDeviceMemory external_frame_image_memory_ = VK_NULL_HANDLE;
++  VkImageView external_frame_image_view_ = VK_NULL_HANDLE;
++  uint32_t external_frame_width_ = 0;
++  uint32_t external_frame_height_ = 0;
++  VkImageLayout external_frame_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
++  struct ExternalFrameStaging {
++    VkBuffer buffer = VK_NULL_HANDLE;
++    VkDeviceMemory memory = VK_NULL_HANDLE;
++    void* mapping = nullptr;
++    VkDeviceSize size = 0;
++  };
++  std::array<ExternalFrameStaging, kMaxFramesInFlight> external_frame_staging_{};
++
+   VkImage swap_fxaa_source_image_ = VK_NULL_HANDLE;
+   VkDeviceMemory swap_fxaa_source_image_memory_ = VK_NULL_HANDLE;
+   VkImageView swap_fxaa_source_image_view_ = VK_NULL_HANDLE;
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -111,8 +111,34 @@
+ #include <map>
+ #include <set>
+ 
++#include <rex/system/gpu_plugin.h>
++
++// A renderer outside the emulator can supply the picture each swap presents. size gives the size of its newest frame, or
++// returns false if there's none yet. fill copies that frame as BGRA8, row_bytes apart, and returns false if it no longer
++// has one of that size. Both run on the command processor thread, at the swap.
++using RexExternalFrameSizeFn = bool (*)(void* context, uint32_t* width, uint32_t* height);
++using RexExternalFrameFillFn = bool (*)(void* context, void* pixels, uint32_t row_bytes, uint32_t width, uint32_t height);
++
+ namespace {
+ 
++std::mutex g_external_frame_mutex;
++RexExternalFrameSizeFn g_external_frame_size = nullptr;
++RexExternalFrameFillFn g_external_frame_fill = nullptr;
++void* g_external_frame_context = nullptr;
++
++}  // namespace
++
++extern "C" REX_GPU_PLUGIN_EXPORT void rex_gpu_set_external_frame_source(RexExternalFrameSizeFn size,
++                                                                        RexExternalFrameFillFn fill,
++                                                                        void* context) {
++  std::lock_guard lock(g_external_frame_mutex);
++  g_external_frame_size = size;
++  g_external_frame_fill = fill;
++  g_external_frame_context = context;
++}
++
++namespace {
++
+ // Diagnostic only: render pass ends keyed by the code that caused them. Only the
+ // command processor thread touches these.
+ struct PassBreakStats {
+@@ -2424,9 +2450,18 @@
+   uint32_t frontbuffer_width_unscaled = 0, frontbuffer_height_unscaled = 0;
+   xenos::TextureFormat frontbuffer_format;
+   bool swap_source_needs_rb_swap = false;
+-  VkImageView swap_texture_view = texture_cache_->RequestSwapTexture(
+-      frontbuffer_width_scaled, frontbuffer_height_scaled, frontbuffer_format,
+-      &frontbuffer_width_unscaled, &frontbuffer_height_unscaled, &swap_source_needs_rb_swap);
++  // An external frame stands in for the front buffer at its own size, which counts as the front buffer's size scaled.
++  VkImageView swap_texture_view =
++      UploadExternalFrame(frontbuffer_width_scaled, frontbuffer_height_scaled);
++  if (swap_texture_view != VK_NULL_HANDLE) {
++    frontbuffer_width_unscaled = frontbuffer_width ? frontbuffer_width : frontbuffer_width_scaled;
++    frontbuffer_height_unscaled = frontbuffer_height ? frontbuffer_height : frontbuffer_height_scaled;
++    frontbuffer_format = xenos::TextureFormat::k_8_8_8_8;
++  } else {
++    swap_texture_view = texture_cache_->RequestSwapTexture(
++        frontbuffer_width_scaled, frontbuffer_height_scaled, frontbuffer_format,
++        &frontbuffer_width_unscaled, &frontbuffer_height_unscaled, &swap_source_needs_rb_swap);
++  }
+   if (swap_texture_view == VK_NULL_HANDLE) {
+     REXGPU_ERROR("XELOG_GPU PRESENT: swap_texture_view=NULL");
+     return;
+@@ -6052,7 +6087,123 @@
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device, scratch_buffer_);
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device, scratch_buffer_memory_);
+ }
++
++VkImageView VulkanCommandProcessor::UploadExternalFrame(uint32_t& width, uint32_t& height) {
++  RexExternalFrameSizeFn size_fn;
++  RexExternalFrameFillFn fill_fn;
++  void* context;
++  {
++    std::lock_guard lock(g_external_frame_mutex);
++    size_fn = g_external_frame_size;
++    fill_fn = g_external_frame_fill;
++    context = g_external_frame_context;
++  }
++  width = height = 0;
++  if (!size_fn || !fill_fn || !size_fn(context, &width, &height) || !width || !height) {
++    return VK_NULL_HANDLE;
++  }
++  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  const uint64_t submission = GetCurrentSubmission();
+ 
++  if (external_frame_image_ == VK_NULL_HANDLE || external_frame_width_ != width ||
++      external_frame_height_ != height) {
++    if (external_frame_image_view_ != VK_NULL_HANDLE) {
++      destroy_image_views_.emplace_back(submission, external_frame_image_view_);
++      external_frame_image_view_ = VK_NULL_HANDLE;
++    }
++    if (external_frame_image_ != VK_NULL_HANDLE) {
++      destroy_images_.emplace_back(submission, external_frame_image_);
++      external_frame_image_ = VK_NULL_HANDLE;
++    }
++    if (external_frame_image_memory_ != VK_NULL_HANDLE) {
++      destroy_memory_.emplace_back(submission, external_frame_image_memory_);
++      external_frame_image_memory_ = VK_NULL_HANDLE;
++    }
++    external_frame_width_ = external_frame_height_ = 0;
++    VkImageCreateInfo image_create_info = {};
++    image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++    image_create_info.imageType = VK_IMAGE_TYPE_2D;
++    image_create_info.format = VK_FORMAT_B8G8R8A8_UNORM;
++    image_create_info.extent = {width, height, 1};
++    image_create_info.mipLevels = 1;
++    image_create_info.arrayLayers = 1;
++    image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
++    image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
++    image_create_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++    image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++    image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++    if (!ui::vulkan::util::CreateDedicatedAllocationImage(
++            vulkan_device, image_create_info, ui::vulkan::util::MemoryPurpose::kDeviceLocal,
++            external_frame_image_, external_frame_image_memory_)) {
++      REXGPU_ERROR("Failed to create the {}x{} external frame image", width, height);
++      return VK_NULL_HANDLE;
++    }
++    VkImageViewCreateInfo view_create_info = {};
++    view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
++    view_create_info.image = external_frame_image_;
++    view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
++    view_create_info.format = VK_FORMAT_B8G8R8A8_UNORM;
++    view_create_info.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
++                                   VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
++    view_create_info.subresourceRange =
++        ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
++    if (dfn.vkCreateImageView(device, &view_create_info, nullptr, &external_frame_image_view_) !=
++        VK_SUCCESS) {
++      REXGPU_ERROR("Failed to create the external frame image view");
++      return VK_NULL_HANDLE;
++    }
++    external_frame_width_ = width;
++    external_frame_height_ = height;
++    external_frame_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
++  }
++
++  // One staging buffer per frame in flight, so a frame the GPU may still be copying from isn't overwritten.
++  ExternalFrameStaging& staging = external_frame_staging_[frame_current_ % kMaxFramesInFlight];
++  const VkDeviceSize bytes = VkDeviceSize(width) * height * 4;
++  if (staging.size < bytes) {
++    if (staging.buffer != VK_NULL_HANDLE) {
++      dfn.vkUnmapMemory(device, staging.memory);
++      destroy_buffers_.emplace_back(submission, staging.buffer);
++      destroy_memory_.emplace_back(submission, staging.memory);
++      staging = {};
++    }
++    if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
++            vulkan_device, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
++            ui::vulkan::util::MemoryPurpose::kUpload, staging.buffer, staging.memory) ||
++        dfn.vkMapMemory(device, staging.memory, 0, VK_WHOLE_SIZE, 0, &staging.mapping) !=
++            VK_SUCCESS) {
++      REXGPU_ERROR("Failed to create the external frame staging buffer");
++      staging = {};
++      return VK_NULL_HANDLE;
++    }
++    staging.size = bytes;
++  }
++  if (!fill_fn(context, staging.mapping, width * 4, width, height)) {
++    return VK_NULL_HANDLE;
++  }
++
++  const VkImageSubresourceRange range =
++      ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
++  PushImageMemoryBarrier(external_frame_image_, range, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
++                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT,
++                         VK_ACCESS_TRANSFER_WRITE_BIT, external_frame_layout_,
++                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++  SubmitBarriers(true);
++  VkBufferImageCopy region = {};
++  region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++  region.imageExtent = {width, height, 1};
++  deferred_command_buffer_.CmdVkCopyBufferToImage(staging.buffer, external_frame_image_,
++                                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++  PushImageMemoryBarrier(external_frame_image_, range, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
++                         VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++  external_frame_layout_ = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++  return external_frame_image_view_;
++}
++
+ bool VulkanCommandProcessor::EnsureSwapFxaaSourceImage(uint32_t width, uint32_t height) {
+   assert_true(submission_open_);
+   if (!width || !height) {

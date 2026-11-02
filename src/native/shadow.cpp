@@ -1,5 +1,6 @@
 #include "shadow.h"
 
+#include <dlfcn.h>
 #include <pthread.h>
 
 #include <algorithm>
@@ -212,6 +213,46 @@ struct FrameAnswers {
   uint32_t front_buffer = 0;  // Guest memory Metal wrote the front buffer to, by its virtual address, and how much.
   uint32_t front_buffer_bytes = 0;
 };
+
+// The newest finished picture, for the emulator's swap to present when it takes pictures from outside (SDK patch 0016).
+// Metal's buffer for it stays put until its frame slot comes round again.
+std::mutex g_picture_mutex;
+const uint8_t* g_picture = nullptr;
+uint32_t g_picture_width = 0;
+uint32_t g_picture_height = 0;
+bool g_external_present = false;  // Render thread only after it's set.
+
+bool PictureSize(void*, uint32_t* width, uint32_t* height) {
+  std::lock_guard lock(g_picture_mutex);
+  *width = g_picture_width;
+  *height = g_picture_height;
+  return g_picture != nullptr;
+}
+
+bool FillPicture(void*, void* pixels, uint32_t row_bytes, uint32_t width, uint32_t height) {
+  std::lock_guard lock(g_picture_mutex);
+  if (!g_picture || width != g_picture_width || height != g_picture_height) {
+    return false;
+  }
+  for (uint32_t y = 0; y < height; ++y) {
+    std::memcpy(static_cast<uint8_t*>(pixels) + size_t(y) * row_bytes, g_picture + size_t(y) * width * 4, size_t(width) * 4);
+  }
+  return true;
+}
+
+// Hands the emulator's swap a source of pictures, if its plugin can take one.
+void UseExternalPresent() {
+  using SetSource = void (*)(bool (*)(void*, uint32_t*, uint32_t*), bool (*)(void*, void*, uint32_t, uint32_t, uint32_t), void*);
+  void* plugin = dlopen("@executable_path/librexgpu-xenos.dylib", RTLD_NOLOAD | RTLD_LAZY);
+  const auto set_source = plugin ? reinterpret_cast<SetSource>(dlsym(plugin, "rex_gpu_set_external_frame_source")) : nullptr;
+  if (!set_source) {
+    REXLOG_WARN("Native only: the GPU plugin can't take Metal's pictures, so they go through guest memory");
+    return;
+  }
+  set_source(PictureSize, FillPicture, nullptr);
+  g_external_present = true;
+  REXLOG_INFO("Native only: the swap presents Metal's pictures directly");
+}
 
 // What the game saw when it locked a texture, for comparing with Metal's copy.
 struct GuestPixels {
@@ -1226,6 +1267,14 @@ void WriteFrontBuffer(const FetchConstant& front_buffer, MetalDevice& device, Fr
   answers.front_buffer_bytes = bytes;
 }
 
+// The front buffer's own resolve, at whatever size Metal drew it, for the swap to present.
+void CopyFrontBuffer(const FetchConstant& front_buffer, MetalDevice& device) {
+  const int resolve = g_textures->HasResolve(front_buffer.data()) ? g_textures->ResolveInto(front_buffer.data()) : -1;
+  if (resolve < 0 || !device.CopyPicture(resolve)) {
+    ++g_totals.front_buffers_missed;
+  }
+}
+
 void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswers& answers) {
   std::vector<QuerySlot>& query_slots = answers.queries;
   g_debug_id = 0;
@@ -1508,7 +1557,11 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
   }
   apply_queries(frame.runs.size());
   if (DrawsAlone() && frame.front_buffer && !g_debug_stopped) {
-    WriteFrontBuffer(*frame.front_buffer, device, answers);
+    if (g_external_present) {
+      CopyFrontBuffer(*frame.front_buffer, device);
+    } else {
+      WriteFrontBuffer(*frame.front_buffer, device, answers);
+    }
   }
   const int shown = g_debug_show >= 0 ? g_debug_show : last_color_target;
   if (shown >= 0) {
@@ -1682,6 +1735,9 @@ void RenderThread() {
   if (REXCVAR_GET(crackdown_native_shadow_window)) {
     device->ShowWindow();
   }
+  if (DrawsAlone()) {
+    UseExternalPresent();
+  }
   while (true) {
     std::unique_ptr<Frame> frame;
     {
@@ -1756,6 +1812,12 @@ void RenderThread() {
                             [answers, fence = frame->fence, handed_over = frame->handed_over](const MetalFrameResults& results) {
                               OnMetalSamples(answers->queries, results.query_samples);
                               OnMetalPixels(answers->readbacks, results.readback);
+                              if (results.picture) {
+                                std::lock_guard lock(g_picture_mutex);
+                                g_picture = results.picture;
+                                g_picture_width = results.picture_width;
+                                g_picture_height = results.picture_height;
+                              }
                               if (answers->front_buffer_bytes) {
                                 // The emulator reloads a texture when it's told its memory changed, as a CPU write would.
                                 g_memory->TriggerPhysicalMemoryCallbacks(rex::thread::global_critical_region::AcquireDirect(),

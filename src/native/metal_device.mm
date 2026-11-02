@@ -632,6 +632,37 @@ class MetalDeviceImpl final : public MetalDevice {
     [blit endEncoding];
   }
 
+  bool CopyPicture(int resolve) override {
+    id<MTLTexture> texture = resolves_[size_t(resolve)];
+    if (texture.pixelFormat != MTLPixelFormatBGRA8Unorm) {
+      return false;
+    }
+    const size_t row = texture.width * 4, bytes = row * texture.height;
+    if (pictures_[picture_slot_].length < bytes) {
+      // The swap may still be copying out of the old one.
+      if (pictures_[picture_slot_]) {
+        retired_buffers_.push_back(pictures_[picture_slot_]);
+      }
+      pictures_[picture_slot_] = [device_ newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    }
+    id<MTLBuffer> buffer = pictures_[picture_slot_];
+    EndPass();
+    id<MTLBlitCommandEncoder> blit = [buffer_ blitCommandEncoder];
+    [blit copyFromTexture:texture
+                     sourceSlice:0
+                     sourceLevel:0
+                    sourceOrigin:MTLOriginMake(0, 0, 0)
+                      sourceSize:MTLSizeMake(texture.width, texture.height, 1)
+                        toBuffer:buffer
+               destinationOffset:0
+          destinationBytesPerRow:row
+        destinationBytesPerImage:bytes];
+    [blit endEncoding];
+    picture_width_ = uint32_t(texture.width);
+    picture_height_ = uint32_t(texture.height);
+    return true;
+  }
+
   bool WriteResolveToGuest(int resolve, size_t at, uint32_t pitch, bool tiled, bool swap) override {
     id<MTLTexture> texture = resolves_[size_t(resolve)];
     if (!guest_ || !write_guest_ || texture.pixelFormat != MTLPixelFormatBGRA8Unorm || at > UINT32_MAX) {
@@ -694,6 +725,8 @@ class MetalDeviceImpl final : public MetalDevice {
       id<MTLBuffer> readback_pixels = readbacks_[slot_];
       frame_readback_ = readback_pixels;
       readback_used_ = 0;
+      picture_slot_ = slot_;
+      picture_width_ = picture_height_ = 0;
       slot_ = (slot_ + 1) % kFramesInFlight;
       frame_address_ = frame_.gpuAddress;
       shown_target_ = -1;
@@ -740,6 +773,8 @@ class MetalDeviceImpl final : public MetalDevice {
 
       dispatch_semaphore_t slots = slots_;
       std::function<void(const MetalFrameResults&)> report_results = finished;
+      id<MTLBuffer> picture = picture_width_ ? pictures_[picture_slot_] : nil;
+      const uint32_t picture_width = picture_width_, picture_height = picture_height_;
       [buffer addCompletedHandler:^(id<MTLCommandBuffer> done) {
         if (done.status == MTLCommandBufferStatusError) {
           errors_.fetch_add(1, std::memory_order_relaxed);
@@ -753,7 +788,8 @@ class MetalDeviceImpl final : public MetalDevice {
         }
         completed_.fetch_add(1, std::memory_order_relaxed);
         if (report_results) {
-          report_results({static_cast<const uint64_t*>(query_samples.contents), static_cast<const uint8_t*>(readback_pixels.contents)});
+          report_results({static_cast<const uint64_t*>(query_samples.contents), static_cast<const uint8_t*>(readback_pixels.contents),
+                          picture ? static_cast<const uint8_t*>(picture.contents) : nullptr, picture_width, picture_height});
         }
         dispatch_semaphore_signal(slots);
       }];
@@ -1289,6 +1325,10 @@ class MetalDeviceImpl final : public MetalDevice {
   std::array<id<MTLBuffer>, kFramesInFlight> query_samples_{};
   id<MTLBuffer> frame_query_samples_ = nil;
   id<MTLComputePipelineState> write_guest_ = nil;
+  std::array<id<MTLBuffer>, kFramesInFlight> pictures_{};
+  uint32_t picture_slot_ = 0;
+  uint32_t picture_width_ = 0;
+  uint32_t picture_height_ = 0;
   std::array<id<MTLBuffer>, kFramesInFlight> readbacks_{};
   id<MTLBuffer> frame_readback_ = nil;
   size_t readback_used_ = 0;

@@ -1,5 +1,11 @@
 # Session handoff
 
+## 2026-11-02 — The swap presents Metal's picture directly (SDK patch 0016)
+- **How:** the GPU plugin exports `rex_gpu_set_external_frame_source(size, fill, context)`. At each swap, `UploadExternalFrame` asks for the newest picture's size, has `fill` copy it as BGRA8 into a staging buffer (one per frame in flight), copies that into a `B8G8R8A8_UNORM` image and swaps from it in place of the front buffer. The front buffer's size counts as unscaled and the picture's as scaled, so the swap keeps it at full size. Gamma, FXAA, overlays, letterbox and fullscreen are untouched.
+- **Game side:** in Metal-only mode the render thread finds the function with `dlopen("@executable_path/librexgpu-xenos.dylib", RTLD_NOLOAD)` and `dlsym`, since the plugin is opened locally. Each frame, `CopyPicture` blits the front buffer's resolve into a shared buffer per frame slot, and the completion handler publishes it for `FillPicture` to copy. Without the function, it falls back to writing guest memory.
+- **Result, street, 30 setting, MSAA on:** 29.0 FPS, median 33.9 ms, 1% low 26.7, against 27.9, 34.6 ms and 23.6 through guest memory. Picture and colours correct, with no front buffers missed and no GPU errors.
+- **Next:** render resolution in Metal, then MetalFX. The picture can now be any size.
+
 ## 2026-11-02 — Metal gets texture filtering and the game's MSAA
 - **Bruce's direction:** the emulator is "at least a little bit wrong" with the water, so it's no reference there. Next: anti-aliasing and other graphics options, then MetalFX, including frame interpolation.
 - **What reaches Metal:** the M1 supports MetalFX spatial and temporal scaling and frame interpolation (`supportsDevice` checked). FXAA already applies in Metal mode, through the emulator's swap. Render resolution and internal resolution don't yet: Metal draws at 1280x720 and hands the picture over at that size through the guest front buffer.

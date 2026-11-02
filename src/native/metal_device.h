@@ -160,6 +160,9 @@ struct MetalDraw {
 struct MetalFrameResults {
   const uint64_t* query_samples = nullptr;  // What each query slot counted.
   const uint8_t* readback = nullptr;        // Pixels from ReadResolve, as it placed them.
+  const uint8_t* picture = nullptr;         // From CopyPicture: BGRA8, picture_width * 4 bytes a row. Null if none.
+  uint32_t picture_width = 0;
+  uint32_t picture_height = 0;
 };
 
 // The only part of the native layer that touches Metal, so the rest stays plain C++. Everything but gpu_totals() is for
@@ -227,6 +230,10 @@ class MetalDevice {
   // reverse of the four bytes in guest memory. Returns where in it they'll be, or SIZE_MAX if they don't fit. Ends any open
   // pass.
   virtual size_t ReadResolve(int resolve) = 0;
+
+  // Queues a resolve's pixels for MetalFrameResults::picture, for showing outside Metal. They stay put until the frame slot
+  // comes round again, kFramesInFlight frames on. Ends any open pass.
+  virtual bool CopyPicture(int resolve) = 0;
 
   // Writes a resolve into guest memory at byte offset at, as the Xenos lays out a 32-bit texture: by 32x32 tiles if
   // tiled, and with each pixel's bytes reversed if swap. Pitch is in pixels. Ends any open pass.
