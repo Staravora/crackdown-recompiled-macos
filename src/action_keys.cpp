@@ -17,14 +17,16 @@
 #include <rex/ui/window.h>
 #include <rex/ui/window_listener.h>
 
+#include "cheat_hooks.h"
 #include "keybinds.h"
 #include "mouse_look.h"
 
 REXCVAR_DECLARE(bool, mnk_mode);
-REXCVAR_DEFINE_STRING(crackdown_key_pickup, "G", "Input/Keybinds/Crackdown", "Pick up or drop with one press");
+REXCVAR_DEFINE_STRING(crackdown_key_pickup, "E", "Input/Keybinds/Crackdown", "Pick up or drop with one press");
 REXCVAR_DEFINE_STRING(crackdown_key_gas, "W", "Input/Keybinds/Crackdown", "Gas, while driving");
 REXCVAR_DEFINE_STRING(crackdown_key_brake, "S", "Input/Keybinds/Crackdown", "Brake and reverse, while driving");
 REXCVAR_DEFINE_BOOL(crackdown_trackpad_lock_on, false, "Input", "Hold Shift to lock on");
+REXCVAR_DEFINE_BOOL(crackdown_carry_probe, false, "Crackdown", "Log which character fields change as objects are carried");
 
 namespace crackdown::action_keys {
 
@@ -147,6 +149,43 @@ class Listener final : public rex::ui::WindowInputListener, public rex::ui::Wind
 
 Listener g_listener;
 
+// Finds what says the player is carrying something: stand still and pick up and drop things, and only the fields that
+// follow along stay in the log. Anything that changes often is dropped as noise.
+constexpr uint32_t kProbeBytes = 8192;
+constexpr int64_t kProbeEveryMs = 50;
+constexpr uint32_t kProbeMaxChanges = 24;
+
+void RunCarryProbe(const uint8_t* base, int64_t now_ms, bool key_down) {
+  static std::vector<uint32_t> last(kProbeBytes / 4);
+  static std::vector<uint32_t> changes(kProbeBytes / 4);
+  static uint32_t character = 0;
+  static int64_t next_ms = 0;
+  static bool was_down = false;
+  if (key_down != was_down) {
+    was_down = key_down;
+    REXLOG_INFO("Carry probe: key {}", key_down ? "down" : "up");
+  }
+  if (now_ms < next_ms) {
+    return;
+  }
+  next_ms = now_ms + kProbeEveryMs;
+  const uint32_t current = cheats::PlayerCharacter(const_cast<uint8_t*>(base));
+  if (!current) {
+    return;
+  }
+  const bool fresh = current != character;
+  character = current;
+  for (uint32_t i = 0; i < kProbeBytes / 4; ++i) {
+    uint32_t word;
+    std::memcpy(&word, base + current + i * 4, sizeof(word));
+    word = std::byteswap(word);
+    if (!fresh && word != last[i] && ++changes[i] <= kProbeMaxChanges) {
+      REXLOG_INFO("Carry probe: +{} {:08X} -> {:08X}", i * 4, last[i], word);
+    }
+    last[i] = word;
+  }
+}
+
 uint16_t Load16(const uint8_t* at) {
   uint16_t value;
   std::memcpy(&value, at, sizeof(value));
@@ -196,6 +235,9 @@ void Filter(uint8_t* base, uint32_t state, bool driving) {
   }
   if (driving) {
     ApplyDriving(pad, Held(g_gas_keys), Held(g_brake_keys));
+  }
+  if (REXCVAR_GET(crackdown_carry_probe)) {
+    RunCarryProbe(base, now_ms, Held(g_pickup_keys));
   }
   // In a vehicle the same trigger is the brake, and the mouse should carry on turning the camera.
   const bool locked_on = !driving && pad.left_trigger >= kLockOnTrigger;

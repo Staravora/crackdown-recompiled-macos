@@ -164,11 +164,12 @@ Optional gameplay modifiers, all off by default. They start with the values save
 | **Mouse** | Camera and aim | Camera |
 | **Left click** / **Right click** | Fire / lock on | Gas / brake, as the triggers |
 | **Space** | Jump | Flip the vehicle |
-| **E** | Enter, exit, garage, supply point, lift | Exit |
-| **F** | Kick. Hold to pick up | |
-| **G** | Pick up or drop with one press | |
-| **R** | Reload. Hold to equip | |
-| **Q** / **C** | Throw grenade / crouch | |
+| **E** | Pick up or drop | |
+| **F** | Enter, exit, garage, supply point, lift | Exit |
+| **V** | Kick | |
+| **R** | Reload | |
+| **Q** | Swap weapons. Hold to equip | |
+| **G** / **C** | Throw grenade / crouch | |
 | **1 2 3 4** | D-pad | D-pad |
 | **Tab** / **Esc** | Map / pause | Map / pause |
 

@@ -76,13 +76,13 @@ void TestMapping() {
       {"keybind_lstick_left", "Move left", "A"},
       {"keybind_lstick_right", "Move right", "D"},
       {"keybind_a", "Jump / Accept", "Space,Return"},
-      {"keybind_b", "Kick (hold: pick up) / Back", "F,Backspace"},
-      {"keybind_x", "Reload (hold: equip)", "R"},
-      {"keybind_y", "Enter / Exit / Use", "E"},
+      {"keybind_b", "Kick / Back", "V,Backspace"},
+      {"keybind_x", "Swap weapons (hold: equip)", "Q"},
+      {"keybind_y", "Enter / Exit / Use", "F"},
       {"keybind_right_trigger", "Fire", "LMB"},
       {"keybind_left_trigger", "Lock on", "RMB"},
-      {"keybind_right_shoulder", "Throw grenade", "Q"},
-      {"keybind_left_shoulder", "Left bumper", "V"},
+      {"keybind_right_shoulder", "Throw grenade", "G"},
+      {"keybind_left_shoulder", "Reload", "R"},
       {"keybind_lstick_press", "Crouch", "C"},
       {"keybind_rstick_press", "Right stick press", "B"},
       {"keybind_rstick_up", "Camera up", "Up"},
@@ -199,7 +199,7 @@ void TestSaved() {
   CHECK(SavedKeyboardBinding(store, *Find("keybind_a")) == "Shift+Up");
   CHECK(KeyboardBindingLabel(SavedKeyboardBinding(store, *Find("keybind_a"))) == "Shift+Up");
   store.Set("keybind_b", "NotAKey");
-  CHECK(SavedKeyboardBinding(store, *Find("keybind_b")) == "F,Backspace");
+  CHECK(SavedKeyboardBinding(store, *Find("keybind_b")) == "V,Backspace");
   store.Set("keybind_start", "F12");
   CHECK(SavedKeyboardBinding(store, *Find("keybind_start")) == "Escape");
   CHECK(KeyboardBindingLabel(SavedKeyboardBinding(store, *Find("keybind_back"))) == "Tab");

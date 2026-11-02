@@ -5,6 +5,7 @@
 namespace crackdown::cheats {
 
 bool PlayerIsDriving(uint8_t* base);
+uint32_t PlayerCharacter(uint8_t* base);
 
 // Once per frame on the game thread: applies the refills that turning a cheat on asks for.
 void RunGameTick(uint8_t* base);

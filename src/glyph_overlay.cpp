@@ -142,6 +142,10 @@ std::string BindValue(const char* cvar) {
   if (std::string_view(cvar) == "keybind_left_trigger" && rex::cvar::GetFlagByName("crackdown_trackpad_lock_on") == "true") {
     return "Shift";
   }
+  // The game prompts picking up on B, and that's this key's job. Kicking is rarely prompted.
+  if (std::string_view(cvar) == "keybind_b") {
+    return rex::cvar::GetFlagByName("crackdown_key_pickup");
+  }
   return rex::cvar::GetFlagByName(cvar);
 }
 

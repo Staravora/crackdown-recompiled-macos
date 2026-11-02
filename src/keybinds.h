@@ -27,13 +27,13 @@ inline constexpr std::array<KeyboardAction, 24> kKeyboardActions = {{
     {"keybind_lstick_left", "Move left", "A"},
     {"keybind_lstick_right", "Move right", "D"},
     {"keybind_a", "Jump / Accept", "Space,Return"},
-    {"keybind_b", "Kick (hold: pick up) / Back", "F,Backspace"},
-    {"keybind_x", "Reload (hold: equip)", "R"},
-    {"keybind_y", "Enter / Exit / Use", "E"},
+    {"keybind_b", "Kick / Back", "V,Backspace"},
+    {"keybind_x", "Swap weapons (hold: equip)", "Q"},
+    {"keybind_y", "Enter / Exit / Use", "F"},
     {"keybind_right_trigger", "Fire", "LMB"},
     {"keybind_left_trigger", "Lock on", "RMB"},
-    {"keybind_right_shoulder", "Throw grenade", "Q"},
-    {"keybind_left_shoulder", "Left bumper", "V"},
+    {"keybind_right_shoulder", "Throw grenade", "G"},
+    {"keybind_left_shoulder", "Reload", "R"},
     {"keybind_lstick_press", "Crouch", "C"},
     {"keybind_rstick_press", "Right stick press", "B"},
     {"keybind_rstick_up", "Camera up", "Up"},
@@ -50,7 +50,7 @@ inline constexpr std::array<KeyboardAction, 24> kKeyboardActions = {{
 
 // Keys that do more than one pad press. See action_keys.h.
 inline constexpr std::array<KeyboardAction, 3> kCrackdownActions = {{
-    {"crackdown_key_pickup", "Pick up / Drop (one press)", "G"},
+    {"crackdown_key_pickup", "Pick up / Drop", "E"},
     {"crackdown_key_gas", "Gas, while driving", "W"},
     {"crackdown_key_brake", "Brake / Reverse, while driving", "S"},
 }};
