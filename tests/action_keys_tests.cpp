@@ -8,38 +8,20 @@ using namespace crackdown::action_keys;
 
 namespace {
 
-void TestPressWithNothingInHandPicksUp() {
-  CarryKey key;
-  CHECK(key.Update(true, false, 100).button_b);
-  CHECK(key.Update(false, false, 120).button_b);
-  CHECK(key.Update(false, false, 100 + kPickUpHoldMs - 1).button_b);
-  CHECK(!key.Update(false, false, 100 + kPickUpHoldMs).button_b);
+void TestPickUpHoldsLongEnough() {
+  PickUpHold hold;
+  CHECK(!hold.Update(false, 0));
+  CHECK(hold.Update(true, 100));
+  CHECK(hold.Update(false, 120));
+  CHECK(hold.Update(false, 100 + kPickUpHoldMs - 1));
+  CHECK(!hold.Update(false, 100 + kPickUpHoldMs));
 }
 
-void TestPickingUpDoesNotThrowWhenTheKeyLifts() {
-  CarryKey key;
-  key.Update(true, false, 0);
-  key.Update(true, true, 500);
-  const CarryPress lifted = key.Update(false, true, 900);
-  CHECK(!lifted.right_trigger);
-}
-
-void TestTapWhileCarryingThrows() {
-  CarryKey key;
-  CHECK(!key.Update(true, true, 0).button_b);
-  const CarryPress lifted = key.Update(false, true, 100);
-  CHECK(lifted.right_trigger);
-  CHECK(!lifted.button_b);
-  CHECK(!key.Update(false, true, 100 + kThrowPressMs).right_trigger);
-}
-
-void TestHoldWhileCarryingDrops() {
-  CarryKey key;
-  key.Update(true, true, 0);
-  CHECK(!key.Update(true, true, kDropAfterMs - 1).button_b);
-  CHECK(key.Update(true, true, kDropAfterMs).button_b);
-  CHECK(!key.Update(true, true, kDropAfterMs + kDropPressMs).button_b);
-  CHECK(!key.Update(false, false, kDropAfterMs + kDropPressMs + 50).right_trigger);
+void TestPickUpKeepsGoingWhileHeld() {
+  PickUpHold hold;
+  CHECK(hold.Update(true, 0));
+  CHECK(hold.Update(true, kPickUpHoldMs * 3));
+  CHECK(!hold.Update(false, kPickUpHoldMs * 3));
 }
 
 void TestDrivingPullsTriggersAndLeavesTheStick() {
@@ -94,10 +76,8 @@ void TestBinds() {
 }  // namespace
 
 int main() {
-  TestPressWithNothingInHandPicksUp();
-  TestPickingUpDoesNotThrowWhenTheKeyLifts();
-  TestTapWhileCarryingThrows();
-  TestHoldWhileCarryingDrops();
+  TestPickUpHoldsLongEnough();
+  TestPickUpKeepsGoingWhileHeld();
   TestDrivingPullsTriggersAndLeavesTheStick();
   TestFlickPushesAndEasesBack();
   TestStickStaysInsideItsCircle();

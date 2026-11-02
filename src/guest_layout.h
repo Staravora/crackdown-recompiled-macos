@@ -39,7 +39,6 @@ struct GuestLayout {
   uint32_t character_secondary_equipment;
   uint32_t character_vehicle;
   uint32_t character_vehicle_flags;
-  uint32_t character_carried;  // What the character is holding, or 0. 0 here means not found for this build.
   uint32_t vehicle_state;
   uint32_t controller_desired_velocity;
   std::array<uint32_t, 2> controller_aim;
@@ -94,7 +93,6 @@ inline constexpr GuestLayout kLayoutBase = {
     .character_secondary_equipment = 6308,
     .character_vehicle = 5580,
     .character_vehicle_flags = 5457,
-    .character_carried = 5588,
     .vehicle_state = 3064,
     .controller_desired_velocity = 5072,
     .controller_aim = {5152, 5104},
@@ -140,7 +138,6 @@ inline constexpr GuestLayout kLayoutTitleUpdate6 = {
     .character_secondary_equipment = 4308,
     .character_vehicle = 3588,
     .character_vehicle_flags = 3473,
-    .character_carried = 0,
     .vehicle_state = 3048,
     .controller_desired_velocity = 5696,
     .controller_aim = {5760, 5728},

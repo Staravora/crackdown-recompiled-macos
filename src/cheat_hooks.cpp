@@ -269,12 +269,6 @@ void crackdown::hooks::FireWeaponTracked(PPCContext& ctx, uint8_t* base, GuestFu
                               crackdown::cheats::OwnedByPlayer);
 }
 
-bool crackdown::cheats::PlayerIsCarrying(uint8_t* base) {
-  const uint32_t character = crackdown::cheats::LocalPlayerCharacter(base);
-  const uint32_t offset = crackdown::Layout().character_carried;
-  return character && offset && Load32(base, character + offset) != 0;
-}
-
 bool crackdown::cheats::PlayerIsDriving(uint8_t* base) { return crackdown::cheats::PlayerDrivenVehicle(base) != 0; }
 
 void crackdown::hooks::VehicleDamage(PPCContext& ctx, uint8_t* base, GuestFunction original) {

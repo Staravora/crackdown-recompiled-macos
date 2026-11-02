@@ -164,7 +164,7 @@ Optional gameplay modifiers, all off by default. They start with the values save
 | **Mouse** | Camera and aim | Camera |
 | **Left click** / **Right click** | Fire / lock on | Gas / brake, as the triggers |
 | **Space** | Jump | Flip the vehicle |
-| **E** | Pick up. While carrying, tap to throw and hold to drop | |
+| **E** | Pick up or drop | |
 | **F** | Enter, exit, garage, supply point, lift | Exit |
 | **V** | Kick | |
 | **R** | Reload | |

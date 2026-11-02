@@ -22,7 +22,7 @@
 #include "mouse_look.h"
 
 REXCVAR_DECLARE(bool, mnk_mode);
-REXCVAR_DEFINE_STRING(crackdown_key_pickup, "E", "Input/Keybinds/Crackdown", "Pick up, then tap to throw and hold to drop");
+REXCVAR_DEFINE_STRING(crackdown_key_pickup, "E", "Input/Keybinds/Crackdown", "Pick up or drop with one press");
 REXCVAR_DEFINE_STRING(crackdown_key_gas, "W", "Input/Keybinds/Crackdown", "Gas, while driving");
 REXCVAR_DEFINE_STRING(crackdown_key_brake, "S", "Input/Keybinds/Crackdown", "Brake and reverse, while driving");
 REXCVAR_DEFINE_BOOL(crackdown_trackpad_lock_on, false, "Input", "Hold Shift to lock on");
@@ -45,8 +45,8 @@ constexpr size_t kKeys = 256;
 std::array<std::atomic<bool>, kKeys> g_down{};
 std::vector<ModifierBind> g_modifier_binds;
 std::vector<VirtualKey> g_pickup_keys, g_gas_keys, g_brake_keys;
-std::mutex g_carry_mutex;
-CarryKey g_carry;
+std::mutex g_pickup_mutex;
+PickUpHold g_pickup;
 LockAim g_lock_aim;
 rex::ui::Window* g_window = nullptr;
 
@@ -190,13 +190,9 @@ void Filter(uint8_t* base, uint32_t state, bool driving) {
                              std::chrono::steady_clock::now().time_since_epoch())
                              .count();
   {
-    std::lock_guard lock(g_carry_mutex);
-    const CarryPress press = g_carry.Update(Held(g_pickup_keys), !driving && cheats::PlayerIsCarrying(base), now_ms);
-    if (press.button_b) {
+    std::lock_guard lock(g_pickup_mutex);
+    if (g_pickup.Update(Held(g_pickup_keys), now_ms)) {
       pad.buttons |= kButtonB;
-    }
-    if (press.right_trigger) {
-      pad.right_trigger = 255;
     }
   }
   if (driving) {

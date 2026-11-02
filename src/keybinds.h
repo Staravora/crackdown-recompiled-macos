@@ -50,7 +50,7 @@ inline constexpr std::array<KeyboardAction, 24> kKeyboardActions = {{
 
 // Keys that do more than one pad press. See action_keys.h.
 inline constexpr std::array<KeyboardAction, 3> kCrackdownActions = {{
-    {"crackdown_key_pickup", "Pick up, then tap: throw, hold: drop", "E"},
+    {"crackdown_key_pickup", "Pick up / Drop", "E"},
     {"crackdown_key_gas", "Gas, while driving", "W"},
     {"crackdown_key_brake", "Brake / Reverse, while driving", "S"},
 }};

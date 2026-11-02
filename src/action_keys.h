@@ -26,48 +26,24 @@ struct Pad {
 inline constexpr uint16_t kButtonB = 0x2000;
 inline constexpr int16_t kStickFull = 32767;
 
-// How long the pad's B has to stay down to pick something up. Longer doesn't hurt, shorter is a kick.
+// What the game wants before a press counts as a hold. Longer doesn't hurt, shorter is a kick.
 inline constexpr int64_t kPickUpHoldMs = 650;
-// Holding the key this long while carrying means drop, not throw. A press of B drops at once, so it has to wait.
-inline constexpr int64_t kDropAfterMs = 250;
-inline constexpr int64_t kDropPressMs = 150;
-inline constexpr int64_t kThrowPressMs = 150;
 
-struct CarryPress {
-  bool button_b = false;
-  bool right_trigger = false;
-};
-
-// One key for everything to do with carrying. With nothing in hand a press stands for holding B, so it picks up. With
-// something in hand a tap throws, by pulling the right trigger, and a hold drops, by pressing B.
-class CarryKey {
+// What a key does that a pad press can't: the pad's B kicks on a tap and picks up on a hold, so one press of this key
+// stands for the hold. Keeping the key down keeps B down.
+class PickUpHold {
  public:
-  CarryPress Update(bool key_down, bool carrying, int64_t now_ms) {
+  bool Update(bool key_down, int64_t now_ms) {
     if (key_down && !was_down_) {
-      deciding_ = carrying;
-      pressed_ms_ = now_ms;
-      if (!carrying) {
-        b_until_ms_ = now_ms + kPickUpHoldMs;
-      }
-    }
-    if (deciding_ && key_down && now_ms - pressed_ms_ >= kDropAfterMs) {
-      deciding_ = false;
-      b_until_ms_ = now_ms + kDropPressMs;
-    }
-    if (deciding_ && !key_down) {
-      deciding_ = false;
-      trigger_until_ms_ = now_ms + kThrowPressMs;
+      release_at_ms_ = now_ms + kPickUpHoldMs;
     }
     was_down_ = key_down;
-    return {now_ms < b_until_ms_, now_ms < trigger_until_ms_};
+    return key_down || now_ms < release_at_ms_;
   }
 
  private:
   bool was_down_ = false;
-  bool deciding_ = false;
-  int64_t pressed_ms_ = 0;
-  int64_t b_until_ms_ = 0;
-  int64_t trigger_until_ms_ = 0;
+  int64_t release_at_ms_ = 0;
 };
 
 // In a vehicle the triggers are gas and brake, so the keys that walk pull those as well. The stick's up and down do
