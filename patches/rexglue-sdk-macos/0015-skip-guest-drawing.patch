@@ -1,19 +1,31 @@
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
-@@ -84,6 +84,11 @@
+@@ -82,6 +82,11 @@
+ REXCVAR_DEFINE_BOOL(vulkan_occlusion_queries_in_render_passes, false, "GPU/Vulkan",
+                     "Record guest occlusion queries inside render passes, one host query per pass "
                      "they span, instead of ending the render pass at every query begin and end")
-     .lifecycle(rex::cvar::Lifecycle::kHotReload);
- 
-+REXCVAR_DEFINE_BOOL(vulkan_skip_guest_drawing, false, "GPU/Vulkan",
-+                    "Process the ring for fences, waits and swaps but draw, clear and resolve nothing, for a "
-+                    "title that renders elsewhere")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +
- REXCVAR_DEFINE_STRING(vulkan_skip_pixel_shader, "", "GPU/Vulkan",
-                       "Skip draws using the pixel shader with this ucode hash, in hex (diagnostic)")
++REXCVAR_DEFINE_BOOL(vulkan_skip_guest_drawing, false, "GPU/Vulkan",
++                    "Process the ring for fences, waits and swaps but draw, clear, resolve and answer occlusion "
++                    "queries for nothing, for a title that renders elsewhere")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
-@@ -3815,6 +3820,9 @@
+ 
+ REXCVAR_DEFINE_STRING(vulkan_skip_pixel_shader, "", "GPU/Vulkan",
+@@ -750,6 +755,11 @@
+ 
+ bool VulkanCommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader,
+                                                                 uint32_t packet, uint32_t count) {
++  // With nothing drawn, every count would be wrong, so the title's own renderer writes them.
++  if (REXCVAR_GET(vulkan_skip_guest_drawing)) {
++    WriteRegister(XE_GPU_REG_VGT_EVENT_INITIATOR, reader->ReadAndSwap<uint32_t>() & 0x3F);
++    return true;
++  }
+   if (!REXCVAR_GET(occlusion_query_enable) || !occlusion_query_resources_available_) {
+     return CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(reader, packet, count);
+   }
+@@ -3815,6 +3825,9 @@
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
  
@@ -23,7 +35,7 @@ diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/com
    const RegisterFile& regs = *register_file_;
    (void)index_buffer_info;
    auto draw_fail = [&](const char* stage) {
-@@ -4701,6 +4709,9 @@
+@@ -4701,6 +4714,9 @@
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
  

@@ -31,6 +31,7 @@
 #include "guest_hooks.h"
 #include "guest_layout.h"
 #include "hang_watchdog.h"
+#include "native/shadow.h"
 #include "settings.h"
 
 REXCVAR_DEFINE_INT32(crackdown_debug_frame_dips, 0, "Crackdown",
@@ -85,6 +86,11 @@ crackdown::FrameStep ConsolePacedStep(int rate, double interval) {
 // Set by the launcher before the title starts.
 int FrameRate() {
   return crackdown::NormalizeFrameRate(REXCVAR_GET(crackdown_frame_rate));
+}
+
+// With Metal drawing alone, the emulator's swap no longer waits for vblanks, so every rate is paced here.
+bool HostPaced(int rate) {
+  return crackdown::HostPacedFrameRate(rate) || crackdown::native::shadow::DrawsAlone();
 }
 
 bool HighFrameRate(int rate) {
@@ -182,7 +188,7 @@ void DebugFrameDip() {
 void BeginFrame(int rate) {
   DebugFrameDip();
   const int64_t now = NowNs();
-  if (crackdown::HostPacedFrameRate(rate)) {
+  if (HostPaced(rate)) {
     const crackdown::FramePacer::Frame frame = g_pacer.Next(rate, now);
     WaitUntil(frame.release_ns);
     g_step = frame.step;
@@ -218,7 +224,7 @@ void LogFrameRate(int rate) {
   g_logged_rate = rate;
   if (rate == crackdown::kFrameRateUnlimited) {
     REXLOG_INFO("Frame rate: unlimited, game time follows the measured frame time");
-  } else if (crackdown::HostPacedFrameRate(rate)) {
+  } else if (HostPaced(rate)) {
     REXLOG_INFO("Frame rate: {} FPS, paced on the host", rate);
   } else {
     REXLOG_INFO("Frame rate: {} FPS, {} vblank(s) per frame", rate, crackdown::PresentIntervalFor(rate));
@@ -300,7 +306,7 @@ void crackdown::hooks::SwapPacket(PPCContext& ctx, uint8_t* base, GuestFunction 
 // waited a whole extra vblank; the host presents without tearing either way. Host-paced rates take interval 0.
 void crackdown::hooks::SwapCallback(PPCContext& ctx, uint8_t* base, GuestFunction original) {
   const int rate = FrameRate();
-  if (crackdown::HostPacedFrameRate(rate)) {
+  if (HostPaced(rate)) {
     ctx.r3.u64 = ctx.r3.u32 & ~kSwapPresentIntervalMask;
   } else if (HighFrameRate(rate)) {
     ctx.r3.u64 = (ctx.r3.u32 & ~kSwapImmediateThresholdMask) | kSwapImmediateAlways;
@@ -310,7 +316,7 @@ void crackdown::hooks::SwapCallback(PPCContext& ctx, uint8_t* base, GuestFunctio
 
 // Codegen midasm hook after each inline `li rN,16`: the 16 ms frame time of the title's variable-step sites.
 void crackdown_variable_step_frame_ms(PPCRegister& frame_ms) {
-  if (crackdown::HostPacedFrameRate(FrameRate())) {
+  if (HostPaced(FrameRate())) {
     frame_ms.u64 = g_frame_ms.load(std::memory_order_relaxed);
   }
 }

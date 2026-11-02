@@ -27,6 +27,9 @@
 
 REXCVAR_DEFINE_BOOL(crackdown_benchmark, false, "Crackdown",
                     "Continue the saved game with a virtual pad, record frame times, write them and quit");
+REXCVAR_DEFINE_INT32(crackdown_benchmark_picker_after_seconds, 0, "Crackdown",
+                     "Seconds after the character loads to take the supply point picker as up. 0 finds it by its frame "
+                     "rate, which only works while the emulator draws");
 REXCVAR_DEFINE_INT32(crackdown_benchmark_district, 1, "Crackdown",
                      "District the benchmark spawns in: 0 Agency, 1 Los Muertos, 2 Volk, 3 Shai-Gen");
 REXCVAR_DEFINE_INT32(crackdown_benchmark_supply_point, 0, "Crackdown",
@@ -194,9 +197,15 @@ void Run(uint8_t* membase, std::filesystem::path output_dir) {
   // A loading screen that runs far above the game's rate comes before the supply point picker, which draws the city
   // behind it at the game's rate. Presses during the loading screen are lost, so wait for the drop.
   bool loading_seen = false;
+  const auto picker_after = std::chrono::seconds(REXCVAR_GET(crackdown_benchmark_picker_after_seconds));
+  const Clock::time_point character_found = Clock::now();
   for (uint32_t last = g_frame_count.load(std::memory_order_relaxed);;) {
     if (Clock::now() - g_start > timeout) {
       give_up("no_supply_point_picker");
+    }
+    if (picker_after.count() > 0) {
+      std::this_thread::sleep_until(character_found + picker_after);
+      break;
     }
     std::this_thread::sleep_for(std::chrono::seconds(1));
     const uint32_t count = g_frame_count.load(std::memory_order_relaxed);

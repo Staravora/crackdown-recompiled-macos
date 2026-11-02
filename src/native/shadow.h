@@ -49,6 +49,8 @@ using VertexCode = std::unordered_map<uint64_t, std::vector<uint8_t>>;
 
 #if defined(__APPLE__)
 bool Enabled();
+// crackdown_native_only: Metal draws and the emulator doesn't, so nothing paces the game at the guest vblank.
+bool DrawsAlone();
 void Install(rex::memory::Memory* memory, const std::filesystem::path& shader_dir, const std::filesystem::path& output_dir);
 void OnGuestFrame();
 void OnClear(uint32_t flags);
@@ -74,6 +76,9 @@ void SetRingDesyncs(uint64_t desyncs);
 void SetGammaRamp(const uint32_t* ramp);
 #else
 inline bool Enabled() {
+  return false;
+}
+inline bool DrawsAlone() {
   return false;
 }
 inline void Install(rex::memory::Memory*, const std::filesystem::path&, const std::filesystem::path&) {}

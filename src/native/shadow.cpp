@@ -1746,14 +1746,17 @@ bool Enabled() {
   return g_on.load(std::memory_order_relaxed);
 }
 
+bool DrawsAlone() {
+  return REXCVAR_GET(crackdown_native_only);
+}
+
 void Install(rex::memory::Memory* memory, const std::filesystem::path& shader_dir, const std::filesystem::path& output_dir) {
   if (REXCVAR_GET(crackdown_native_only)) {
-    // The emulator still runs the ring, so fences, waits and swaps carry on. With nothing drawn it would answer every
-    // query 0, so it leaves them to Metal.
+    // The emulator still runs the ring, so fences, waits and swaps carry on. It leaves query answers to Metal (SDK patch
+    // 0015).
     for (const auto& [name, value] : {std::pair{"crackdown_native_shadow", "true"}, {"crackdown_native_shadow_window", "true"},
                                       {"crackdown_native_pacing", "true"}, {"crackdown_native_exposure", "true"},
-                                      {"vulkan_skip_guest_drawing", "true"}, {"occlusion_query_enable", "false"},
-                                      {"query_occlusion_fake_sample_count", "-1"}}) {
+                                      {"vulkan_skip_guest_drawing", "true"}}) {
       if (!rex::cvar::SetFlagByName(name, value)) {
         REXLOG_ERROR("Native only: couldn't set {}", name);
       }

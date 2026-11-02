@@ -1,15 +1,15 @@
 # Session handoff
 
-## 2026-11-02 — Metal-only preview built, waiting on the SDK rebuild
-- **What it is:** `--crackdown_native_only=true`. Metal draws the game in its own window, and the emulator draws nothing. The emulator's command processor still runs the ring, so fences, ring space, swaps and vblank carry on. That's the cheap route to seeing the takeover, not the takeover itself.
-- **What it turns on:** shadow mode, its window, `crackdown_native_pacing` and `crackdown_native_exposure`. It also sets the SDK's `vulkan_skip_guest_drawing` (new, patch `0015`), so draws and copies return at once, plus `occlusion_query_enable=false` and `query_occlusion_fake_sample_count=-1`, so the emulator leaves query results alone.
-- **Queries:** Metal writes each answer where the GPU would, as the game's get-data reads it: per tile, an end block then a begin block, little-endian, at the query's `+24` pointers (count at `+144`). The whole count goes in tile 0, and the first word is written last, since D3D's marker there means not ready. Total equals ZPass, as the emulator wrote, so corona fades still only go 0 or 1.
-- **What to expect:** the main window goes black or freezes, and the game shows in the Metal window. Keep the main window focused, since it gets the input. The 40+ ms present wait should go, because the emulator no longer draws.
-- **Known risks, untested:**
-  - A query whose frame Metal never draws stays not ready forever.
-  - Fences now come from the command processor ahead of Metal. Pacing holds the game a frame behind Metal, so memory Metal is still reading shouldn't be reused, but that isn't proven.
-  - Loading and menus haven't been tried.
-- **Blocked on:** the SDK build. The session's safety check won't let me build third-party code, so Bruce runs `crackdown/tools/stage-macos-sdk.sh` (new) with the game closed. It rebuilds the SDK libraries, installs them in `rexglue-mac/mac-arm64` and beside the game, refreshes the patch fingerprint and stamp, then builds and stages the game. Until then the game build stops at `crackdown_rexglue_check` ("SDK patches changed"), which is correct. The changed game files compile on their own.
+## 2026-11-02 — Metal-only preview runs: 47 FPS uncapped in the city
+- **What it is:** `--crackdown_native_only=true`. Metal draws the game in its own window and the emulator draws nothing. The emulator's command processor still runs the ring, so fences, ring space and swaps carry on. It's a preview, not the takeover.
+- **What it turns on:** shadow mode, its window, pacing and exposure, and the SDK's `vulkan_skip_guest_drawing` (patch `0015`). Under that switch the command processor skips draws and copies, and writes no occlusion results. Metal writes each answer where the GPU would: per tile, an end block then a begin block, little-endian, at the query's `+24` pointers (count at `+144`), with the first word last.
+- **First run, Shift+3 street:** reached the city, and Metal drew it correctly (`native-shadow` capture). The benchmark got 47.3 FPS on average, median 20.4 ms, 1% low 36.6, 13 of 2,835 frames over 33 ms. Present's fence wait disappeared, and Metal now sets the pace: the game was held on 293 of 300 frames, about 3 ms each.
+- **Bugs that run showed, fixed but needing the SDK rebuilt:**
+  - **Too fast:** at the 30 setting the game ran at 47 to 60, so Bruce saw everything sped up. 30 and 60 were paced by the emulator's vblank, which no longer happens. `frame_pacing.cpp` now paces every rate on the host clock when Metal draws alone (`HostPaced`).
+  - **Fake query counts:** the emulator still wrote its fake count of 1000 into query results before Metal's answer arrived. `query_occlusion_fake_sample_count` only accepts 1 to 100000, so it can't be switched off. `0015` now has the ZPD handler write nothing while the emulator isn't drawing.
+  - **Benchmark:** it finds the supply point picker by frame rate, which no longer drops. `crackdown_benchmark_picker_after_seconds` (15 works) waits a fixed time instead.
+- **Still to fix:** a green flash at least once before the main menu (Bruce). The main window is black, and input still goes to it.
+- **The game's own query reads:** the per-object queries now read real counts, up to 8910. Pairing them with Metal's answers is noisy now that Metal runs ahead, so `emulator_only` in the report means little in this mode.
 
 ## 2026-11-02 — Fences and pacing measured; Metal is ready to answer them
 - **How the game fences:** a fence is a ring segment. D3D bumps the counter at device `+10780` and the emulator writes the passed one to word 0 of the writeback block at `+10768`. About 12 a frame. `826BB4F0` waits on one (r3 device, r4 fence), done when `current - fence >= current - passed`. 27 call sites.
