@@ -1,5 +1,17 @@
 # Session handoff
 
+- **2026-11-02 ship-check (public GitHub, next to upstream): NO-SHIP.** Secrets clean: gitleaks' 3 hits are upstream false positives, a key-code compare and two public GPG fingerprints. Tests 57/58, the failure being the known upstream release-script checks.
+  - **Blocking:**
+    - the README has no macOS section;
+    - the Metal renderer can't work for anyone else, because `native-shaders` comes from manual steps (extract, XenosRecomp, `pull_vertices.py`, `build_pixels.py`) that `build-macos.sh` doesn't run, and with no shaders it draws nothing;
+    - `docs/macos-session.md:32` holds a personal path.
+  - **Blocking if a prebuilt app ships:**
+    - ad-hoc signed, not Developer ID or notarized;
+    - non-code files in `Contents/MacOS`, and logs written inside the bundle;
+    - no third-party notices for the Mac-only components such as MoltenVK;
+    - bundle ID `io.github.saulob.crackdown`.
+  - **Decisions for Bruce:** `LSMinimumSystemVersion` is 26.0; game timing speeds up above 30.
+
 ## 2026-11-02 — Frame generation pulled from the launcher
 - **Bruce, after playing with per-object motion:** "Still bad, pull it."
 - **Done:** the launcher row and saved key are gone. The setting is now `crackdown_frame_generation_preview`, command line only and off by default. The rename means the `crackdown_metalfx_frame_generation = true` still in Bruce's `settings.toml` does nothing; a run with it there started with frame generation off. The code is unchanged: SDK 0018 pacing, snapshots, `motionMain`, and the motion pass.
