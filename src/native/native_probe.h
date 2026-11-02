@@ -22,6 +22,8 @@ void OnRingSegmentEnding(uint32_t device, const uint8_t* base);
 // A resolve goes into the stream after the draws before it, so it copies what they drew.
 void OnResolve(uint32_t device, uint32_t flags, uint32_t rect, uint32_t texture, uint32_t point, uint32_t level,
                uint32_t clear_color, float clear_depth, uint32_t clear_stencil, const uint8_t* base);
+// So does a query, to count the draws between its two ends.
+void OnQuery(uint32_t device, uint32_t query, bool begin, const uint8_t* base);
 void OnRunCommandBuffer(uint32_t device, uint32_t buffer, uint32_t predication, const uint8_t* base);
 void Write(const std::filesystem::path& path, const std::string& label);
 

@@ -53,6 +53,7 @@ void CensusBeginTiling(PPCContext&, uint8_t*, GuestFunction original);
 void CensusEndTiling(PPCContext&, uint8_t*, GuestFunction original);
 void CensusRunCommandBuffer(PPCContext&, uint8_t*, GuestFunction original);
 void CensusQueryIssue(PPCContext&, uint8_t*, GuestFunction original);
+void CensusQueryData(PPCContext&, uint8_t*, GuestFunction original);
 void CensusTextureLock(PPCContext&, uint8_t*, GuestFunction original);
 void CensusCreateTexture(PPCContext&, uint8_t*, GuestFunction original);
 void CensusCacheFlush(PPCContext&, uint8_t*, GuestFunction original);

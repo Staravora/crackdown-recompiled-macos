@@ -464,7 +464,7 @@ Vertex shaders read textures as well, from fetch constants 16 to 19: effect para
 
 A resolve can clear as it copies, and that clear has to happen then. The light layer shows why: it starts as a copy of the normals, is cleared, and only gets lights if any are in view.
 
-The game runs about 190 occlusion queries a frame, as depth-only quads between sample-count events. Metal leaves them out for now, and the emulator still answers them.
+The game draws about 200 depth-only corona quads a frame, and wraps a quad in an occlusion query only once its last answer is in. It also wraps some real object draws in queries. Metal counts samples for all of them beside the emulator, which still answers the game. The emulator gives visible or hidden rather than a count, though the game reads real counts in places, as HANDOFF.md (2026-11-02) lists.
 
 ## Free camera (2026-10-31)
 

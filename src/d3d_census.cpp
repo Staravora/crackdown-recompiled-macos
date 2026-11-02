@@ -60,7 +60,10 @@ constexpr uint32_t kMaxListsPerSegment = 4096;
 constexpr uint32_t kSampleDwords = 64;
 constexpr uint64_t kDumpDwordsPerList = 1 << 16;
 constexpr uint64_t kDumpBudgetDwords = 1 << 24;
+constexpr uint32_t kIssueEnd = 1;
 constexpr uint32_t kIssueBegin = 2;
+constexpr uint32_t kQueryType = 4;
+constexpr uint32_t kQueryOcclusion = 9;
 constexpr size_t kReportRows = 40;
 
 enum DrawKind { kRingVertices, kRingIndices, kVertices, kIndices, kDrawKinds };
@@ -722,11 +725,23 @@ void CensusRunCommandBuffer(PPCContext& ctx, uint8_t* base, GuestFunction origin
 }
 
 void CensusQueryIssue(PPCContext& ctx, uint8_t* base, GuestFunction original) {
+  const uint32_t query = ctx.r3.u32;
   if (census::Counting() && (ctx.r4.u32 & census::kIssueBegin)) {
     std::lock_guard lock(census::g_mutex);
     ++census::g_row.queries;
   }
+  if ((ctx.r4.u32 & (census::kIssueBegin | census::kIssueEnd)) && census::Load32(base, query + census::kQueryType) == census::kQueryOcclusion) {
+    native::probe::OnQuery(census::Load32(base, query), query, (ctx.r4.u32 & census::kIssueBegin) != 0, base);
+  }
   original(ctx, base);
+}
+
+void CensusQueryData(PPCContext& ctx, uint8_t* base, GuestFunction original) {
+  const uint32_t query = ctx.r3.u32, answer = ctx.r4.u32, caller = uint32_t(ctx.lr);
+  original(ctx, base);
+  if (census::Load32(base, query + census::kQueryType) == census::kQueryOcclusion) {
+    native::shadow::OnQueryAsked(caller, query, ctx.r3.u32 == 0, census::Load32(base, answer));
+  }
 }
 
 void CensusTextureLock(PPCContext& ctx, uint8_t* base, GuestFunction original) {

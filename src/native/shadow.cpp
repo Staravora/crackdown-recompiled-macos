@@ -24,6 +24,7 @@
 #include <utility>
 
 #include <fmt/format.h>
+#include <fmt/ranges.h>
 
 #include <rex/cvar.h>
 #include <rex/graphics/xenos.h>
@@ -82,6 +83,12 @@ constexpr uint32_t kCheckFrames = 300;
 constexpr uint32_t kCheckBytes = 4096;
 constexpr uint32_t kMaxShaderDwords = 1 << 14;
 constexpr uint32_t kMaxTargetSize = 4096;
+constexpr size_t kMaxPendingQueries = 8192;
+constexpr size_t kMaxQueryDisagreements = 32;
+constexpr uint64_t kSmallQuerySamples = 8;
+constexpr uint64_t kLargeQuerySamples = 64;
+constexpr int kQueryMarkId = 0xFF00;  // Magenta.
+constexpr std::array<double, 4> kQueryRatioBounds = {0.375, 0.75, 1.5, 3.0};
 
 constexpr uint32_t kSourceAutoIndex = 2;
 constexpr uint32_t kEdramDepthOnly = 5;
@@ -142,8 +149,23 @@ struct Run {
   std::array<uint32_t, kLoopConstants> loops{};
 };
 
+// A query beginning or ending just before a run.
+struct QueryEvent {
+  size_t run;
+  uint64_t id;
+  uint32_t query;
+  bool begin;
+};
+
+// The query a slot of a frame's results belongs to.
+struct QuerySlot {
+  uint64_t id;
+  uint32_t query;
+};
+
 struct Frame {
   std::vector<Run> runs;
+  std::vector<QueryEvent> queries;
 };
 
 struct Totals {
@@ -174,6 +196,43 @@ struct Totals {
   uint64_t wait_ns = 0;
   uint64_t guest_checks = 0;
   uint64_t guest_matches = 0;
+  uint64_t queries_no_room = 0;
+};
+
+// Each query's answers until both have arrived. Metal's come when its frame finishes and the emulator's when the game asks.
+struct QueryAnswers {
+  std::optional<uint64_t> metal;
+  std::optional<uint32_t> emulator;
+};
+
+struct QueryDisagreement {
+  uint32_t query;
+  uint64_t metal;
+  uint64_t least;
+  uint32_t emulator;
+  uint32_t times;
+};
+
+struct QueryAsks {
+  uint64_t waiting = 0;
+  uint64_t none = 0;
+  uint64_t some = 0;
+  uint64_t largest = 0;
+};
+
+struct QueryTotals {
+  uint64_t both_none = 0;
+  uint64_t both_some = 0;
+  uint64_t metal_only = 0;
+  uint64_t emulator_only = 0;
+  uint64_t unanswered = 0;
+  uint64_t metal_samples = 0;
+  uint64_t emulator_samples = 0;
+  std::array<uint64_t, kQueryRatioBounds.size() + 1> ratios{};  // Metal's samples over the emulator's, by kQueryRatioBounds.
+  std::array<uint64_t, 3> metal_only_sizes{};  // Under kSmallQuerySamples, under kLargeQuerySamples, and the rest.
+  std::vector<QueryDisagreement> disagreements;
+  std::map<uint32_t, QueryAsks> asks;  // By where in the game they came from.
+  uint64_t quads = 0;
 };
 
 std::atomic<bool> g_on{false};
@@ -192,6 +251,12 @@ std::vector<FetchConstant> g_resolved_last_frame;
 uint32_t g_clear_pending = 0;
 std::array<uint32_t, BakedLibrary::kGammaEntries> g_gamma_ramp{};
 bool g_gamma_ramp_new = false;
+
+std::mutex g_query_mutex;
+uint64_t g_last_query = 0;
+std::unordered_map<uint32_t, uint64_t> g_latest_query;  // The last issue of each query object.
+std::map<uint64_t, QueryAnswers> g_query_answers;
+QueryTotals g_query_totals;
 
 // Render thread only from here down.
 uint8_t* g_guest = nullptr;
@@ -224,6 +289,7 @@ uint64_t g_frame_number = 0;
 std::vector<uint32_t> g_encode_us;
 std::array<uint32_t, kAluDwords> g_constants{};
 uint32_t g_check_address = 0;
+uint64_t g_quads_counted = 0;
 uint32_t g_check_bytes = 0;
 
 uint64_t Since(Clock::time_point start) {
@@ -724,8 +790,8 @@ double ClearDepthFor(const BakedDraw& draw) {
 
 // Live switches for examining a running game, set from metal-debug.txt: skip_blended, ids (each draw flat, in a colour
 // that gives its number), no_resolves, show=<target>, skip_ps=<address>, stop_ps=<address>, which ends the frame at that
-// shader's first draw, alpha, which puts alpha in a capture's colours, and dump=<name>, which writes live-<name>.png and
-// .txt beside it.
+// shader's first draw, alpha, which puts alpha in a capture's colours, mark_queries, which paints the draws of queries
+// the two sides disagreed on, and dump=<name>, which writes live-<name>.png and .txt beside it.
 bool g_debug_skip_blended = false;
 bool g_debug_ids = false;
 bool g_debug_no_resolves = false;
@@ -736,8 +802,58 @@ bool g_debug_stopped = false;
 bool g_debug_alpha = false;
 bool g_debug_no_stencil = false;
 bool g_debug_no_clears = false;
+bool g_debug_mark_queries = false;
+std::set<uint32_t> g_debug_marked;  // Queries the two sides last disagreed on.
 std::ofstream* g_dump = nullptr;
 int g_debug_id = 0;
+
+// Takes g_query_mutex. Files a query once both sides have answered, and gives up on the oldest if the game never asks.
+void SettleQuery(std::map<uint64_t, QueryAnswers>::iterator entry, uint32_t query) {
+  const QueryAnswers& answers = entry->second;
+  if (answers.metal && answers.emulator) {
+    QueryTotals& totals = g_query_totals;
+    const uint64_t metal = *answers.metal, emulator = *answers.emulator;
+    if (metal && emulator) {
+      ++totals.both_some;
+      totals.metal_samples += metal;
+      totals.emulator_samples += emulator;
+      const double ratio = double(metal) / double(emulator);
+      ++totals.ratios[size_t(std::upper_bound(kQueryRatioBounds.begin(), kQueryRatioBounds.end(), ratio) - kQueryRatioBounds.begin())];
+    } else if (!metal && !emulator) {
+      ++totals.both_none;
+    } else {
+      ++(metal ? totals.metal_only : totals.emulator_only);
+      totals.metal_only_sizes[metal >= kLargeQuerySamples ? 2 : metal >= kSmallQuerySamples ? 1 : 0] += metal != 0;
+      // One object per entry, and the largest are the ones worth looking at. Most are a sample or two on a silhouette.
+      const auto same = std::find_if(totals.disagreements.begin(), totals.disagreements.end(), [&](const QueryDisagreement& other) { return other.query == query; });
+      const auto smallest = std::min_element(totals.disagreements.begin(), totals.disagreements.end(),
+                                             [](const QueryDisagreement& a, const QueryDisagreement& b) { return a.metal < b.metal; });
+      if (same != totals.disagreements.end()) {
+        ++same->times;
+        same->metal = std::max(same->metal, metal);
+        same->least = std::min(same->least, metal);
+      } else if (totals.disagreements.size() < kMaxQueryDisagreements) {
+        totals.disagreements.push_back({query, metal, metal, uint32_t(emulator), 1});
+      } else if (smallest->metal < metal) {
+        *smallest = {query, metal, metal, uint32_t(emulator), 1};
+      }
+    }
+    g_query_answers.erase(entry);
+  }
+  while (g_query_answers.size() > kMaxPendingQueries) {
+    g_query_answers.erase(g_query_answers.begin());
+    ++g_query_totals.unanswered;
+  }
+}
+
+void OnMetalSamples(const std::vector<QuerySlot>& slots, const uint64_t* samples) {
+  std::lock_guard lock(g_query_mutex);
+  for (size_t i = 0; i < slots.size(); ++i) {
+    const auto entry = g_query_answers.try_emplace(slots[i].id).first;
+    entry->second.metal = samples[i];
+    SettleQuery(entry, slots[i].query);
+  }
+}
 
 void CopyResolve(const Run& run, MetalDevice& device, int target, int resolve, bool depth) {
   const ResolveCopy& copy = *run.resolve;
@@ -833,7 +949,7 @@ void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& draw
   }
 }
 
-void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
+void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, std::vector<QuerySlot>& query_slots) {
   g_debug_id = 0;
   g_debug_stopped = false;
   device.CaptureAlpha(g_debug_alpha);
@@ -843,7 +959,25 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
   std::unordered_map<int, uint32_t> color_draws;
   std::set<int> cleared;
   int last_color_target = -1;
-  for (const Run& run : frame.runs) {
+  int open_query = -1;
+  auto next_query = frame.queries.begin();
+  const auto apply_queries = [&](size_t before_run) {
+    for (; next_query != frame.queries.end() && next_query->run <= before_run; ++next_query) {
+      open_query = -1;
+      if (next_query->begin && query_slots.size() < MetalDevice::kMaxQueries) {
+        open_query = int(query_slots.size());
+        query_slots.push_back({next_query->id, next_query->query});
+      } else if (next_query->begin) {
+        ++g_totals.queries_no_room;
+      }
+      if (g_dump) {
+        *g_dump << fmt::format("Q {} {:08X} slot {}\n", next_query->begin ? "begin" : "end", next_query->query, open_query);
+      }
+    }
+  };
+  for (size_t run_number = 0; run_number < frame.runs.size(); ++run_number) {
+    const Run& run = frame.runs[run_number];
+    apply_queries(run_number);
     if (run.resolve) {
       if (!g_debug_stopped) {
         ApplyResolve(run, device, cleared, current_target);
@@ -879,7 +1013,10 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         if (g_debug_stopped) {
           continue;
         }
-        const PixelShader& pixel = g_debug_ids ? g_no_pixel_shader : found_pixel;
+        // A query's quad only tests depth, so it counts however it's dressed from the draw before.
+        const bool counting = open_query >= 0 && WritesNoColor(draw);
+        g_quads_counted += counting;
+        const PixelShader& pixel = g_debug_ids || counting ? g_no_pixel_shader : found_pixel;
         // A blend over what's on screen is only as good as what it reads, and without these it washes out the frame.
         if (pixel.handle >= 0 && IsBlended(draw)) {
           const uint32_t* blended_fetch = list.fetch_data.data() + size_t(draw.fetch_constants) * 192;
@@ -893,7 +1030,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
             continue;
           }
         }
-        if (!WritesDepth(draw) && !WritesStencil(draw) && run.targets.color) {
+        if (!counting && !WritesDepth(draw) && !WritesStencil(draw) && run.targets.color) {
           if (WritesNoColor(draw)) {
             ++g_totals.no_color_draws;
             if (g_dump) {
@@ -993,6 +1130,13 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         std::memcpy(out.blend_constant, draw.blend_constant, sizeof(out.blend_constant));
         out.color_mask = WritesNoColor(draw) ? 0 : draw.color_mask;
         out.alpha_test = alpha_test;
+        out.colorless = counting;
+        out.query = open_query;
+        if (counting && g_debug_mark_queries && g_debug_marked.contains(query_slots[size_t(open_query)].query)) {
+          out.colorless = false;
+          out.color_mask = kColorMaskFirstTarget;
+          out.debug_id = kQueryMarkId;
+        }
         // Tiles overlap by a few rows, and a quad drawn for one tile would blend twice on those.
         if (tile >= 0 && run.targets.height > uint32_t(kSecondTileTop) && !HalfSizeTiles(run.targets)) {
           out.scissor_top = tile ? kSecondTileTop : 0;
@@ -1083,6 +1227,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
       }
     }
   }
+  apply_queries(frame.runs.size());
   const int shown = g_debug_show >= 0 ? g_debug_show : last_color_target;
   if (shown >= 0) {
     device.ShowTarget(shown, g_debug_show < 0);
@@ -1165,7 +1310,7 @@ void Report(const MetalDevice& device) {
       R"("shaders_found":{},"shaders_missing":{},"shaders_failed":{},"index_copy_ms_per_frame":{:.3f},)"
       R"("capture_ms_per_frame":{:.4f},"wait_ms_per_frame":{:.3f},"encode_ms_p50":{:.3f},"encode_ms_p95":{:.3f},"encode_ms_max":{:.3f},)"
       R"("gpu_frames":{},"gpu_errors":{},"gpu_ms_per_frame":{:.3f},"gpu_ms_worst":{:.3f},)"
-      R"("guest_memory_wrapped":{},"guest_checks":{},"guest_matches":{}}})",
+      R"("guest_memory_wrapped":{},"guest_checks":{},"guest_matches":{},)",
       guest_frames, g_totals.frames, dropped, g_totals.draws / frames, g_totals.skipped_draws / frames, g_totals.no_room,
       g_totals.recorded_draws / frames, g_totals.recorded_indices / frames, g_totals.no_shader_draws / frames,
       g_totals.no_target_draws / frames, g_totals.other_primitive_draws / frames, g_totals.other_index_order_draws / frames,
@@ -1178,6 +1323,25 @@ void Report(const MetalDevice& device) {
       Percentile(sorted, 0.5) / 1e3, Percentile(sorted, 0.95) / 1e3, Percentile(sorted, 1.0) / 1e3, gpu.frames, gpu.errors,
       gpu.gpu_ns / 1e6 / double(std::max<uint64_t>(gpu.frames, 1)), gpu.worst_gpu_ns / 1e6,
       device.guest_memory_wrapped() ? "true" : "false", g_totals.guest_checks, g_totals.guest_matches);
+  QueryTotals queries;
+  {
+    std::lock_guard lock(g_query_mutex);
+    queries = std::exchange(g_query_totals, {});
+    queries.quads = std::exchange(g_quads_counted, 0);
+  }
+  std::string disagreements;
+  g_debug_marked.clear();
+  for (const QueryDisagreement& disagreement : queries.disagreements) {
+    g_debug_marked.insert(disagreement.query);
+    disagreements += fmt::format("{}[\"{:08X}\",{},{},{},{}]", disagreements.empty() ? "" : ",", disagreement.query, disagreement.least, disagreement.metal, disagreement.emulator, disagreement.times);
+  }
+  std::string asks;
+  for (const auto& [caller, count] : queries.asks) {
+    asks += fmt::format(R"({}"{:08X}":{{"waiting":{},"none":{},"some":{},"largest":{}}})", asks.empty() ? "" : ",", caller, count.waiting, count.none, count.some, count.largest);
+  }
+  out << fmt::format(R"("queries":{{"both_none":{},"both_some":{},"metal_only":{},"emulator_only":{},"unanswered":{},"no_room":{},"quads":{},"samples_ratio":{:.3f},"ratios":[{}],"metal_only_sizes":[{}],"asks":{{{}}},"disagreements":[{}]}}}})",
+                     queries.both_none, queries.both_some, queries.metal_only, queries.emulator_only, queries.unanswered, g_totals.queries_no_room, queries.quads,
+                     double(queries.metal_samples) / double(std::max<uint64_t>(queries.emulator_samples, 1)), fmt::join(queries.ratios, ","), fmt::join(queries.metal_only_sizes, ","), asks, disagreements);
   const Totals kept = g_totals;
   g_totals = {};
   g_totals.shaders_found = kept.shaders_found;
@@ -1227,7 +1391,7 @@ void RenderThread() {
       std::string word;
       bool want_dump = false;
       std::string name = "live";
-      g_debug_skip_blended = g_debug_ids = g_debug_no_resolves = g_debug_alpha = g_debug_no_stencil = g_debug_no_clears = false;
+      g_debug_skip_blended = g_debug_ids = g_debug_no_resolves = g_debug_alpha = g_debug_no_stencil = g_debug_no_clears = g_debug_mark_queries = false;
       g_debug_show = -1;
       g_debug_skip_ps.clear();
       g_debug_stop_ps = 0;
@@ -1238,6 +1402,7 @@ void RenderThread() {
         g_debug_alpha |= word == "alpha";
         g_debug_no_stencil |= word == "no_stencil";
         g_debug_no_clears |= word == "no_clears";
+        g_debug_mark_queries |= word == "mark_queries";
         if (word.rfind("stop_ps=", 0) == 0) {
           g_debug_stop_ps = uint32_t(std::stoul(word.substr(8), nullptr, 16));
         }
@@ -1258,6 +1423,7 @@ void RenderThread() {
         std::filesystem::remove(control, ignored);
         std::ofstream(control) << (g_debug_skip_blended ? "skip_blended " : "") << (g_debug_ids ? "ids " : "")
                                << (g_debug_no_resolves ? "no_resolves " : "") << (g_debug_alpha ? "alpha " : "") << (g_debug_no_stencil ? "no_stencil " : "")
+                               << (g_debug_mark_queries ? "mark_queries " : "")
                                << (g_debug_show >= 0 ? fmt::format("show={} ", g_debug_show) : "")
                                << (g_debug_stop_ps ? fmt::format("stop_ps={:X} ", g_debug_stop_ps) : "");
         for (const uint32_t skip : g_debug_skip_ps) {
@@ -1268,10 +1434,13 @@ void RenderThread() {
         g_dump = dump.get();
       }
     }
+    auto query_slots = std::make_shared<std::vector<QuerySlot>>();
     const MetalFrameTiming timing =
-        device->RecordFrame([&](uint8_t* memory) { Encode(*frame, *device, memory); }, capture);
+        device->RecordFrame([&](uint8_t* memory) { Encode(*frame, *device, memory, *query_slots); }, capture,
+                            [query_slots](const uint64_t* samples) { OnMetalSamples(*query_slots, samples); });
     g_dump = nullptr;
     frame->runs.clear();
+    frame->queries.clear();
     {
       std::lock_guard lock(g_mutex);
       g_free.push_back(std::move(frame));
@@ -1334,6 +1503,7 @@ void OnGuestFrame() {
   if (g_free.empty()) {
     ++g_dropped;
     g_current->runs.clear();
+    g_current->queries.clear();
     return;
   }
   g_ready.push_back(std::move(g_current));
@@ -1375,6 +1545,43 @@ void OnResolve(const ResolveCopy& copy, const Targets& targets, const uint8_t* b
   run.resolve = copy;
   run.dest = fetch;
   run.targets = targets;
+}
+
+void OnQuery(uint32_t query, bool begin) {
+  if (!Enabled()) {
+    return;
+  }
+  uint64_t id = 0;
+  if (begin) {
+    std::lock_guard lock(g_query_mutex);
+    id = ++g_last_query;
+    g_latest_query[query] = id;
+  }
+  std::lock_guard lock(g_mutex);
+  g_current->queries.push_back({g_current->runs.size(), id, query, begin});
+}
+
+void OnQueryAsked(uint32_t caller, uint32_t query, bool ready, uint32_t samples) {
+  if (!Enabled()) {
+    return;
+  }
+  std::lock_guard lock(g_query_mutex);
+  QueryAsks& asks = g_query_totals.asks[caller];
+  ++(!ready ? asks.waiting : samples ? asks.some : asks.none);
+  asks.largest = std::max<uint64_t>(asks.largest, ready ? samples : 0);
+  if (!ready) {
+    return;
+  }
+  const auto latest = g_latest_query.find(query);
+  if (latest == g_latest_query.end()) {
+    return;
+  }
+  const auto entry = g_query_answers.try_emplace(latest->second).first;
+  // The game can ask again until it issues the query anew. Each answer counts once.
+  if (!entry->second.emulator) {
+    entry->second.emulator = samples;
+    SettleQuery(entry, query);
+  }
 }
 
 void SetGammaRamp(const uint32_t* ramp) {

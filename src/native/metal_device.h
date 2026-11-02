@@ -138,6 +138,8 @@ struct MetalDraw {
   float blend_constant[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   uint32_t color_mask = 0;
   bool alpha_test = false;
+  bool colorless = false;  // Runs no pixel shader and leaves colour alone, as the Xenos's depth-only mode does.
+  int query = -1;  // The slot of the frame's query results that counts the samples this passes.
   const int* textures = nullptr;  // Descriptors the pixel shader reads.
   uint32_t texture_count = 0;
   MetalViewport viewport;
@@ -157,6 +159,7 @@ struct MetalDraw {
 class MetalDevice {
  public:
   static constexpr int kFramesInFlight = 3;
+  static constexpr uint32_t kMaxQueries = 1024;
 
   // Wraps guest memory for the GPU without copying it. Compiling pipelines makes this slow, so call it off the game's
   // threads. Returns null if the Mac has no Metal device.
@@ -195,9 +198,10 @@ class MetalDevice {
   virtual int AddTarget(uint32_t width, uint32_t height, bool has_color, bool float_color) = 0;
 
   // Records and submits one frame. encode gets that frame's memory and calls BeginPass, Draw and ShowTarget. If capture
-  // isn't empty, waits for the GPU and writes the shown target there as a PNG.
-  virtual MetalFrameTiming RecordFrame(const std::function<void(uint8_t* frame)>& encode,
-                                       const std::filesystem::path& capture) = 0;
+  // isn't empty, waits for the GPU and writes the shown target there as a PNG. finished runs on a Metal thread when the GPU
+  // is done, with the samples each query slot counted.
+  virtual MetalFrameTiming RecordFrame(const std::function<void(uint8_t* frame)>& encode, const std::filesystem::path& capture,
+                                       const std::function<void(const uint64_t* query_samples)>& finished) = 0;
 
   // Ends any open pass and starts one on a target.
   virtual void BeginPass(int target, const MetalClear& clear) = 0;

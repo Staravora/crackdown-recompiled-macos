@@ -268,6 +268,7 @@ class MetalDeviceImpl final : public MetalDevice {
     guest_ = [device_ newBufferWithBytesNoCopy:guest_memory length:guest_bytes options:untracked deallocator:nil];
     for (size_t i = 0; i < frames_.size(); ++i) {
       frames_[i] = [device_ newBufferWithLength:frame_bytes options:untracked | MTLResourceCPUCacheModeWriteCombined];
+      query_samples_[i] = [device_ newBufferWithLength:kMaxQueries * sizeof(uint64_t) options:MTLResourceStorageModeShared];
     }
     elements_ = [device_ newBufferWithLength:kElementsBytes options:untracked];
 
@@ -601,8 +602,8 @@ class MetalDeviceImpl final : public MetalDevice {
     [blit endEncoding];
   }
 
-  MetalFrameTiming RecordFrame(const std::function<void(uint8_t* frame)>& encode,
-                               const std::filesystem::path& capture) override {
+  MetalFrameTiming RecordFrame(const std::function<void(uint8_t* frame)>& encode, const std::filesystem::path& capture,
+                               const std::function<void(const uint64_t* query_samples)>& finished) override {
     MetalFrameTiming timing;
     @autoreleasepool {
       const Clock::time_point wait_start = Clock::now();
@@ -615,6 +616,9 @@ class MetalDeviceImpl final : public MetalDevice {
       id<MTLCommandBuffer> buffer = layer ? [queue_ commandBuffer] : [queue_ commandBufferWithUnretainedReferences];
       buffer_ = buffer;
       frame_ = frames_[slot_];
+      id<MTLBuffer> query_samples = query_samples_[slot_];
+      frame_query_samples_ = query_samples;
+      std::memset(query_samples.contents, 0, query_samples.length);
       slot_ = (slot_ + 1) % kFramesInFlight;
       frame_address_ = frame_.gpuAddress;
       shown_target_ = -1;
@@ -660,6 +664,7 @@ class MetalDeviceImpl final : public MetalDevice {
       }
 
       dispatch_semaphore_t slots = slots_;
+      std::function<void(const uint64_t*)> report_queries = finished;
       [buffer addCompletedHandler:^(id<MTLCommandBuffer> done) {
         if (done.status == MTLCommandBufferStatusError) {
           errors_.fetch_add(1, std::memory_order_relaxed);
@@ -672,6 +677,9 @@ class MetalDeviceImpl final : public MetalDevice {
         while (worst < gpu_ns && !worst_gpu_ns_.compare_exchange_weak(worst, gpu_ns, std::memory_order_relaxed)) {
         }
         completed_.fetch_add(1, std::memory_order_relaxed);
+        if (report_queries) {
+          report_queries(static_cast<const uint64_t*>(query_samples.contents));
+        }
         dispatch_semaphore_signal(slots);
       }];
       [buffer commit];
@@ -718,6 +726,7 @@ class MetalDeviceImpl final : public MetalDevice {
     pass.stencilAttachment.loadAction = clear.depth ? MTLLoadActionClear : MTLLoadActionLoad;
     pass.stencilAttachment.clearStencil = 0;
     pass.stencilAttachment.storeAction = MTLStoreActionStore;
+    pass.visibilityResultBuffer = frame_query_samples_;
     encoder_ = [buffer_ renderCommandEncoderWithDescriptor:pass];
     for (int i = 0; i < kDescriptorHeaps; ++i) {
       [encoder_ setVertexBuffer:heaps_[i] offset:0 atIndex:i];
@@ -737,6 +746,7 @@ class MetalDeviceImpl final : public MetalDevice {
     current_scissor_ = {0, pass_height_};
     current_pipeline_ = nil;
     current_elements_ = SIZE_MAX;
+    current_query_ = -1;
     current_depth_ = {};
     has_depth_state_ = false;
     current_mode_ = UINT32_MAX;
@@ -769,7 +779,9 @@ class MetalDeviceImpl final : public MetalDevice {
   void Draw(const MetalDraw& draw) override {
     const Pipeline& pipeline = pipelines_[size_t(draw.vertex_shader)];
     id<MTLRenderPipelineState> state = pass_has_color_ ? pipeline.state : pipeline.depth_only;
-    if (draw.pixel_shader >= 0) {
+    if (draw.colorless && pass_has_color_ && !pass_float_) {
+      state = ColorlessPipeline(draw.vertex_shader) ?: state;
+    } else if (draw.pixel_shader >= 0) {
       state = ShadedPipeline(draw) ?: state;
     } else if (pass_float_) {
       return;  // The grey pipelines are built for 8-bit colour.
@@ -837,6 +849,11 @@ class MetalDeviceImpl final : public MetalDevice {
     [encoder_ setVertexBytes:&push length:sizeof(push) atIndex:kPushConstants];
     [encoder_ setFragmentBytes:&push length:sizeof(push) atIndex:kPushConstants];
     [encoder_ setVertexBufferOffset:draw.fetch_constants atIndex:kFetchBuffer];
+    if (draw.query != current_query_) {
+      [encoder_ setVisibilityResultMode:draw.query >= 0 ? MTLVisibilityResultModeCounting : MTLVisibilityResultModeDisabled
+                                 offset:draw.query >= 0 ? size_t(draw.query) * sizeof(uint64_t) : 0];
+      current_query_ = draw.query;
+    }
     const MTLPrimitiveType type =
         draw.primitive == MetalPrimitive::kTriangleStrip ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle;
     [encoder_ drawIndexedPrimitives:type
@@ -886,6 +903,24 @@ class MetalDeviceImpl final : public MetalDevice {
 
   using ShadedKey = std::tuple<int, int, uint32_t, uint32_t, bool, bool, bool>;
   using DepthKey = std::array<uint32_t, 3>;
+
+  id<MTLRenderPipelineState> ColorlessPipeline(int vertex_shader) {
+    const auto found = colorless_pipelines_.find(vertex_shader);
+    if (found != colorless_pipelines_.end()) {
+      return found->second;
+    }
+    MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
+    descriptor.vertexFunction = pipelines_[size_t(vertex_shader)].vertex;
+    descriptor.fragmentFunction = clay_;
+    descriptor.depthAttachmentPixelFormat = kDepthFormat;
+    descriptor.stencilAttachmentPixelFormat = kDepthFormat;
+    descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    descriptor.colorAttachments[0].writeMask = MTLColorWriteMaskNone;
+    NSError* failure = nil;
+    id<MTLRenderPipelineState> state = [device_ newRenderPipelineStateWithDescriptor:descriptor error:&failure];
+    colorless_pipelines_[vertex_shader] = state;
+    return state;
+  }
 
   id<MTLRenderPipelineState> ShadedPipeline(const MetalDraw& draw) {
     const ShadedKey key = {draw.vertex_shader, draw.pixel_shader, draw.blend_control, draw.color_mask & 0xF, draw.alpha_test, pass_has_color_, pass_float_};
@@ -1094,10 +1129,13 @@ class MetalDeviceImpl final : public MetalDevice {
   mutable std::mutex error_mutex_;
   std::string last_error_;
   std::array<id<MTLBuffer>, kFramesInFlight> frames_{};
+  std::array<id<MTLBuffer>, kFramesInFlight> query_samples_{};
+  id<MTLBuffer> frame_query_samples_ = nil;
   std::array<id<MTLBuffer>, kDescriptorHeaps> heaps_{};
   std::vector<Pipeline> pipelines_;
   std::vector<PixelShader> pixel_shaders_;
   std::map<ShadedKey, id<MTLRenderPipelineState>> shaded_pipelines_;
+  std::map<int, id<MTLRenderPipelineState>> colorless_pipelines_;
   std::vector<id<MTLTexture>> textures_;
   std::vector<id<MTLTexture>> resolves_;
   std::vector<id<MTLSamplerState>> samplers_;
@@ -1116,6 +1154,7 @@ class MetalDeviceImpl final : public MetalDevice {
   uint32_t slot_ = 0;
   id<MTLRenderPipelineState> current_pipeline_ = nil;
   size_t current_elements_ = SIZE_MAX;
+  int current_query_ = -1;
   int shown_target_ = -1;
   bool capture_alpha_ = false;
   bool shown_gamma_ = false;

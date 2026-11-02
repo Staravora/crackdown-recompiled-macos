@@ -1,5 +1,21 @@
 # Session handoff
 
+## 2026-11-02 — Occlusion queries counted in Metal, side by side with the emulator
+- **What's in:** Metal gives every occlusion query its own visibility slot, in counting mode, in the pass. `826C0B38` (issue) marks where queries begin and end in the stream, after reading the ring up to that point so a query's own draws land inside it. `826C0D38` (get data) is hooked for the emulator's answer. Query quads now draw, as depth tests with no pixel shader and no colour, through `ColorlessPipeline`. They were skipped before.
+- **Agreement, Shift+3 street by day, last 300 frames of each run:** visible or hidden matches on about 96% of queries. Last run: both hidden 16891, both visible 5962, Metal only 622, emulator only 236.
+- **The emulator doesn't count samples.** Its largest answer is 8, where Metal counts hundreds. The SDK begins queries with no precise flag, and from memory MoltenVK's non-precise mode only reports visible or not, though I haven't read its source. So only visible or hidden can be compared, and the `samples_ratio` of about 400 means nothing.
+- **Why that matters, the game does use counts.** Four places read answers:
+  - `825BAECC`, street lamp coronas: `ZPass / Total`, smoothed, for how bright each one is. Answer word 3 is Total. The emulator writes Total = ZPass, so the ratio can only be 0 or 1.
+  - `825B674C`: count divided by a size, clamped to 1. Not read further.
+  - `825D1F68` stores a count, and `825D1FA0` tests count > 1000. The emulator's largest was 2, so that test never passed here. Not known what it drives.
+  - `823A3EC8`, per-object queries around real draws, stored at +1796 on the object.
+- **Corona loop:** every quad draws every frame, and a query wraps it only once the last answer is in. So a frame has about 200 quads and far fewer queries, and each answer takes about four frames in the emulator.
+- **Metal only disagreements:** 398 of 622 were 64 samples or more, and they're street lamps. `mark_queries` paints them: quads floating in open air around lamp heads, with only the lamp itself notched out of them. Nothing stands in front, so Metal's answer looks right. Not known why the emulator says 0.
+- **Not explained:** one run with `mark_queries` and a burst of 14 captures had a few counts up to 720,000 on 500-pixel quads, some in a single frame. The next run had none, and those objects read 420 to 441. It didn't repeat, but the cause wasn't found.
+- **Emulator only (236):** not looked at. The ones sampled were object queries answering 1, where Metal said 0.
+- **For the takeover:** write the result into the end block at the query's `+24` pointers, one per tile: ZPass at `+16`, Total at `+0`, little-endian, zeroing the begin block at `+32`. Total needs a second count for coronas, such as the same quad with depth off. The game's fence check at `+20` has to pass as well.
+- **Report:** `queries` in `native-shadow-*.json`, with `asks` by caller and the largest disagreements as `[query, least, most, emulator, times]`.
+
 ## 2026-11-01 (late) — Water grid fixed: half-pixel offset was never live
 - **Bruce's report:** a new grid on the water, and less movement than the emulator. Also dark shapes on the water that follow the camera.
 - **Cause:** `pull_vertices.py` put `output.oPos.xy += g_HalfPixelOffset` in the `#else` of its Metal block, so Metal never ran it, in any shader, and `shadow.cpp` never set it. The Xenos samples at whole pixels and Metal at centres, so every D3D-style full-screen quad, which is shifted half a pixel, missed its last row and column. On the FFT that starved the data as well, leaving a flat band beside a black line on every tile of the wave maps.

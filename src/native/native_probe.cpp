@@ -497,6 +497,13 @@ void OnRingSegmentEnding(uint32_t device, const uint8_t* base) {
   DumpImageOnce(base);
 }
 
+void OnQuery(uint32_t device, uint32_t query, bool begin, const uint8_t* base) {
+  if (shadow::Enabled()) {
+    AfterDraw(device, base);
+    shadow::OnQuery(query, begin);
+  }
+}
+
 void OnResolve(uint32_t device, uint32_t flags, uint32_t rect, uint32_t texture, uint32_t point, uint32_t level,
                uint32_t clear_color, float clear_depth, uint32_t clear_stencil, const uint8_t* base) {
   if (!shadow::Enabled()) {
