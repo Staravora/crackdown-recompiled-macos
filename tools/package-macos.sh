@@ -25,9 +25,9 @@ PROFILE=${CRACKDOWN_NOTARY_PROFILE:-zuhl-notary}
 REPOSITORY=${CRACKDOWN_RELEASE_REPOSITORY:-Staravora/crackdown-xbox360-recompiled}
 IDENTITY=${CRACKDOWN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)}
 [ -n "$IDENTITY" ] || { echo "No Developer ID Application identity in the keychain." >&2; exit 1; }
-grep -q "$REPOSITORY" "$SOURCE_APP/Contents/MacOS/crackdown" || {
+grep -qaF "$REPOSITORY" "$SOURCE_APP/Contents/MacOS/crackdown" || {
   echo "This build doesn't update from $REPOSITORY. Configure the game with" >&2
-  echo "  cmake -S crackdown -B game-build-macos -DCRACKDOWN_MAC_UPDATE_REPOSITORY=$REPOSITORY" >&2
+  echo "  cmake -S \"$R\" -B \"$W/game-build-macos\" -DCRACKDOWN_MAC_UPDATE_REPOSITORY=$REPOSITORY" >&2
   echo "then rebuild and stage it." >&2
   exit 1
 }
