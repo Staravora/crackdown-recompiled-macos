@@ -493,6 +493,7 @@ void AfterDraw(uint32_t device, const uint8_t* base) {
 }
 
 void OnRingSegmentEnding(uint32_t device, const uint8_t* base) {
+  shadow::SetDevice(device, base);
   AfterDraw(device, base);
   DumpImageOnce(base);
 }

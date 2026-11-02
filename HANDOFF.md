@@ -1,5 +1,16 @@
 # Session handoff
 
+## 2026-11-02 — Fences and pacing measured; Metal is ready to answer them
+- **How the game fences:** a fence is a ring segment. D3D bumps the counter at device `+10780` and the emulator writes the passed one to word 0 of the writeback block at `+10768`. About 12 a frame. `826BB4F0` waits on one (r3 device, r4 fence), done when `current - fence >= current - passed`. 27 call sites.
+- **What the game actually waits on in play:** one site, `826BD120`, inside Present. Each present waits for the previous present's fence (`+14564`), so the GPU is never more than a frame behind. In 60 s at the Shift+3 street spot nothing else waited: no mid-frame waits, no block-until-idle. Loading wasn't measured.
+- **The finding:** 299 of 300 of those waits were for a fence Metal had already finished. Metal finishes a frame about 21 ms after it's handed over (worst 32 to 68 ms), while the emulator is about 17 fences, a frame and a half, behind it. The game spends about 40 to 48 ms of each 45 to 63 ms frame in that wait. That's the emulator's drawing pacing the whole game, beside Metal.
+- **What it means for the takeover:** frame-level signalling is enough here. Metal answers a frame's fences when it finishes the frame, and since no wait is ever for the frame still being built, none needs a mid-frame flush.
+- **`crackdown_native_pacing` (default off):** the game waits at the swap for Metal to finish the frame before, as D3D's present does, rather than Metal dropping frames. It's bounded at 250 ms. Dropped Metal frames went from 165 to 0 per 300, and the game was held 0 times, so Metal is never the slower one.
+- **FPS in those runs:** 15.4 without the switches, 18.1 and 18.7 with pacing and exposure on. One run each, so this isn't shown to be the switches.
+- **Report:** `pacing` in `native-shadow-*.json`: fences per frame, Metal's latency, the emulator's lead (negative is behind), holds, and fence waits by caller split into `metal_done`, `in_flight` and `open_frame`.
+- **Next:** a Metal-only preview. An SDK switch makes the emulator's command processor skip draws, clears and resolves but keep processing fences, ring space, swap and vblank. With pacing on, the game can't outrun Metal, so the early fences can't let it reuse memory Metal is still reading. That should remove the 40+ ms wait.
+- **Gotcha:** `asm.sh` in the scratchpad hung on a wrong address, waiting on standard input. It now stops with "no function".
+
 ## 2026-11-02 — Exposure readback from Metal
 - **What the game reads:** one lock site, `825AA170`, once a frame, rotating through three 320x180 8888 textures at `F9578`, `F95B6` and `F95F4`. Each is read about two frames after it's resolved. Nothing else showed up in a 300-frame street run. A read that doesn't lock wouldn't show.
 - **What it does with them:** auto-exposure. A 256-bin histogram of byte 0 of every pixel, leaving out the brightest 600 samples or so. Byte 0 is the target's alpha, so the other three bytes don't matter to the game.

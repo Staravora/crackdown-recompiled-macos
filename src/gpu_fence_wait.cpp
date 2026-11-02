@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
@@ -35,6 +36,7 @@
 
 #include "guest_hooks.h"
 #include "guest_layout.h"
+#include "native/shadow.h"
 
 #if defined(__APPLE__)
 REXCVAR_DEFINE_BOOL(crackdown_native_gpu_waits, false, "Crackdown",
@@ -49,6 +51,7 @@ namespace {
 // time base when the wait began, and the caller checks its own condition after each poll. The callers that wait on a
 // word of the GPU writeback block at device+10768 block on it; the others keep the guest's own polling.
 constexpr uint32_t kDeviceWritebackOffset = 10768;
+constexpr uint32_t kDeviceFenceOffset = 10780;
 constexpr uint32_t kDeviceFlagsOffset = 10813;
 constexpr uint8_t kDeviceStoppedFlag = 4;
 constexpr uint32_t kWaitStartOffset = 20;
@@ -223,9 +226,17 @@ void BlockUntilWordWritten(size_t site, WaitState& wait) {
 }  // namespace
 
 void crackdown::hooks::GpuFence(PPCContext& ctx, uint8_t* base, GuestFunction original) {
+  const uint32_t device = ctx.r3.u32, fence = ctx.r4.u32, caller = uint32_t(ctx.lr);
+  const uint32_t current = LoadGuest32(base, device + kDeviceFenceOffset);
+  const uint32_t passed = LoadGuest32(base, LoadGuest32(base, device + kDeviceWritebackOffset));
+  const bool pending = current - fence < current - passed;
+  const auto start = std::chrono::steady_clock::now();
   t_wait = {};
   original(ctx, base);
   t_wait = {};
+  if (pending) {
+    crackdown::native::shadow::OnFenceWait(caller, fence, uint64_t(std::chrono::nanoseconds(std::chrono::steady_clock::now() - start).count()));
+  }
 }
 
 // Returns nonzero while the wait should go on. The first call for a wait only reads the word, so a block always

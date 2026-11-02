@@ -66,6 +66,10 @@ void OnQuery(uint32_t query, bool begin);
 void OnQueryAsked(uint32_t caller, uint32_t query, bool ready, uint32_t samples);
 // The game locks a texture to read it. caller is where in the game it did.
 void OnTextureLock(uint32_t caller, uint32_t texture, const uint8_t* base);
+// The device, for reading its fence counter at each frame.
+void SetDevice(uint32_t device, const uint8_t* base);
+// A game thread is about to wait for the GPU to pass a fence, or has just finished waiting.
+void OnFenceWait(uint32_t caller, uint32_t fence, uint64_t waited_ns);
 void SetRingDesyncs(uint64_t desyncs);
 void SetGammaRamp(const uint32_t* ramp);
 #else
@@ -82,6 +86,8 @@ inline void OnResolve(const ResolveCopy&, const Targets&, const uint8_t*) {}
 inline void OnQuery(uint32_t, bool) {}
 inline void OnQueryAsked(uint32_t, uint32_t, bool, uint32_t) {}
 inline void OnTextureLock(uint32_t, uint32_t, const uint8_t*) {}
+inline void SetDevice(uint32_t, const uint8_t*) {}
+inline void OnFenceWait(uint32_t, uint32_t, uint64_t) {}
 inline void SetRingDesyncs(uint64_t) {}
 inline void SetGammaRamp(const uint32_t*) {}
 #endif

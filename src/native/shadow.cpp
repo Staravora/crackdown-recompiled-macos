@@ -44,6 +44,9 @@ REXCVAR_DEFINE_BOOL(crackdown_native_shadow_window, false, "Crackdown", "Show sh
 REXCVAR_DEFINE_BOOL(crackdown_native_exposure, false, "Crackdown",
                     "With shadow mode on, the game's exposure reads Metal's picture rather than the emulator's");
 
+REXCVAR_DEFINE_BOOL(crackdown_native_pacing, false, "Crackdown",
+                    "With shadow mode on, the game waits for Metal to catch up instead of Metal dropping frames");
+
 REXCVAR_DEFINE_BOOL(crackdown_native_shadow_debug, false, "Crackdown",
                     "Poll metal-debug.txt in the logs folder, so a running game can be examined from outside");
 
@@ -93,6 +96,10 @@ constexpr size_t kMaxPendingQueries = 8192;
 constexpr size_t kMaxQueryDisagreements = 32;
 constexpr uint64_t kSmallQuerySamples = 8;
 constexpr uint64_t kLargeQuerySamples = 64;
+constexpr uint32_t kDeviceWriteback = 10768;
+constexpr uint32_t kDeviceFence = 10780;
+constexpr uint64_t kMaxFramesBehind = 1;  // As D3D's present allows: each waits for the frame before it.
+constexpr auto kLongestHold = std::chrono::milliseconds(250);
 constexpr uint32_t kReadbackCheckLocks = 30;  // Every 30th lock is compared.
 constexpr size_t kKeptReadbacks = 16;
 constexpr int kFarPixel = 8;
@@ -199,6 +206,27 @@ struct GuestPixels {
   bool tiled;
 };
 
+// One place in the game's fence waits, by how far Metal had got with the fence when the wait began.
+struct FenceWaits {
+  uint64_t count = 0;
+  uint64_t ns = 0;
+  uint64_t worst_ns = 0;
+  uint64_t metal_done = 0;   // Metal had finished it, so it was only ever waiting on the emulator.
+  uint64_t in_flight = 0;    // Handed over and not finished.
+  uint64_t open_frame = 0;   // In the frame still being built, which Metal hasn't seen.
+};
+
+struct PacingTotals {
+  uint64_t frames = 0;
+  uint64_t fences = 0;
+  uint64_t metal_ns = 0;  // Handing a frame over to the GPU finishing it.
+  uint64_t worst_metal_ns = 0;
+  int64_t emulator_lead = 0;  // Fences the emulator had passed beyond Metal's when Metal finished a frame, summed.
+  uint64_t held_frames = 0;
+  uint64_t held_ns = 0;
+  std::map<uint32_t, FenceWaits> waits;
+};
+
 // How Metal's copy of a resolve compares with what the game read, per byte of a pixel in guest memory, summed per comparison.
 struct ReadbackTotals {
   uint64_t compared = 0;
@@ -216,6 +244,8 @@ struct ReadbackTotals {
 struct Frame {
   std::vector<Run> runs;
   std::vector<QueryEvent> queries;
+  uint32_t fence = 0;  // The newest the game had issued when it handed the frame over.
+  Clock::time_point handed_over;
 };
 
 struct Totals {
@@ -302,6 +332,16 @@ std::vector<FetchConstant> g_resolved_last_frame;
 uint32_t g_clear_pending = 0;
 std::array<uint32_t, BakedLibrary::kGammaEntries> g_gamma_ramp{};
 bool g_gamma_ramp_new = false;
+
+std::mutex g_pacing_mutex;
+std::condition_variable g_frame_finished;
+PacingTotals g_pacing_totals;
+uint64_t g_frames_handed_over = 0;
+uint64_t g_frames_finished = 0;
+std::atomic<uint32_t> g_device{0};
+std::atomic<uint8_t*> g_virtual_guest{nullptr};
+std::atomic<uint32_t> g_handed_over_fence{0};
+std::atomic<uint32_t> g_finished_fence{0};
 
 std::mutex g_query_mutex;
 uint64_t g_last_query = 0;
@@ -905,6 +945,31 @@ void SettleQuery(std::map<uint64_t, QueryAnswers>::iterator entry, uint32_t quer
   }
 }
 
+uint32_t LoadGuestWord(uint32_t address) {
+  uint32_t value;
+  std::memcpy(&value, rex::memory::GuestPtr<const uint8_t*>(g_virtual_guest.load(std::memory_order_relaxed), address), sizeof(value));
+  return std::byteswap(value);
+}
+
+// Any thread. Metal has finished a frame, which is the moment it could report that frame's fence to the game.
+void OnFrameFinished(uint32_t fence, Clock::time_point handed_over) {
+  const uint64_t metal_ns = Since(handed_over);
+  g_finished_fence.store(fence, std::memory_order_relaxed);
+  const uint32_t device = g_device.load(std::memory_order_relaxed);
+  const uint32_t block = device ? LoadGuestWord(device + kDeviceWriteback) : 0;
+  const int32_t lead = block ? int32_t(LoadGuestWord(block) - fence) : 0;
+  {
+    std::lock_guard lock(g_pacing_mutex);
+    PacingTotals& totals = g_pacing_totals;
+    ++totals.frames;
+    totals.metal_ns += metal_ns;
+    totals.worst_metal_ns = std::max(totals.worst_metal_ns, metal_ns);
+    totals.emulator_lead += lead;
+    ++g_frames_finished;
+  }
+  g_frame_finished.notify_all();
+}
+
 void OnMetalSamples(const std::vector<QuerySlot>& slots, const uint64_t* samples) {
   std::lock_guard lock(g_query_mutex);
   for (size_t i = 0; i < slots.size(); ++i) {
@@ -1484,6 +1549,19 @@ void Report(const MetalDevice& device) {
     locks += fmt::format(R"({}["{:08X}","{:05X}",{},{},{},{}])", locks.empty() ? "" : ",", key[0], key[1], key[2], key[3], key[4], count);
   }
   out << fmt::format(R"("locks":[{}],)", locks);
+  PacingTotals pacing;
+  {
+    std::lock_guard lock(g_pacing_mutex);
+    pacing = std::exchange(g_pacing_totals, {});
+  }
+  std::string waits;
+  for (const auto& [caller, wait] : pacing.waits) {
+    waits += fmt::format(R"({}"{:08X}":{{"count":{},"ms":{:.1f},"worst_ms":{:.1f},"metal_done":{},"in_flight":{},"open_frame":{}}})", waits.empty() ? "" : ",", caller, wait.count,
+                         wait.ns / 1e6, wait.worst_ns / 1e6, wait.metal_done, wait.in_flight, wait.open_frame);
+  }
+  const double paced_frames = double(std::max<uint64_t>(pacing.frames, 1));
+  out << fmt::format(R"("pacing":{{"frames":{},"fences_per_frame":{:.2f},"metal_ms":{:.2f},"worst_metal_ms":{:.2f},"emulator_lead":{:.2f},"held_frames":{},"held_ms":{:.1f},"waits":{{{}}}}},)", pacing.frames,
+                     double(pacing.fences) / paced_frames, pacing.metal_ns / 1e6 / paced_frames, pacing.worst_metal_ns / 1e6, double(pacing.emulator_lead) / paced_frames, pacing.held_frames, pacing.held_ns / 1e6, waits);
   ReadbackTotals readbacks;
   {
     std::lock_guard lock(g_readback_mutex);
@@ -1597,10 +1675,12 @@ void RenderThread() {
     }
     auto answers = std::make_shared<FrameAnswers>();
     const MetalFrameTiming timing =
-        device->RecordFrame([&](uint8_t* memory) { Encode(*frame, *device, memory, *answers); }, capture, [answers](const MetalFrameResults& results) {
-          OnMetalSamples(answers->queries, results.query_samples);
-          OnMetalPixels(answers->readbacks, results.readback);
-        });
+        device->RecordFrame([&](uint8_t* memory) { Encode(*frame, *device, memory, *answers); }, capture,
+                            [answers, fence = frame->fence, handed_over = frame->handed_over](const MetalFrameResults& results) {
+                              OnMetalSamples(answers->queries, results.query_samples);
+                              OnMetalPixels(answers->readbacks, results.readback);
+                              OnFrameFinished(fence, handed_over);
+                            });
     g_dump = nullptr;
     frame->runs.clear();
     frame->queries.clear();
@@ -1651,6 +1731,18 @@ void OnGuestFrame() {
   if (!Enabled()) {
     return;
   }
+  // With pacing on, the game waits for Metal rather than Metal dropping a frame. It's bounded so a stuck GPU can't hang it.
+  if (REXCVAR_GET(crackdown_native_pacing)) {
+    const Clock::time_point start = Clock::now();
+    std::unique_lock lock(g_pacing_mutex);
+    if (g_frames_handed_over - g_frames_finished >= kMaxFramesBehind) {
+      g_frame_finished.wait_for(lock, kLongestHold, [] { return g_frames_handed_over - g_frames_finished < kMaxFramesBehind; });
+      ++g_pacing_totals.held_frames;
+      g_pacing_totals.held_ns += Since(start);
+    }
+  }
+  const uint32_t device = g_device.load(std::memory_order_relaxed);
+  const uint32_t fence = device ? LoadGuestWord(device + kDeviceFence) : 0;
   std::lock_guard lock(g_mutex);
   ++g_guest_frames;
   // The emulator does a resolve some time after the game asks for it, so a frame can read the old contents and settle
@@ -1669,6 +1761,14 @@ void OnGuestFrame() {
     g_current->queries.clear();
     return;
   }
+  g_current->fence = fence;
+  g_current->handed_over = Clock::now();
+  {
+    std::lock_guard pacing_lock(g_pacing_mutex);
+    ++g_frames_handed_over;
+    g_pacing_totals.fences += fence - g_handed_over_fence.load(std::memory_order_relaxed);
+  }
+  g_handed_over_fence.store(fence, std::memory_order_relaxed);
   g_ready.push_back(std::move(g_current));
   g_current = std::move(g_free.back());
   g_free.pop_back();
@@ -1780,6 +1880,25 @@ void OnTextureLock(uint32_t caller, uint32_t texture, const uint8_t* base) {
     }
     ++g_readback_totals.written;
   }
+}
+
+void SetDevice(uint32_t device, const uint8_t* base) {
+  g_virtual_guest.store(const_cast<uint8_t*>(base), std::memory_order_relaxed);
+  g_device.store(device, std::memory_order_relaxed);
+}
+
+void OnFenceWait(uint32_t caller, uint32_t fence, uint64_t waited_ns) {
+  if (!Enabled()) {
+    return;
+  }
+  const bool metal_done = int32_t(g_finished_fence.load(std::memory_order_relaxed) - fence) >= 0;
+  const bool handed_over = int32_t(g_handed_over_fence.load(std::memory_order_relaxed) - fence) >= 0;
+  std::lock_guard lock(g_pacing_mutex);
+  FenceWaits& waits = g_pacing_totals.waits[caller];
+  ++waits.count;
+  waits.ns += waited_ns;
+  waits.worst_ns = std::max(waits.worst_ns, waited_ns);
+  ++(metal_done ? waits.metal_done : handed_over ? waits.in_flight : waits.open_frame);
 }
 
 void OnQuery(uint32_t query, bool begin) {
