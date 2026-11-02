@@ -448,6 +448,8 @@ Still missing: scissor and MSAA. Every shader on the rooftop run is matched.
 
 Water, near sea level only, comes first in the frame: a 128x128 FFT on 16-bit float targets (a spectrum pass, 13 butterflies and two normal map passes, resolving 15 times), then a 320x180 reflection, which is sky in colour with the world written into alpha by MIN blending. In the scene pass, fans stamp stencil `0xFF` over tunnels, and each water patch is drawn with stencil `GEQUAL 0xC0`, then followed by a stencil pass of its own.
 
+The road's vertex colour alpha says how far a surface is indoors: the last step of its pixel shader lerps from outdoor lighting to albedo and interior occlusion by that alpha.
+
 Things about the Xenos that the translated shaders didn't carry, and that took the longest to see:
 
 - **Stages join by position.** A vertex shader's output joins the pixel input at the same position, whatever their semantic names say.
