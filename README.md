@@ -174,6 +174,7 @@ Optional gameplay modifiers, all off by default. They start with the values save
 
 - **Direct mouse look**: the mouse turns the camera directly, not by emulating the right stick, so there is no stick deadzone or speed curve. A click in gameplay captures the mouse. **Esc** always releases it, and so do the keys bound to Start and Back, so rebinding those also changes which keys release it.
 - **Mouse sensitivity**: 0.10x to 10.00x (default 1.00x).
+- **While locked on**: moving the mouse or trackpad picks the part of the target, as the right stick does on a pad.
 - **Trackpad lock-on**: off by default. Hold **Shift** to lock on, so one hand can stay on the trackpad.
 - **Remappable keyboard controls**: every keyboard control can be rebound on the Controls page: click a control, then press the new key (**Esc** cancels). Shift, Control, Option and Command can be bound on their own. **Reset to defaults** restores the default keys and sensitivity. By default, arrow keys also turn the camera, and menus use **W A S D** or **Shift + arrow** keys. **Esc** can't be chosen as a new key, since it cancels the choice.
 

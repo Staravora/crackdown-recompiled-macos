@@ -35,6 +35,7 @@ std::atomic<bool> g_stick_suppressed{true};
 std::atomic<bool> g_focused{false};
 std::atomic<bool> g_blocked{true};
 std::atomic<bool> g_captured{false};
+std::atomic<bool> g_locked_on{false};
 std::atomic<double> g_dpi_scale{1.0};
 
 rex::ui::Window* g_window = nullptr;
@@ -256,10 +257,30 @@ void SetBlocked(bool blocked) {
   }
 }
 
+void SetLockedOn(bool locked) {
+  if (g_locked_on.exchange(locked, std::memory_order_relaxed) != locked) {
+    ClearAccumulator();
+  }
+}
+
+Delta TakeLockedDelta() {
+  if (!Active()) {
+    return {};
+  }
+  Delta delta = TakeAccumulator();
+  const double scale = ClampSensitivity(REXCVAR_GET(mnk_sensitivity)) / DpiScale();
+  delta.x *= scale;
+  delta.y *= scale;
+  return delta;
+}
+
 bool ApplyTurn(float& yaw, float& pitch) {
   const bool stale = MarkUpdate(std::chrono::steady_clock::now());
   if (!Active() || stale || free_camera::Active()) {
     ClearAccumulator();
+    return false;
+  }
+  if (g_locked_on.load(std::memory_order_relaxed)) {
     return false;
   }
 

@@ -1,0 +1,15 @@
+# Mac settings, added to crackdown.toml by tools/stage-macos.sh. Keeping them here means staging a build can't lose them.
+
+# Keyboard and mouse on, for this machine's own play.
+mnk_mode = true
+crackdown_frame_rate = 30
+crackdown_skip_intro = true
+crackdown_log_frame_rate = true
+present_letterbox = true
+
+# What makes an M1 Air playable. HANDOFF.md has what each one bought.
+vulkan_contract_pixel_shader_math = true
+vulkan_contract_vertex_shader_math = true
+crackdown_native_gpu_waits = true
+vulkan_hoist_shared_memory_uploads = true
+vulkan_occlusion_queries_in_render_passes = true

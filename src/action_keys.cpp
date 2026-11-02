@@ -18,6 +18,7 @@
 #include <rex/ui/window_listener.h>
 
 #include "keybinds.h"
+#include "mouse_look.h"
 
 REXCVAR_DECLARE(bool, mnk_mode);
 REXCVAR_DEFINE_STRING(crackdown_key_pickup, "G", "Input/Keybinds/Crackdown", "Pick up or drop with one press");
@@ -45,6 +46,7 @@ std::vector<ModifierBind> g_modifier_binds;
 std::vector<VirtualKey> g_pickup_keys, g_gas_keys, g_brake_keys;
 std::mutex g_pickup_mutex;
 PickUpHold g_pickup;
+LockAim g_lock_aim;
 rex::ui::Window* g_window = nullptr;
 
 bool Held(const std::vector<VirtualKey>& keys) {
@@ -194,6 +196,19 @@ void Filter(uint8_t* base, uint32_t state, bool driving) {
   }
   if (driving) {
     ApplyDriving(pad, Held(g_gas_keys), Held(g_brake_keys));
+  }
+  // In a vehicle the same trigger is the brake, and the mouse should carry on turning the camera.
+  const bool locked_on = !driving && pad.left_trigger >= kLockOnTrigger;
+  mouse_look::SetLockedOn(locked_on);
+  if (locked_on) {
+    const mouse_look::Delta delta = mouse_look::TakeLockedDelta();
+    double stick_x, stick_y;
+    if (g_lock_aim.Update(delta.x, delta.y, now_ms, stick_x, stick_y)) {
+      pad.right_x = int16_t(stick_x * kStickFull);
+      pad.right_y = int16_t(stick_y * kStickFull);
+    }
+  } else {
+    g_lock_aim.Reset();
   }
   Store16(gamepad, pad.buttons);
   gamepad[2] = pad.left_trigger;

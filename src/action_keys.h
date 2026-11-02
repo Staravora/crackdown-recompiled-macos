@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <string_view>
 
@@ -54,6 +56,50 @@ inline void ApplyDriving(Pad& pad, bool gas, bool brake) {
     pad.left_trigger = 255;
   }
 }
+
+inline constexpr uint8_t kLockOnTrigger = 64;
+inline constexpr double kCountsToFullStick = 150.0;  // A short flick on a mouse or a trackpad.
+inline constexpr double kAimHalfLifeMs = 220.0;
+inline constexpr double kAimDeadzone = 0.15;
+
+// While locked on the camera is the game's, and the right stick picks the part of the target. The mouse has no centre to
+// come back to, so it pushes a stick of its own that eases back when the hand stops.
+class LockAim {
+ public:
+  void Reset() {
+    x_ = y_ = 0.0;
+    last_ms_ = -1;
+  }
+
+  // dx and dy are mouse counts since the last call. Writes the stick, up positive, and returns whether it's off centre.
+  bool Update(double dx, double dy, int64_t now_ms, double& stick_x, double& stick_y) {
+    if (last_ms_ >= 0) {
+      const double decay = std::pow(0.5, double(now_ms - last_ms_) / kAimHalfLifeMs);
+      x_ *= decay;
+      y_ *= decay;
+    }
+    last_ms_ = now_ms;
+    x_ += dx / kCountsToFullStick;
+    y_ -= dy / kCountsToFullStick;
+    const double length = std::hypot(x_, y_);
+    if (length > 1.0) {
+      x_ /= length;
+      y_ /= length;
+    }
+    if (length < kAimDeadzone) {
+      stick_x = stick_y = 0.0;
+      return false;
+    }
+    stick_x = x_;
+    stick_y = y_;
+    return true;
+  }
+
+ private:
+  double x_ = 0.0;
+  double y_ = 0.0;
+  int64_t last_ms_ = -1;
+};
 
 // The same pad control a keybind_* setting drives, for keys the driver can't read itself: a modifier on its own never
 // fires there, since holding one stops any key without it from matching.

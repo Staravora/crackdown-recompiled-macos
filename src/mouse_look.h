@@ -112,6 +112,10 @@ void SetBlocked(bool blocked);
 void SetCaptured(bool captured);
 void ReleaseCapture();
 
+// While locked on the game steers the camera, so mouse movement is kept for action_keys to read as a stick.
+void SetLockedOn(bool locked);
+Delta TakeLockedDelta();
+
 // Camera hooks: adds the accumulated mouse turn to the game's new yaw/pitch
 // (radians) for this player-camera update. Returns false when the registers
 // should stay untouched.
