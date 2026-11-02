@@ -117,7 +117,6 @@ const std::vector<std::string> kGameSettingKeys = [] {
   keys.emplace_back("crackdown_native_only");
   keys.emplace_back("crackdown_render_scale");
   keys.emplace_back("crackdown_metalfx_upscale");
-  keys.emplace_back("crackdown_metalfx_frame_generation");
   return keys;
 }();
 

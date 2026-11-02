@@ -1,5 +1,13 @@
 # Session handoff
 
+## 2026-11-02 — Frame generation pulled from the launcher
+- **Bruce, after playing with per-object motion:** "Still bad, pull it."
+- **Done:** the launcher row and saved key are gone. The setting is now `crackdown_frame_generation_preview`, command line only and off by default. The rename means the `crackdown_metalfx_frame_generation = true` still in Bruce's `settings.toml` does nothing; a run with it there started with frame generation off. The code is unchanged: SDK 0018 pacing, snapshots, `motionMain`, and the motion pass.
+- **If it's tried again:** a timed run can't show the problem, because the benchmark stands still. It needs play with jumping. Ideas not tried:
+  - motion for the player's own draws from the bones alone;
+  - generating only when the camera moves slowly;
+  - MetalFX's temporal scaler's history in place of the interpolator.
+
 ## 2026-11-02 — Frame generation gets each object's own motion
 - **Why:** Bruce saw the player torn apart when jumping. Camera-only motion gave him the world's motion, though he moves with the camera.
 - **Shaders:** `pull_vertices.py` makes each vertex shader's body a plain function. `shaderMain` calls it as before, and a new `motionMain` calls it twice: with this frame's constants and with last frame's, from `g_PreviousVertexConstants` at buffer 12. It outputs both positions. A shader the rewrite can't handle, or that won't compile, falls back to plain; all 160 took it. **Rerun `pull_vertices.py` after pulling.** Bruce's local `native-shaders` is rebuilt.

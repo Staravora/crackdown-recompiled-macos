@@ -877,10 +877,6 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
               "With the Metal renderer, MetalFX sharpens the picture as it doubles its size, before it's scaled to the "
               "window. Worth it in fullscreen or a large window. Costs a little GPU time.",
               "crackdown_metalfx_upscale", "1", {{"1", "Off"}, {"2", "MetalFX 2\xC3\x97"}});
-    ui.Toggle("Frame generation",
-              "With the Metal renderer, MetalFX makes a frame between each two the game draws, so the screen shows twice as "
-              "many. Adds about one frame of delay. A preview.",
-              "crackdown_metalfx_frame_generation", false, "Off", "MetalFX");
 #endif
     if (const std::optional<int> adapter = ResolveGraphicsAdapter(
             settings_.Get("crackdown_graphics_adapter"), graphics_adapters_)) {

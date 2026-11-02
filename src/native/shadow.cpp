@@ -60,9 +60,11 @@ REXCVAR_DEFINE_INT32(crackdown_render_scale, 100, "Crackdown",
                      "With the Metal renderer, the percent of the game's 1280x720 the scene is drawn at: 100, 150 for 1920x1080 "
                      "or 200 for 2560x1440");
 
-REXCVAR_DEFINE_BOOL(crackdown_metalfx_frame_generation, false, "Crackdown",
-                    "With the Metal renderer, MetalFX makes a frame between each two the game draws and shows it halfway, for "
-                    "twice the frame rate on screen and about a frame more delay");
+// Out of the launcher: in play, jumping smeared the player even with each object's own motion. Kept on the command line
+// for trying it again, under a name the launcher never saved, so an old saved "on" doesn't turn it on.
+REXCVAR_DEFINE_BOOL(crackdown_frame_generation_preview, false, "Crackdown",
+                    "Experimental, command line only: with the Metal renderer, MetalFX makes a frame between each two the game "
+                    "draws and shows it halfway. Not good enough to play with yet");
 
 REXCVAR_DEFINE_BOOL(crackdown_native_shadow_debug, false, "Crackdown",
                     "Poll metal-debug.txt in the logs folder, so a running game can be examined from outside");
@@ -357,7 +359,7 @@ void UseExternalPresent() {
   g_external_present = true;
   REXLOG_INFO("Native only: the swap presents Metal's pictures directly");
   g_found_fence_done = reinterpret_cast<void (*)(uint32_t)>(dlsym(plugin, "rex_gpu_set_external_fence_done"));
-  if (REXCVAR_GET(crackdown_metalfx_frame_generation)) {
+  if (REXCVAR_GET(crackdown_frame_generation_preview)) {
     g_present_external_frame = reinterpret_cast<void (*)(uint32_t, uint32_t)>(dlsym(plugin, "rex_gpu_present_external_frame"));
     g_set_external_present_paced = reinterpret_cast<void (*)(bool)>(dlsym(plugin, "rex_gpu_set_external_present_paced"));
     if (g_present_external_frame && g_set_external_present_paced) {
