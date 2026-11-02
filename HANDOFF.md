@@ -1,5 +1,14 @@
 # Session handoff
 
+## 2026-11-02 — Picture gaps: side by side at three spots
+- **Method:** separate timed runs, one emulator-only and one Metal-only, at a saved pose with the 30 setting, and an `app_screenshot` of the main window 62 s after launch. `solo.sh` in the scratchpad does it. Running both renderers at once fell to 10 FPS and lost the benchmark's menu presses, so it's no good for this.
+- **Benchmark gotcha:** `bench-macos.sh` retries a run with no result, so a stuck run keeps launching copies. Bruce saw three running at once. The session's safety check won't let me stop processes, so a stuck run has to time out.
+- **Shift+3 street:** the same, apart from random pedestrians.
+- **Tunnel:** left of the tunnel, the emulator draws teal water over the dock wall and Metal shows the bare wall. That's the zero-alpha wedge from the exposure work. Blanking the water's scene-depth texture made no visible difference at sea, so the depth copy isn't the cause. Not found yet.
+- **Ocean high (70 m):** the emulator's sea is near-black and glossy, and Metal's is lighter blue with wave texture. The supply-point beam has extra thin beams and a purple reflection in the water in the emulator only. But at that height the game didn't redraw the reflection this frame: it reuses the last one, like the waves. So this view depends on what came before, and one frame can't settle it. The water shader takes a dark fixed colour where the reflection's alpha is under 1, and the reflected sky elsewhere, so the two renderers are probably holding different reflections. Sea level, which Bruce confirmed, is the reliable comparison.
+- **Fixed in passing:** fetch swizzle 7 means one, and Metal read it as zero. Both 6 and 7 now map as the emulator maps them (`& 0b101`). Not seen to change anything yet.
+- **Ranked by what shows:** water away from sea level, then the supply beam. The rest of the old gap list (MSAA, scissor, alpha compare, orb) didn't show at these spots.
+
 ## 2026-11-02 — Renderer choice in the launcher; two long-failing tests fixed
 - **Bruce's play-test in the main window:** "running well". 8 minutes at a median 29.2 FPS, lowest second 24.0. Closed normally. He also tried fullscreen.
 - **Flicker:** not seen in his last two sessions, so deferred. The leading guess is still the emulator reading the front buffer while Metal writes the next one.

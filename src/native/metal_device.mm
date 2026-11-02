@@ -205,10 +205,11 @@ MTLBlendOperation BlendOperationOf(uint32_t xenos) {
   return operations[xenos < operations.size() ? xenos : 0];
 }
 
+// 6 and 7 aren't defined. Like the emulator, they're taken as 4 (zero) and 5 (one).
 MTLTextureSwizzle SwizzleOf(uint32_t xenos) {
   constexpr std::array swizzles = {MTLTextureSwizzleRed,  MTLTextureSwizzleGreen, MTLTextureSwizzleBlue,
                                    MTLTextureSwizzleAlpha, MTLTextureSwizzleZero,  MTLTextureSwizzleOne};
-  return swizzles[xenos < swizzles.size() ? xenos : 4];
+  return swizzles[(xenos & 7) >= 4 ? (xenos & 5) : xenos];
 }
 
 MTLPixelFormat PixelFormatOf(MetalTextureFormat format) {
