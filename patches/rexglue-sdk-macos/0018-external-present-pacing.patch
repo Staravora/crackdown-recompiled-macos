@@ -1,0 +1,124 @@
+diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -274,6 +274,12 @@
+ 
+  public:
+   void ReleaseHeldWrites();
++  // Wakes the worker thread, which then runs ServiceExternalWork.
++  void WakeWorker() { write_ptr_index_event_->Set(); }
++
++ protected:
++  // Work asked of the worker thread from outside, done between packets and while it waits for more.
++  virtual void ServiceExternalWork() {}
+ 
+  protected:
+   std::mutex held_writes_mutex_;
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -294,6 +294,7 @@
+     }
+ 
+     ReleaseHeldWrites();
++    ServiceExternalWork();
+     uint32_t write_ptr_index = write_ptr_index_.load();
+     if (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index) {
+       SCOPE_profile_cpu_i("gpu", "rex::graphics::CommandProcessor::Stall");
+@@ -317,6 +318,7 @@
+         }
+         write_ptr_index = write_ptr_index_.load();
+         ReleaseHeldWrites();
++        ServiceExternalWork();
+         if (poll_background_work) {
+           poll_background_work = PollBackgroundWork();
+         }
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -504,6 +504,10 @@
+   // Uploads the picture of a renderer outside the emulator, if one has been set with
+   // rex_gpu_set_external_frame_source, and returns a view of it to swap instead of the front buffer.
+   VkImageView UploadExternalFrame(uint32_t& width, uint32_t& height);
++  // Presents the external renderer's newest frame when asked (rex_gpu_present_external_frame), and nothing at the
++  // guest's own swaps while it paces presents itself.
++  void ServiceExternalWork() override;
++  bool presenting_external_frame_ = false;
+   void DestroySwapFxaaSourceImage();
+ 
+   void UpdateDynamicState(const draw_util::ViewportInfo& viewport_info, bool primitive_polygonal,
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -128,6 +128,28 @@
+ 
+ }  // namespace
+ 
++namespace {
++
++// An external renderer that paces its own presents, and its newest request: the guest front buffer's size, or 0.
++std::atomic<bool> g_external_present_paced{false};
++std::atomic<uint64_t> g_external_present_request{0};
++std::atomic<rex::graphics::vulkan::VulkanCommandProcessor*> g_external_present_processor{nullptr};
++
++}  // namespace
++
++// With paced set, the guest's swaps present nothing, and the external renderer presents with rex_gpu_present_external_frame,
++// which takes the front buffer's size, as a swap would.
++extern "C" REX_GPU_PLUGIN_EXPORT void rex_gpu_set_external_present_paced(bool paced) {
++  g_external_present_paced.store(paced, std::memory_order_release);
++}
++
++extern "C" REX_GPU_PLUGIN_EXPORT void rex_gpu_present_external_frame(uint32_t width, uint32_t height) {
++  g_external_present_request.store(uint64_t(width) << 32 | height | (uint64_t(1) << 63), std::memory_order_release);
++  if (auto* processor = g_external_present_processor.load(std::memory_order_acquire)) {
++    processor->WakeWorker();
++  }
++}
++
+ extern "C" REX_GPU_PLUGIN_EXPORT void rex_gpu_set_external_frame_source(RexExternalFrameSizeFn size,
+                                                                         RexExternalFrameFillFn fill,
+                                                                         void* context) {
+@@ -905,6 +927,7 @@
+     REXGPU_ERROR("Failed to initialize base command processor context");
+     return false;
+   }
++  g_external_present_processor.store(this, std::memory_order_release);
+   InvalidateAllVertexBufferResidency();
+ 
+   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+@@ -2035,6 +2058,7 @@
+ }
+ 
+ void VulkanCommandProcessor::ShutdownContext() {
++  g_external_present_processor.store(nullptr, std::memory_order_release);
+   AwaitAllQueueOperationsCompletion();
+   InvalidateAllVertexBufferResidency();
+   ShutdownOcclusionQueryResources();
+@@ -2415,6 +2439,9 @@
+ 
+   if (!graphics_system_)
+     return;
++  if (g_external_present_paced.load(std::memory_order_acquire) && !presenting_external_frame_) {
++    return;
++  }
+   ui::Presenter* presenter = graphics_system_->presenter();
+   if (!presenter) {
+     REXGPU_ERROR("XELOG_GPU PRESENT: NO PRESENTER");
+@@ -6086,6 +6113,16 @@
+   scratch_buffer_size_ = 0;
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device, scratch_buffer_);
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device, scratch_buffer_memory_);
++}
++
++void VulkanCommandProcessor::ServiceExternalWork() {
++  const uint64_t request = g_external_present_request.exchange(0, std::memory_order_acq_rel);
++  if (!(request >> 63)) {
++    return;
++  }
++  presenting_external_frame_ = true;
++  IssueSwap(0, uint32_t(request >> 32) & 0x7FFFFFFF, uint32_t(request));
++  presenting_external_frame_ = false;
+ }
+ 
+ VkImageView VulkanCommandProcessor::UploadExternalFrame(uint32_t& width, uint32_t& height) {

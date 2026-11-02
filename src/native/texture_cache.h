@@ -34,8 +34,9 @@ class TextureCache {
   // Which channels the fetch constant wants as value * 2 - 1, one bit each after its swizzle.
   static uint32_t BiasedChannels(const uint32_t* fetch);
 
-  // Where to copy a resolve to, given the destination's fetch constant, or -1 if it's not a format that can be copied.
-  int ResolveInto(const uint32_t* fetch, int tile = -1);
+  // Where to copy a resolve to, given the destination's fetch constant, or -1 if it's not a format that can be copied. A new
+  // one is drawn at scale, the scale of the target that first copies into it.
+  int ResolveInto(const uint32_t* fetch, int tile = -1, float scale = 1.0f);
   void ForgetResolve(const uint32_t* fetch);
   bool HasResolve(const uint32_t* fetch) const;
 
@@ -43,8 +44,13 @@ class TextureCache {
   int FindTexture(const uint32_t* fetch, int tile = -1);
 
   // A stack of depth maps read as a 3D texture. Each is resolved on its own, so a resolve has to ask if it's in one, and
-  // the first frame to read a stack finds it empty.
+  // the first frame to read a stack finds it empty. One as wide as the scene is filled from the scene's depth, so it's drawn
+  // at SetSceneScale's scale.
   int FindStack(const uint32_t* fetch);
+  void SetSceneScale(uint32_t scene_width, float scale) {
+    scene_width_ = scene_width;
+    scene_scale_ = scale;
+  }
   bool FindStackSlice(const uint32_t* fetch, int& stack, uint32_t& slice) const;
 
   int FindSampler(const uint32_t* fetch);
@@ -60,6 +66,9 @@ class TextureCache {
 
  private:
   static constexpr size_t kUploadBytesPerFrame = 32 << 20;
+
+  uint32_t scene_width_ = 0;
+  float scene_scale_ = 1.0f;
 
   struct Entry {
     int descriptor = 0;

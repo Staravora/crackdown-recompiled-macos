@@ -300,7 +300,7 @@ uint32_t TextureCache::BiasedChannels(const uint32_t* fetch_dwords) {
   return channels;
 }
 
-int TextureCache::ResolveInto(const uint32_t* fetch_dwords, int tile) {
+int TextureCache::ResolveInto(const uint32_t* fetch_dwords, int tile, float scale) {
   xenos::xe_gpu_texture_fetch_t fetch;
   std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
   const xenos::TextureFormat format = xenos::TextureFormat(uint32_t(fetch.format));
@@ -314,7 +314,8 @@ int TextureCache::ResolveInto(const uint32_t* fetch_dwords, int tile) {
     const uint32_t mip_address = uint32_t(fetch.mip_address) << 12;
     const uint32_t levels = mip_address ? std::min(uint32_t(fetch.mip_max_level) + 1, uint32_t(std::bit_width(std::max(width, height)))) : 1;
     resolved.resolve = device_.AddResolve(width, tile < 0 && DecodedHoldsOneTile(fetch) ? kPictureHeight : height, levels,
-                                          IsDepth(format) ? MetalResolveFormat::kDepth : IsFloatColor(format) ? MetalResolveFormat::kFloat : MetalResolveFormat::kColor);
+                                          IsDepth(format) ? MetalResolveFormat::kDepth : IsFloatColor(format) ? MetalResolveFormat::kFloat : MetalResolveFormat::kColor,
+                                          scale);
   }
   resolved.live = resolved.resolve >= 0;
   return resolved.resolve;
@@ -348,7 +349,7 @@ int TextureCache::FindStack(const uint32_t* fetch_dwords) {
     const uint32_t width = uint32_t(fetch.size_2d.width) + 1, height = uint32_t(fetch.size_2d.height) + 1;
     stack.slices = uint32_t(fetch.size_2d.stack_depth) + 1;
     stack.pages_per_slice = width * height * 4 >> kPageShift;
-    stack.descriptor = device_.AddStack(width, height, stack.slices);
+    stack.descriptor = device_.AddStack(width, height, stack.slices, width == scene_width_ ? scene_scale_ : 1.0f);
   }
   return stack.descriptor;
 }

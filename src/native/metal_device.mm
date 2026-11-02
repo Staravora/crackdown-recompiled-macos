@@ -17,6 +17,7 @@
 #include <mutex>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include "metal_device.h"
@@ -97,6 +98,8 @@ struct GuestWrite {
   uint pitch;
   uint tiled;
   uint swap;
+  uint2 size;   // In the guest's pixels.
+  float ratio;  // The picture's pixels to one of the guest's.
 };
 uint tiled_offset(int x, int y, uint pitch) {
   pitch = (pitch + 31) & ~31u;
@@ -108,13 +111,60 @@ uint tiled_offset(int x, int y, uint pitch) {
 }
 kernel void write_guest(texture2d<float, access::read> picture [[texture(0)]], device uint* guest [[buffer(0)]],
                         constant GuestWrite& write [[buffer(1)]], uint2 at [[thread_position_in_grid]]) {
-  if (at.x >= picture.get_width() || at.y >= picture.get_height()) {
+  if (at.x >= write.size.x || at.y >= write.size.y) {
     return;
   }
-  const uint4 c = uint4(round(saturate(picture.read(at)) * 255.0));
+  const uint4 c = uint4(round(saturate(picture.read(uint2((float2(at) + 0.5) * write.ratio))) * 255.0));
   const uint value = write.swap ? (c.a | (c.r << 8) | (c.g << 16) | (c.b << 24)) : (c.b | (c.g << 8) | (c.r << 16) | (c.a << 24));
   const uint offset = write.tiled ? tiled_offset(int(at.x), int(at.y), write.pitch) : (at.y * write.pitch + at.x) * 4;
   guest[(write.at + offset) / 4] = value;
+}
+// A copy between textures drawn at different scales, taking the nearest pixel, as a resolve takes them one for one.
+struct Resample {
+  int2 from;
+  int2 to;
+  uint2 size;    // In the destination's pixels.
+  float2 ratio;  // The source's pixels to one of the destination's.
+};
+kernel void resample(texture2d<float, access::read> from [[texture(0)]], texture2d<float, access::write> to [[texture(1)]],
+                     constant Resample& copy [[buffer(0)]], uint2 at [[thread_position_in_grid]]) {
+  if (at.x >= copy.size.x || at.y >= copy.size.y) {
+    return;
+  }
+  to.write(from.read(uint2(float2(copy.from) + (float2(at) + 0.5) * copy.ratio)), uint2(copy.to + int2(at)));
+}
+kernel void resample_depth(depth2d<float, access::read> from [[texture(0)]], texture2d<float, access::write> to [[texture(1)]],
+                           constant Resample& copy [[buffer(0)]], uint2 at [[thread_position_in_grid]]) {
+  if (at.x >= copy.size.x || at.y >= copy.size.y) {
+    return;
+  }
+  to.write(float4(from.read(uint2(float2(copy.from) + (float2(at) + 0.5) * copy.ratio))), uint2(copy.to + int2(at)));
+}
+// Where each pixel was in the last frame, if only the camera moved: through this frame's inverse view-projection to the
+// world, and through the last frame's back to the screen. The game's depth is reversed and infinite, so a pixel's clip
+// position is in proportion to (x, y, depth, 1), and the sky, at depth 0, comes out as a direction.
+struct CameraMotion {
+  float4 inverse[4];
+  float4 previous[4];
+  float2 size;
+};
+kernel void camera_motion(depth2d<float, access::read> depth [[texture(0)]], texture2d<float, access::write> motion [[texture(1)]],
+                          constant CameraMotion& camera [[buffer(0)]], uint2 at [[thread_position_in_grid]]) {
+  if (at.x >= depth.get_width() || at.y >= depth.get_height()) {
+    return;
+  }
+  const float2 pixel = float2(at) + 0.5;
+  const float4 clip = float4(pixel.x / camera.size.x * 2.0 - 1.0, 1.0 - pixel.y / camera.size.y * 2.0, depth.read(at), 1.0);
+  const float4 world = float4(dot(camera.inverse[0], clip), dot(camera.inverse[1], clip), dot(camera.inverse[2], clip),
+                              dot(camera.inverse[3], clip));
+  const float4 before = float4(dot(camera.previous[0], world), dot(camera.previous[1], world), dot(camera.previous[2], world),
+                               dot(camera.previous[3], world));
+  float2 moved = float2(0.0);
+  if (abs(before.w) > 1e-6) {
+    const float2 ndc = before.xy / before.w;
+    moved = float2((ndc.x + 1.0) * 0.5 * camera.size.x, (1.0 - ndc.y) * 0.5 * camera.size.y) - pixel;
+  }
+  motion.write(float4(clamp(moved, -2048.0, 2048.0), 0.0, 0.0), at);
 }
 fragment float4 clay_fragment(float4 position [[position]], constant float4& tint [[buffer(4)]]) {
   if (tint.a > 0.5) {
@@ -330,6 +380,9 @@ class MetalDeviceImpl final : public MetalDevice {
     ramp.storageMode = MTLStorageModeShared;
     gamma_ramp_ = [device_ newTextureWithDescriptor:ramp];
     write_guest_ = [device_ newComputePipelineStateWithFunction:[library newFunctionWithName:@"write_guest"] error:&error];
+    motion_pipeline_ = [device_ newComputePipelineStateWithFunction:[library newFunctionWithName:@"camera_motion"] error:&error];
+    resample_ = [device_ newComputePipelineStateWithFunction:[library newFunctionWithName:@"resample"] error:&error];
+    resample_depth_ = [device_ newComputePipelineStateWithFunction:[library newFunctionWithName:@"resample_depth"] error:&error];
     if (!display_pipeline_ || !gamma_ramp_) {
       return false;
     }
@@ -490,8 +543,10 @@ class MetalDeviceImpl final : public MetalDevice {
     return index;
   }
 
-  int AddResolve(uint32_t width, uint32_t height, uint32_t levels, MetalResolveFormat format) override {
+  int AddResolve(uint32_t width, uint32_t height, uint32_t levels, MetalResolveFormat format, float scale) override {
     const bool depth = format == MetalResolveFormat::kDepth;
+    width = uint32_t(Scaled(int32_t(width), scale));
+    height = uint32_t(Scaled(int32_t(height), scale));
     MTLTextureDescriptor* descriptor =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:depth ? MTLPixelFormatR32Float
                                                                  : format == MetalResolveFormat::kFloat ? kFloatColorFormat
@@ -500,7 +555,8 @@ class MetalDeviceImpl final : public MetalDevice {
                                                           height:height
                                                        mipmapped:NO];
     descriptor.mipmapLevelCount = levels;
-    descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+    // Written by resample when a copy comes from a target at another scale.
+    descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
     descriptor.storageMode = MTLStorageModePrivate;
     id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
     if (!texture) {
@@ -510,6 +566,7 @@ class MetalDeviceImpl final : public MetalDevice {
       ReserveDepthCopy(NSUInteger(width) * height * 4);
     }
     resolves_.push_back(texture);
+    resolve_scales_.push_back(scale);
     return int(resolves_.size()) - 1;
   }
 
@@ -537,10 +594,12 @@ class MetalDeviceImpl final : public MetalDevice {
     return index;
   }
 
-  int AddStack(uint32_t width, uint32_t height, uint32_t depth) override {
+  int AddStack(uint32_t width, uint32_t height, uint32_t depth, float scale) override {
     if (next_texture_ >= kMaxTextures) {
       return 0;
     }
+    width = uint32_t(Scaled(int32_t(width), scale));
+    height = uint32_t(Scaled(int32_t(height), scale));
     MTLTextureDescriptor* descriptor = [MTLTextureDescriptor new];
     descriptor.textureType = MTLTextureType3D;
     descriptor.pixelFormat = MTLPixelFormatR32Float;
@@ -558,12 +617,19 @@ class MetalDeviceImpl final : public MetalDevice {
     textures_.resize(next_texture_);
     textures_[size_t(index)] = texture;
     static_cast<MTLResourceID*>(heaps_[kStackHeap].contents)[index] = texture.gpuResourceID;
+    stack_scales_[index] = scale;
     return index;
   }
 
   void CopyDepthToStack(int target, int stack, uint32_t slice) override {
     EndPass();
-    id<MTLTexture> from = ReadDepth(Resolved(target));
+    const Target& source = Resolved(target);
+    const auto stack_scale = stack_scales_.find(stack);
+    if (stack_scale == stack_scales_.end() || source.scale != stack_scale->second) {
+      dropped_stack_copies_.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    id<MTLTexture> from = ReadDepth(source);
     id<MTLTexture> to = textures_[size_t(stack)];
     CopyDepth(from, MTLOriginMake(0, 0, 0), MTLSizeMake(std::min(from.width, to.width), std::min(from.height, to.height), 1), to, 0,
               MTLOriginMake(0, 0, slice));
@@ -572,8 +638,8 @@ class MetalDeviceImpl final : public MetalDevice {
   void ClearRect(const MetalRectClear& clear) override {
     const Target& target = targets_[size_t(clear.target)];
     const int32_t width = int32_t(target.depth.width), height = int32_t(target.depth.height);
-    const int32_t left = std::max(clear.left, 0), top = std::max(clear.top, 0);
-    const int32_t right = std::min(clear.right, width), bottom = std::min(clear.bottom, height);
+    const int32_t left = std::max(Scaled(clear.left, target.scale), 0), top = std::max(Scaled(clear.top, target.scale), 0);
+    const int32_t right = std::min(Scaled(clear.right, target.scale), width), bottom = std::min(Scaled(clear.bottom, target.scale), height);
     const bool color = clear.color && target.color;
     if (right <= left || bottom <= top || (!color && !clear.depth)) {
       return;
@@ -606,31 +672,74 @@ class MetalDeviceImpl final : public MetalDevice {
     const Target& target = Resolved(copy.target);
     id<MTLTexture> from = copy.depth ? ReadDepth(target) : ReadColor(target);
     id<MTLTexture> to = resolves_[size_t(copy.resolve)];
+    const float from_scale = target.scale, to_scale = resolve_scales_[size_t(copy.resolve)];
+    const NSUInteger to_width = std::max(to.width >> copy.level, NSUInteger(1)), to_height = std::max(to.height >> copy.level, NSUInteger(1));
+    // Clipped in the guest's pixels, which both sides share.
     const int32_t left = std::max(copy.left, 0), top = std::max(copy.top, 0);
     const int32_t dest_x = copy.dest_x + left - copy.left, dest_y = copy.dest_y + top - copy.top;
-    const int32_t width = std::min({copy.right, int32_t(from.width), int32_t(std::max(to.width >> copy.level, NSUInteger(1))) - dest_x + left}) - left;
-    const int32_t height = std::min({copy.bottom, int32_t(from.height), int32_t(std::max(to.height >> copy.level, NSUInteger(1))) - dest_y + top}) - top;
-    if (width <= 0 || height <= 0 || dest_x < 0 || dest_y < 0) {
+    const int32_t width = std::min({copy.right, int32_t(from.width / from_scale), int32_t(to_width / to_scale) - dest_x + left}) - left;
+    const int32_t height = std::min({copy.bottom, int32_t(from.height / from_scale), int32_t(to_height / to_scale) - dest_y + top}) - top;
+    if (width <= 0 || height <= 0 || dest_x < 0 || dest_y < 0 || (!copy.depth && from.pixelFormat != to.pixelFormat)) {
       return;
     }
+    if (from_scale != to_scale) {
+      Resample(from, MTLOriginMake(Scaled(left, from_scale), Scaled(top, from_scale), 0), from_scale / to_scale, to, copy.level,
+               MTLOriginMake(Scaled(dest_x, to_scale), Scaled(dest_y, to_scale), 0),
+               MTLSizeMake(Scaled(width, to_scale), Scaled(height, to_scale), 1), copy.depth);
+      return;
+    }
+    const MTLOrigin from_origin = MTLOriginMake(Scaled(left, from_scale), Scaled(top, from_scale), 0);
+    const MTLOrigin to_origin = MTLOriginMake(Scaled(dest_x, to_scale), Scaled(dest_y, to_scale), 0);
+    const MTLSize size = MTLSizeMake(std::min({NSUInteger(Scaled(width, from_scale)), from.width - from_origin.x, to_width - to_origin.x}),
+                                     std::min({NSUInteger(Scaled(height, from_scale)), from.height - from_origin.y, to_height - to_origin.y}), 1);
     if (copy.depth) {
-      CopyDepth(from, MTLOriginMake(left, top, 0), MTLSizeMake(width, height, 1), to, copy.level, MTLOriginMake(dest_x, dest_y, 0));
-      return;
-    }
-    if (from.pixelFormat != to.pixelFormat) {
+      CopyDepth(from, from_origin, size, to, copy.level, to_origin);
       return;
     }
     id<MTLBlitCommandEncoder> blit = [buffer_ blitCommandEncoder];
     [blit copyFromTexture:from
               sourceSlice:0
               sourceLevel:0
-             sourceOrigin:MTLOriginMake(left, top, 0)
-               sourceSize:MTLSizeMake(width, height, 1)
+             sourceOrigin:from_origin
+               sourceSize:size
                 toTexture:to
          destinationSlice:0
          destinationLevel:copy.level
-        destinationOrigin:MTLOriginMake(dest_x, dest_y, 0)];
+        destinationOrigin:to_origin];
     [blit endEncoding];
+  }
+
+  // A copy between a target and a resolve drawn at different scales, ratio being the source's pixels to one of the
+  // destination's. Depth comes out of its depth-stencil texture as floats, as CopyDepth gives it.
+  void Resample(id<MTLTexture> from, MTLOrigin from_origin, float ratio, id<MTLTexture> to, NSUInteger level, MTLOrigin to_origin,
+                MTLSize size, bool depth) {
+    id<MTLComputePipelineState> pipeline = depth ? resample_depth_ : resample_;
+    id<MTLTexture> level_view = level ? [to newTextureViewWithPixelFormat:to.pixelFormat
+                                                              textureType:MTLTextureType2D
+                                                                   levels:NSMakeRange(level, 1)
+                                                                   slices:NSMakeRange(0, 1)]
+                                      : to;
+    if (!pipeline || !level_view || !size.width || !size.height) {
+      dropped_copies_.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    const struct {
+      int32_t from[2];
+      int32_t to[2];
+      uint32_t size[2];
+      float ratio[2];
+    } resample = {{int32_t(from_origin.x), int32_t(from_origin.y)},
+                  {int32_t(to_origin.x), int32_t(to_origin.y)},
+                  {uint32_t(size.width), uint32_t(size.height)},
+                  {ratio, ratio}};
+    id<MTLComputeCommandEncoder> compute = [buffer_ computeCommandEncoder];
+    [compute setComputePipelineState:pipeline];
+    [compute setTexture:from atIndex:0];
+    [compute setTexture:level_view atIndex:1];
+    [compute setBytes:&resample length:sizeof(resample) atIndex:0];
+    [compute dispatchThreads:size threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    [compute endEncoding];
+    resampled_copies_.fetch_add(1, std::memory_order_relaxed);
   }
 
   // MetalFX's spatial scaler, from the picture's size to scale times it. Null if the Mac can't.
@@ -674,6 +783,13 @@ class MetalDeviceImpl final : public MetalDevice {
     if (texture.pixelFormat != MTLPixelFormatBGRA8Unorm) {
       return false;
     }
+    return QueuePicture(texture, scale);
+  }
+
+  bool QueuePicture(id<MTLTexture> texture, uint32_t scale) {
+    if (picture_count_ >= kMaxPictures || (picture_count_ && (texture.width * std::max(scale, 1u) != picture_width_))) {
+      return false;
+    }
     if (scale > 1) {
       EndPass();
       if (id<MTLTexture> upscaled = Upscaled(texture, scale)) {
@@ -681,14 +797,14 @@ class MetalDeviceImpl final : public MetalDevice {
       }
     }
     const size_t row = texture.width * 4, bytes = row * texture.height;
-    if (pictures_[picture_slot_].length < bytes) {
+    if (pictures_[picture_slot_][picture_count_].length < bytes) {
       // The swap may still be copying out of the old one.
-      if (pictures_[picture_slot_]) {
-        retired_buffers_.push_back(pictures_[picture_slot_]);
+      if (pictures_[picture_slot_][picture_count_]) {
+        retired_buffers_.push_back(pictures_[picture_slot_][picture_count_]);
       }
-      pictures_[picture_slot_] = [device_ newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+      pictures_[picture_slot_][picture_count_] = [device_ newBufferWithLength:bytes options:MTLResourceStorageModeShared];
     }
-    id<MTLBuffer> buffer = pictures_[picture_slot_];
+    id<MTLBuffer> buffer = pictures_[picture_slot_][picture_count_];
     EndPass();
     id<MTLBlitCommandEncoder> blit = [buffer_ blitCommandEncoder];
     [blit copyFromTexture:texture
@@ -703,7 +819,114 @@ class MetalDeviceImpl final : public MetalDevice {
     [blit endEncoding];
     picture_width_ = uint32_t(texture.width);
     picture_height_ = uint32_t(texture.height);
+    ++picture_count_;
     return true;
+  }
+
+  bool SnapshotScene(int target_index) override {
+    const Target& target = Resolved(target_index);
+    id<MTLTexture> color = ReadColor(target);
+    id<MTLTexture> depth = ReadDepth(target);
+    if (!color || color.pixelFormat != MTLPixelFormatBGRA8Unorm || !depth) {
+      return false;
+    }
+    if (scene_[0].width != color.width || scene_[0].height != color.height) {
+      for (auto& scene : scene_) {
+        scene = NewPlainTexture(MTLPixelFormatBGRA8Unorm, color.width, color.height,
+                                MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget);
+      }
+      scene_depth_ = NewPlainTexture(MTLPixelFormatDepth32Float, color.width, color.height,
+                                     MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget);
+      motion_ = NewPlainTexture(MTLPixelFormatRG16Float, color.width, color.height,
+                                MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget);
+      interpolated_ = NewPlainTexture(MTLPixelFormatBGRA8Unorm, color.width, color.height,
+                                      MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget);
+      interpolator_ = nil;
+      have_scene_ = false;
+      ReserveDepthCopy(color.width * color.height * 4);
+    }
+    EndPass();
+    scene_index_ ^= 1;
+    id<MTLBlitCommandEncoder> blit = [buffer_ blitCommandEncoder];
+    [blit copyFromTexture:color toTexture:scene_[scene_index_]];
+    [blit endEncoding];
+    CopyDepth(depth, MTLOriginMake(0, 0, 0), MTLSizeMake(color.width, color.height, 1), scene_depth_, 0, MTLOriginMake(0, 0, 0));
+    snapshot_this_frame_ = true;
+    return true;
+  }
+
+  bool InterpolatePicture(int resolve, const MetalCamera& camera, uint32_t scale) override {
+    id<MTLTexture> ui = resolves_[size_t(resolve)];
+    const bool usable = snapshot_this_frame_ && have_scene_ && !camera.reset;
+    have_scene_ = snapshot_this_frame_;
+    snapshot_this_frame_ = false;
+    if (!usable || ui.width != scene_[0].width || ui.height != scene_[0].height || !motion_pipeline_ ||
+        ![MTLFXFrameInterpolatorDescriptor supportsDevice:device_]) {
+      return false;
+    }
+    if (!interpolator_) {
+      MTLFXFrameInterpolatorDescriptor* descriptor = [MTLFXFrameInterpolatorDescriptor new];
+      descriptor.colorTextureFormat = MTLPixelFormatBGRA8Unorm;
+      descriptor.outputTextureFormat = MTLPixelFormatBGRA8Unorm;
+      descriptor.depthTextureFormat = MTLPixelFormatDepth32Float;
+      descriptor.motionTextureFormat = MTLPixelFormatRG16Float;
+      descriptor.uiTextureFormat = ui.pixelFormat;
+      descriptor.inputWidth = descriptor.outputWidth = ui.width;
+      descriptor.inputHeight = descriptor.outputHeight = ui.height;
+      interpolator_ = [descriptor newFrameInterpolatorWithDevice:device_];
+      if (!interpolator_) {
+        return false;
+      }
+    }
+    EndPass();
+    // In a command buffer of its own, after the frame's, so the game's fences don't wait for it. Nothing here touches guest
+    // memory, and the queue keeps the next frame from overwriting what it reads.
+    id<MTLCommandBuffer> frame_buffer = buffer_;
+    after_ = [queue_ commandBuffer];
+    buffer_ = after_;
+    // How each pixel moved: back through this frame's camera to the world, and on through the last frame's.
+    struct {
+      std::array<float, 16> inverse;
+      std::array<float, 16> previous;
+      float size[2];
+    } motion = {camera.inverse_view_projection, camera.previous_view_projection, {float(ui.width), float(ui.height)}};
+    id<MTLComputeCommandEncoder> compute = [buffer_ computeCommandEncoder];
+    [compute setComputePipelineState:motion_pipeline_];
+    [compute setTexture:scene_depth_ atIndex:0];
+    [compute setTexture:motion_ atIndex:1];
+    [compute setBytes:&motion length:sizeof(motion) atIndex:0];
+    [compute dispatchThreads:MTLSizeMake(ui.width, ui.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    [compute endEncoding];
+    interpolator_.colorTexture = scene_[scene_index_];
+    interpolator_.prevColorTexture = scene_[scene_index_ ^ 1];
+    interpolator_.depthTexture = scene_depth_;
+    interpolator_.motionTexture = motion_;
+    interpolator_.uiTexture = ui;
+    interpolator_.uiTextureComposited = YES;
+    interpolator_.outputTexture = interpolated_;
+    interpolator_.motionVectorScaleX = 1.0f;
+    interpolator_.motionVectorScaleY = 1.0f;
+    interpolator_.deltaTime = camera.delta_time;
+    interpolator_.nearPlane = camera.near_plane;
+    interpolator_.farPlane = camera.far_plane;
+    interpolator_.fieldOfView = camera.field_of_view;
+    interpolator_.aspectRatio = camera.aspect;
+    interpolator_.depthReversed = YES;
+    interpolator_.shouldResetHistory = NO;
+    [interpolator_ encodeToCommandBuffer:buffer_];
+    const bool queued = QueuePicture(interpolated_, scale);
+    buffer_ = frame_buffer;
+    return queued;
+  }
+
+  id<MTLTexture> NewPlainTexture(MTLPixelFormat format, NSUInteger width, NSUInteger height, MTLTextureUsage usage) {
+    MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                                                          width:width
+                                                                                         height:height
+                                                                                      mipmapped:NO];
+    descriptor.usage = usage;
+    descriptor.storageMode = MTLStorageModePrivate;
+    return [device_ newTextureWithDescriptor:descriptor];
   }
 
   bool WriteResolveToGuest(int resolve, size_t at, uint32_t pitch, bool tiled, bool swap) override {
@@ -712,15 +935,19 @@ class MetalDeviceImpl final : public MetalDevice {
       return false;
     }
     EndPass();
+    const float scale = resolve_scales_[size_t(resolve)];
+    const uint32_t width = uint32_t(texture.width / scale), height = uint32_t(texture.height / scale);
     const struct {
       uint32_t at, pitch, tiled, swap;
-    } write = {uint32_t(at), pitch, tiled, swap};
+      uint32_t size[2];
+      float ratio;
+    } write = {uint32_t(at), pitch, tiled, swap, {width, height}, scale};
     id<MTLComputeCommandEncoder> compute = [buffer_ computeCommandEncoder];
     [compute setComputePipelineState:write_guest_];
     [compute setTexture:texture atIndex:0];
     [compute setBuffer:guest_ offset:0 atIndex:0];
     [compute setBytes:&write length:sizeof(write) atIndex:1];
-    [compute dispatchThreads:MTLSizeMake(texture.width, texture.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    [compute dispatchThreads:MTLSizeMake(width, height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     [compute endEncoding];
     return true;
   }
@@ -728,6 +955,31 @@ class MetalDeviceImpl final : public MetalDevice {
   size_t ReadResolve(int resolve) override {
     EndPass();
     id<MTLTexture> texture = resolves_[size_t(resolve)];
+    const float scale = resolve_scales_[size_t(resolve)];
+    if (scale != 1.0f) {
+      // Readers want the guest's pixels. write_guest, unswapped and untiled, lays them out as Metal holds them.
+      const uint32_t width = uint32_t(texture.width / scale), height = uint32_t(texture.height / scale);
+      const size_t bytes = size_t(width) * height * 4;
+      if (texture.pixelFormat != MTLPixelFormatBGRA8Unorm || !write_guest_ || readback_used_ + bytes > kReadbackBytes) {
+        dropped_reads_.fetch_add(1, std::memory_order_relaxed);
+        return SIZE_MAX;
+      }
+      const size_t offset = readback_used_;
+      readback_used_ += bytes;
+      const struct {
+        uint32_t at, pitch, tiled, swap;
+        uint32_t size[2];
+        float ratio;
+      } write = {uint32_t(offset), width, 0, 0, {width, height}, scale};
+      id<MTLComputeCommandEncoder> compute = [buffer_ computeCommandEncoder];
+      [compute setComputePipelineState:write_guest_];
+      [compute setTexture:texture atIndex:0];
+      [compute setBuffer:frame_readback_ offset:0 atIndex:0];
+      [compute setBytes:&write length:sizeof(write) atIndex:1];
+      [compute dispatchThreads:MTLSizeMake(width, height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+      [compute endEncoding];
+      return offset;
+    }
     const size_t row = texture.width * 4, bytes = row * texture.height;
     if (texture.pixelFormat != MTLPixelFormatBGRA8Unorm || readback_used_ + bytes > kReadbackBytes) {
       return SIZE_MAX;
@@ -770,12 +1022,15 @@ class MetalDeviceImpl final : public MetalDevice {
       readback_used_ = 0;
       picture_slot_ = slot_;
       picture_width_ = picture_height_ = 0;
+      picture_count_ = 0;
       slot_ = (slot_ + 1) % kFramesInFlight;
       frame_address_ = frame_.gpuAddress;
       shown_target_ = -1;
       encode(static_cast<uint8_t*>(frame_.contents));
       EndPass();
       buffer_ = nil;
+      id<MTLCommandBuffer> after = after_;
+      after_ = nil;
 
       id<MTLTexture> shown = shown_target_ >= 0 ? ReadColor(Resolved(shown_target_)) : nil;
       if (shown && (shown_gamma_ || shown.pixelFormat == kFloatColorFormat) && gamma_ramp_set_) {
@@ -816,27 +1071,49 @@ class MetalDeviceImpl final : public MetalDevice {
 
       dispatch_semaphore_t slots = slots_;
       std::function<void(const MetalFrameResults&)> report_results = finished;
-      id<MTLBuffer> picture = picture_width_ ? pictures_[picture_slot_] : nil;
-      const uint32_t picture_width = picture_width_, picture_height = picture_height_;
+      std::array<id<MTLBuffer>, kMaxPictures> pictures{};
+      for (uint32_t i = 0; i < picture_count_; ++i) {
+        pictures[i] = pictures_[picture_slot_][i];
+      }
+      const uint32_t picture_count = picture_count_, picture_width = picture_width_, picture_height = picture_height_;
+      auto picture_results = [=] {
+        MetalFrameResults results;
+        for (uint32_t i = 0; i < picture_count; ++i) {
+          results.pictures[i] = static_cast<const uint8_t*>(pictures[i].contents);
+        }
+        results.picture_count = picture_count;
+        results.picture_width = picture_width;
+        results.picture_height = picture_height;
+        return results;
+      };
+      // GPUStartTime counts in the same seconds.
+      const CFTimeInterval committed = CACurrentMediaTime();
       [buffer addCompletedHandler:^(id<MTLCommandBuffer> done) {
-        if (done.status == MTLCommandBufferStatusError) {
-          errors_.fetch_add(1, std::memory_order_relaxed);
-          std::lock_guard lock(error_mutex_);
-          last_error_ = done.error.description.UTF8String;
-        }
-        const uint64_t gpu_ns = uint64_t(std::max(0.0, done.GPUEndTime - done.GPUStartTime) * 1e9);
-        gpu_ns_.fetch_add(gpu_ns, std::memory_order_relaxed);
-        uint64_t worst = worst_gpu_ns_.load(std::memory_order_relaxed);
-        while (worst < gpu_ns && !worst_gpu_ns_.compare_exchange_weak(worst, gpu_ns, std::memory_order_relaxed)) {
-        }
+        NoteFinished(done);
+        queued_ns_.fetch_add(uint64_t(std::max(0.0, done.GPUStartTime - committed) * 1e9), std::memory_order_relaxed);
         completed_.fetch_add(1, std::memory_order_relaxed);
         if (report_results) {
-          report_results({static_cast<const uint64_t*>(query_samples.contents), static_cast<const uint8_t*>(readback_pixels.contents),
-                          picture ? static_cast<const uint8_t*>(picture.contents) : nullptr, picture_width, picture_height});
+          // With frame generation, the pictures wait for its command buffer; the rest of the frame doesn't.
+          MetalFrameResults results = after ? MetalFrameResults{} : picture_results();
+          results.query_samples = static_cast<const uint64_t*>(query_samples.contents);
+          results.readback = static_cast<const uint8_t*>(readback_pixels.contents);
+          report_results(results);
         }
         dispatch_semaphore_signal(slots);
       }];
       [buffer commit];
+      if (after) {
+        [after addCompletedHandler:^(id<MTLCommandBuffer> done) {
+          NoteFinished(done);
+          generation_ns_.fetch_add(uint64_t(std::max(0.0, done.GPUEndTime - done.GPUStartTime) * 1e9), std::memory_order_relaxed);
+          if (report_results) {
+            MetalFrameResults results = picture_results();
+            results.pictures_only = true;
+            report_results(results);
+          }
+        }];
+        [after commit];
+      }
       timing.encode_ns = Since(encode_start);
       if (readback) {
         [buffer waitUntilCompleted];
@@ -852,9 +1129,12 @@ class MetalDeviceImpl final : public MetalDevice {
     return timing;
   }
 
-  int AddTarget(uint32_t width, uint32_t height, bool has_color, bool float_color, uint32_t samples) override {
+  int AddTarget(uint32_t width, uint32_t height, bool has_color, bool float_color, uint32_t samples, float scale) override {
     Target target;
     target.samples = samples > 1 && [device_ supportsTextureSampleCount:samples] ? samples : 1;
+    target.scale = scale;
+    width = uint32_t(Scaled(int32_t(width), scale));
+    height = uint32_t(Scaled(int32_t(height), scale));
     const MTLPixelFormat color_format = float_color ? kFloatColorFormat : MTLPixelFormatBGRA8Unorm;
     if (has_color) {
       target.color = NewTarget(color_format, width, height, target.samples);
@@ -905,6 +1185,7 @@ class MetalDeviceImpl final : public MetalDevice {
     pass_float_ = target.color.pixelFormat == kFloatColorFormat;
     pass_samples_ = target.samples;
     pass_target_ = target_index;
+    pass_scale_ = target.scale;
     pass_width_ = target.depth.width;
     pass_height_ = uint32_t(target.depth.height);
     current_scissor_ = {0, pass_height_};
@@ -970,8 +1251,9 @@ class MetalDeviceImpl final : public MetalDevice {
       }
     }
     if (!(draw.viewport == current_viewport_)) {
-      [encoder_ setViewport:{draw.viewport.x, draw.viewport.y, draw.viewport.width, draw.viewport.height, draw.viewport.near_depth,
-                             draw.viewport.far_depth}];
+      const double scale = pass_scale_;
+      [encoder_ setViewport:{draw.viewport.x * scale, draw.viewport.y * scale, draw.viewport.width * scale, draw.viewport.height * scale,
+                             draw.viewport.near_depth, draw.viewport.far_depth}];
       current_viewport_ = draw.viewport;
     }
     const DepthKey depth_key = {draw.depth_control, draw.stencil_front & 0xFFFF00, draw.stencil_back & 0xFFFF00};
@@ -984,7 +1266,10 @@ class MetalDeviceImpl final : public MetalDevice {
       const uint32_t back = (draw.depth_control & kBackFaceEnable) ? draw.stencil_back : draw.stencil_front;
       [encoder_ setStencilFrontReferenceValue:draw.stencil_front & 0xFF backReferenceValue:back & 0xFF];
     }
-    const std::pair<uint32_t, uint32_t> scissor = {draw.scissor_top, std::min(draw.scissor_bottom, pass_height_)};
+    const auto scaled_row = [this](uint32_t row) {
+      return row >= pass_height_ ? pass_height_ : std::min(uint32_t(Scaled(int32_t(row), pass_scale_)), pass_height_);
+    };
+    const std::pair<uint32_t, uint32_t> scissor = {scaled_row(draw.scissor_top), scaled_row(draw.scissor_bottom)};
     if (scissor != current_scissor_) {
       [encoder_ setScissorRect:{0, scissor.first, pass_width_, scissor.second - scissor.first}];
       current_scissor_ = scissor;
@@ -994,7 +1279,8 @@ class MetalDeviceImpl final : public MetalDevice {
       std::memcpy(current_blend_constant_, draw.blend_constant, sizeof(current_blend_constant_));
     }
     if (draw.depth_bias_slope != current_bias_slope_) {
-      [encoder_ setDepthBias:0.0f slopeScale:draw.depth_bias_slope clamp:0.0f];
+      // The slope is per pixel, and a scaled target's are smaller.
+      [encoder_ setDepthBias:0.0f slopeScale:draw.depth_bias_slope * pass_scale_ clamp:0.0f];
       current_bias_slope_ = draw.depth_bias_slope;
     }
     const uint32_t mode = draw.mode_control & (kCullFront | kCullBack | kFrontClockwise);
@@ -1050,7 +1336,9 @@ class MetalDeviceImpl final : public MetalDevice {
   MetalGpuTotals gpu_totals() const override {
     std::lock_guard lock(error_mutex_);
     return {completed_.load(std::memory_order_relaxed), errors_.load(std::memory_order_relaxed), last_error_,
-            gpu_ns_.load(std::memory_order_relaxed), worst_gpu_ns_.load(std::memory_order_relaxed)};
+            gpu_ns_.load(std::memory_order_relaxed), worst_gpu_ns_.load(std::memory_order_relaxed),
+            queued_ns_.load(std::memory_order_relaxed), generation_ns_.load(std::memory_order_relaxed), resampled_copies_.load(std::memory_order_relaxed), dropped_copies_.load(std::memory_order_relaxed),
+            dropped_stack_copies_.load(std::memory_order_relaxed), dropped_reads_.load(std::memory_order_relaxed)};
   }
 
  private:
@@ -1159,8 +1447,14 @@ class MetalDeviceImpl final : public MetalDevice {
     id<MTLTexture> color_resolved;
     id<MTLTexture> depth_resolved;
     uint32_t samples = 1;
+    float scale = 1.0f;  // Its pixels to one of the guest's, each way.
     bool unresolved = false;
   };
+
+  // A length in the guest's pixels, in a texture's at scale.
+  static int32_t Scaled(int32_t value, float scale) {
+    return int32_t(std::clamp(std::round(double(value) * scale), double(INT32_MIN), double(INT32_MAX)));
+  }
 
   id<MTLTexture> NewTarget(MTLPixelFormat format, uint32_t width, uint32_t height, uint32_t samples = 1) {
     MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
@@ -1175,6 +1469,20 @@ class MetalDeviceImpl final : public MetalDevice {
       descriptor.usage = MTLTextureUsageRenderTarget;
     }
     return [device_ newTextureWithDescriptor:descriptor];
+  }
+
+  // Counts a finished command buffer's GPU time and any error.
+  void NoteFinished(id<MTLCommandBuffer> done) {
+    if (done.status == MTLCommandBufferStatusError) {
+      errors_.fetch_add(1, std::memory_order_relaxed);
+      std::lock_guard lock(error_mutex_);
+      last_error_ = done.error.description.UTF8String;
+    }
+    const uint64_t gpu_ns = uint64_t(std::max(0.0, done.GPUEndTime - done.GPUStartTime) * 1e9);
+    gpu_ns_.fetch_add(gpu_ns, std::memory_order_relaxed);
+    uint64_t worst = worst_gpu_ns_.load(std::memory_order_relaxed);
+    while (worst < gpu_ns && !worst_gpu_ns_.compare_exchange_weak(worst, gpu_ns, std::memory_order_relaxed)) {
+    }
   }
 
   void EndPass() {
@@ -1359,6 +1667,7 @@ class MetalDeviceImpl final : public MetalDevice {
   id<MTLTexture> gamma_ramp_ = nil;
   id<MTLTexture> display_ = nil;
   id<MTLCommandBuffer> buffer_ = nil;
+  id<MTLCommandBuffer> after_ = nil;  // Frame generation's work, committed after the frame's.
   id<MTLRenderCommandEncoder> encoder_ = nil;
   CAMetalLayer* layer_ = nil;
   NSWindow* window_ = nil;
@@ -1368,7 +1677,30 @@ class MetalDeviceImpl final : public MetalDevice {
   std::array<id<MTLBuffer>, kFramesInFlight> query_samples_{};
   id<MTLBuffer> frame_query_samples_ = nil;
   id<MTLComputePipelineState> write_guest_ = nil;
-  std::array<id<MTLBuffer>, kFramesInFlight> pictures_{};
+  id<MTLComputePipelineState> resample_ = nil;
+  id<MTLComputePipelineState> resample_depth_ = nil;
+  std::vector<float> resolve_scales_;
+  std::unordered_map<int, float> stack_scales_;  // By descriptor.
+  float pass_scale_ = 1.0f;
+  std::atomic<uint64_t> queued_ns_{0};
+  std::atomic<uint64_t> generation_ns_{0};
+  std::atomic<uint64_t> resampled_copies_{0};
+  std::atomic<uint64_t> dropped_copies_{0};
+  std::atomic<uint64_t> dropped_stack_copies_{0};
+  std::atomic<uint64_t> dropped_reads_{0};
+  static constexpr uint32_t kMaxPictures = 2;
+  std::array<std::array<id<MTLBuffer>, kMaxPictures>, kFramesInFlight> pictures_{};
+  uint32_t picture_count_ = 0;
+  // Frame generation.
+  std::array<id<MTLTexture>, 2> scene_{};
+  uint32_t scene_index_ = 0;
+  id<MTLTexture> scene_depth_ = nil;
+  id<MTLTexture> motion_ = nil;
+  id<MTLTexture> interpolated_ = nil;
+  id<MTLFXFrameInterpolator> interpolator_ = nil;
+  id<MTLComputePipelineState> motion_pipeline_ = nil;
+  bool snapshot_this_frame_ = false;
+  bool have_scene_ = false;
   id<MTLFXSpatialScaler> spatial_scaler_ = nil;
   id<MTLTexture> upscaled_ = nil;
   uint32_t picture_slot_ = 0;

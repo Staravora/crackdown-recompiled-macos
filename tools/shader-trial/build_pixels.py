@@ -13,6 +13,9 @@ right on the Xenos, where positions restart at each tile. Here one pass draws th
 the mask is joined up to match, so that constant becomes 1 / 720. screen-shaders.txt lists those
 shaders, because even when one is drawn for a single tile it has to read the joined-up textures.
 
+The Metal renderer can draw the scene at more pixels than the game's. Shaders that read the pixel
+position take it back to the game's own pixels, by a scale the shared constants hold at offset 304.
+
 A fetch constant can ask for a channel to come back as value * 2 - 1, which no Metal format does and
 the translator doesn't do. The normal buffer depends on it. So the top four bits of a texture's
 descriptor say which channels want it, and the 2D fetches apply it.
@@ -45,6 +48,8 @@ FETCH_2D = re.compile(r"return (texture\.sample\(sampler, texCoord \+ offset / \
 INPUT = re.compile(r"float4 r(\d+) = input\.i(TexCoord|Color|Normal)(\d+);")
 ONE_OVER_TILE_HEIGHT = "0x3B0767AB"
 ONE_OVER_PICTURE_HEIGHT = f"0x{struct.unpack('<I', struct.pack('<f', 1 / 720))[0]:08X}"
+PIXEL_POSITION = "input.iPos.xy - 0.5"
+GUEST_PIXEL_POSITION = "input.iPos.xy * (*(reinterpret_cast<device float*>(g_PushConstants.SharedConstants + 304))) - 0.5"
 
 
 def slots_of(source):
@@ -59,6 +64,7 @@ def slots_of(source):
 
 def patched(source):
     source = source.replace(ONE_OVER_TILE_HEIGHT, ONE_OVER_PICTURE_HEIGHT)
+    source = source.replace(PIXEL_POSITION, GUEST_PIXEL_POSITION)
     source = source.replace("texture2d<float> texture = textureHeap[resourceDescriptorIndex].tex;",
                             "texture2d<float> texture = textureHeap[resourceDescriptorIndex & 0x0FFFFFFF].tex;")
     source = FETCH_2D.sub(r"return biased(\1, resourceDescriptorIndex);", source)

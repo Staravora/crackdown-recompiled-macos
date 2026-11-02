@@ -56,6 +56,14 @@ REXCVAR_DEFINE_BOOL(crackdown_native_only, false, "Crackdown",
 REXCVAR_DEFINE_INT32(crackdown_metalfx_upscale, 1, "Crackdown",
                      "With the Metal renderer, MetalFX upscales the picture this many times before the window scales it: 1 or 2");
 
+REXCVAR_DEFINE_INT32(crackdown_render_scale, 100, "Crackdown",
+                     "With the Metal renderer, the percent of the game's 1280x720 the scene is drawn at: 100, 150 for 1920x1080 "
+                     "or 200 for 2560x1440");
+
+REXCVAR_DEFINE_BOOL(crackdown_metalfx_frame_generation, false, "Crackdown",
+                    "With the Metal renderer, MetalFX makes a frame between each two the game draws and shows it halfway, for "
+                    "twice the frame rate on screen and about a frame more delay");
+
 REXCVAR_DEFINE_BOOL(crackdown_native_shadow_debug, false, "Crackdown",
                     "Poll metal-debug.txt in the logs folder, so a running game can be examined from outside");
 
@@ -82,6 +90,7 @@ constexpr size_t kHalfPixelOffset = 264;
 constexpr size_t kScreenScaleOffset = 280;
 constexpr size_t kScreenOffsetOffset = 288;
 constexpr size_t kDepthOffsetOffset = 296;
+constexpr size_t kPixelScaleOffset = 304;  // Guest pixels to one of the target's, for shaders that read the pixel position.
 constexpr size_t kVertexTextureTableOffset = 320;
 constexpr size_t kVertexSamplerTableOffset = 336;
 constexpr uint32_t kFirstVertexFetch = 16;
@@ -106,6 +115,7 @@ constexpr size_t kMaxQueryDisagreements = 32;
 constexpr uint64_t kSmallQuerySamples = 8;
 constexpr uint64_t kLargeQuerySamples = 64;
 constexpr int kMaxUpscale = 2;
+constexpr float kFrameGenerationFarPlane = 20000.0f;
 constexpr uint32_t kQueryBlocks = 24;  // On a query object: a pointer per tile to where its counts go.
 constexpr uint32_t kQueryTileCount = 144;
 constexpr uint32_t kMaxQueryTiles = 30;
@@ -198,6 +208,7 @@ struct QueryEvent {
 struct QuerySlot {
   uint64_t id;
   uint32_t query;
+  float area = 1.0f;  // Pixels of the target its draws went to per guest pixel, which its count is divided by.
 };
 
 // A texture's contents after a given resolve, by how many resolves it's had and its first page, so oldest sorts first.
@@ -217,6 +228,8 @@ struct FrameAnswers {
   std::vector<ReadbackSlot> readbacks;
   uint32_t front_buffer = 0;  // Guest memory Metal wrote the front buffer to, by its virtual address, and how much.
   uint32_t front_buffer_bytes = 0;
+  uint32_t front_width = 0;  // The guest front buffer's size, which a present names.
+  uint32_t front_height = 0;
 };
 
 // The newest finished picture, for the emulator's swap to present when it takes pictures from outside (SDK patch 0016).
@@ -226,6 +239,37 @@ const uint8_t* g_picture = nullptr;
 uint32_t g_picture_width = 0;
 uint32_t g_picture_height = 0;
 bool g_external_present = false;  // Render thread only after it's set.
+
+// Frame generation. The emulator's swaps show nothing (SDK patch 0018), and a clock thread shows each frame's pictures:
+// the made one at once and the real one half a frame later.
+void (*g_present_external_frame)(uint32_t, uint32_t) = nullptr;
+void (*g_set_external_present_paced)(bool) = nullptr;
+bool g_frame_generation = false;  // Render thread, once it's set up.
+struct PictureSet {
+  std::array<const uint8_t*, 2> pictures{};
+  uint32_t count = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t guest_width = 0;
+  uint32_t guest_height = 0;
+};
+std::mutex g_present_mutex;
+std::condition_variable g_present_wake;
+std::optional<PictureSet> g_present_next;  // Under g_present_mutex.
+// Render thread: the front buffer's size, the target last resolved into it, and the camera.
+uint32_t g_front_width = 0;
+uint32_t g_front_height = 0;
+uint32_t g_front_page = 0;
+int g_front_target = -1;
+int g_next_front_target = -1;
+std::optional<std::array<float, 16>> g_last_view_projection;
+// Render thread: the scene's targets, the game's picture size, are drawn this many times bigger each way.
+constexpr uint32_t kScaledWidth = 1280;
+constexpr uint32_t kScaledHeight = 720;
+constexpr int kMaxRenderScale = 200;
+float g_render_scale = 1.0f;
+std::vector<float> g_target_scales;  // By target.
+Clock::time_point g_last_frame_time;
 void (*g_found_fence_done)(uint32_t) = nullptr;  // Render thread. RenderThread passes it on to g_set_fence_done.
 
 uint32_t PictureWidth() {
@@ -256,6 +300,48 @@ bool FillPicture(void*, void* pixels, uint32_t row_bytes, uint32_t width, uint32
   return true;
 }
 
+void ShowPicture(const uint8_t* picture, uint32_t width, uint32_t height, uint32_t guest_width, uint32_t guest_height) {
+  {
+    std::lock_guard lock(g_picture_mutex);
+    g_picture = picture;
+    g_picture_width = width;
+    g_picture_height = height;
+  }
+  g_present_external_frame(guest_width, guest_height);
+}
+
+// Shows each frame's made picture as it arrives and its real one halfway to the next frame, by the gap between arrivals.
+void PresentClock() {
+  pthread_setname_np("metal-present");
+  Clock::time_point last_arrival;
+  double interval = 1.0 / 30.0;
+  while (true) {
+    PictureSet set;
+    {
+      std::unique_lock lock(g_present_mutex);
+      g_present_wake.wait(lock, [] { return g_present_next.has_value(); });
+      set = *g_present_next;
+      g_present_next.reset();
+    }
+    const Clock::time_point arrival = Clock::now();
+    if (last_arrival.time_since_epoch().count()) {
+      const double gap = std::chrono::duration<double>(arrival - last_arrival).count();
+      interval += (std::clamp(gap, 1.0 / 120.0, 0.1) - interval) * 0.1;
+    }
+    last_arrival = arrival;
+    ShowPicture(set.pictures[0], set.width, set.height, set.guest_width, set.guest_height);
+    if (set.count < 2) {
+      continue;
+    }
+    // A frame that arrives sooner brings its own pictures, so the real one goes up then, rather than late.
+    std::unique_lock lock(g_present_mutex);
+    g_present_wake.wait_until(lock, arrival + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(interval / 2.0)),
+                              [] { return g_present_next.has_value(); });
+    lock.unlock();
+    ShowPicture(set.pictures[1], set.width, set.height, set.guest_width, set.guest_height);
+  }
+}
+
 // Hands the emulator's swap a source of pictures, if its plugin can take one.
 void UseExternalPresent() {
   using SetSource = void (*)(bool (*)(void*, uint32_t*, uint32_t*), bool (*)(void*, void*, uint32_t, uint32_t, uint32_t), void*);
@@ -269,6 +355,18 @@ void UseExternalPresent() {
   g_external_present = true;
   REXLOG_INFO("Native only: the swap presents Metal's pictures directly");
   g_found_fence_done = reinterpret_cast<void (*)(uint32_t)>(dlsym(plugin, "rex_gpu_set_external_fence_done"));
+  if (REXCVAR_GET(crackdown_metalfx_frame_generation)) {
+    g_present_external_frame = reinterpret_cast<void (*)(uint32_t, uint32_t)>(dlsym(plugin, "rex_gpu_present_external_frame"));
+    g_set_external_present_paced = reinterpret_cast<void (*)(bool)>(dlsym(plugin, "rex_gpu_set_external_present_paced"));
+    if (g_present_external_frame && g_set_external_present_paced) {
+      g_set_external_present_paced(true);
+      g_frame_generation = true;
+      std::thread(PresentClock).detach();
+      REXLOG_INFO("Native only: MetalFX frame generation is on");
+    } else {
+      REXLOG_WARN("Native only: the GPU plugin can't pace presents, so frame generation is off");
+    }
+  }
   if (g_found_fence_done) {
     REXLOG_INFO("Native only: fences wait for Metal");
   } else {
@@ -356,6 +454,7 @@ struct Totals {
   uint64_t guest_matches = 0;
   uint64_t queries_no_room = 0;
   uint64_t front_buffers_missed = 0;
+  uint64_t frames_generated = 0;
 };
 
 // Each query's answers until both have arrived. Metal's come when its frame finishes and the emulator's when the game asks.
@@ -937,12 +1036,20 @@ int TargetOf(MetalDevice& device, const Run& run, int tile) {
   if (found != g_targets.end()) {
     return found->second;
   }
-  const int target = device.AddTarget(key.width, key.height, key.color != 0, key.float_color, key.samples);
-  REXLOG_INFO("Native shadow: target {}x{}, colour {:08X}, depth {:08X}, float {}, samples {}", key.width, key.height, key.color, key.depth,
-              key.float_color, key.samples);
+  // Only the scene's targets are scaled. Shadow maps, reflections, bloom and exposure keep the guest's size.
+  const float scale = key.width == kScaledWidth && key.height == kScaledHeight ? g_render_scale : 1.0f;
+  const int target = device.AddTarget(key.width, key.height, key.color != 0, key.float_color, key.samples, scale);
+  REXLOG_INFO("Native shadow: target {}x{}, colour {:08X}, depth {:08X}, float {}, samples {}, scale {}", key.width, key.height, key.color,
+              key.depth, key.float_color, key.samples, scale);
   g_targets[key] = target;
+  if (target >= 0) {
+    g_target_scales.resize(std::max(g_target_scales.size(), size_t(target) + 1), 1.0f);
+    g_target_scales[size_t(target)] = scale;
+  }
   return target;
 }
+
+float ScaleOf(int target) { return target >= 0 && size_t(target) < g_target_scales.size() ? g_target_scales[size_t(target)] : 1.0f; }
 
 bool InsideTarget(const MetalViewport& viewport, const Targets& targets) {
   return viewport.width > 0 && viewport.height > 0 && viewport.x >= -1 && viewport.y >= -1 &&
@@ -992,6 +1099,7 @@ bool g_debug_alpha = false;
 bool g_debug_no_stencil = false;
 bool g_debug_no_clears = false;
 bool g_debug_mark_queries = false;
+bool g_debug_vertex_constants = false;  // vconst: a capture also lists each draw's first 64 vertex constants.
 std::set<uint32_t> g_debug_marked;  // Queries the two sides last disagreed on.
 std::ofstream* g_dump = nullptr;
 int g_debug_id = 0;
@@ -1129,11 +1237,12 @@ void OnMetalSamples(const std::vector<QuerySlot>& slots, const uint64_t* samples
   const bool answer = REXCVAR_GET(crackdown_native_only);
   std::lock_guard lock(g_query_mutex);
   for (size_t i = 0; i < slots.size(); ++i) {
+    const uint64_t counted = slots[i].area == 1.0f ? samples[i] : uint64_t(std::llround(double(samples[i]) / slots[i].area));
     if (answer) {
-      AnswerQuery(slots[i].query, samples[i]);
+      AnswerQuery(slots[i].query, counted);
     }
     const auto entry = g_query_answers.try_emplace(slots[i].id).first;
-    entry->second.metal = samples[i];
+    entry->second.metal = counted;
     SettleQuery(entry, slots[i].query);
   }
 }
@@ -1233,7 +1342,7 @@ void CopyResolve(const Run& run, MetalDevice& device, int target, int resolve, b
   out.dest_y = one_tile ? out.top : copy.dest_y;
   device.CopyTarget(out);
   if (one_tile) {
-    out.resolve = g_textures->ResolveInto(run.dest.data(), out.top >= kSecondTileTop ? 1 : 0);
+    out.resolve = g_textures->ResolveInto(run.dest.data(), out.top >= kSecondTileTop ? 1 : 0, ScaleOf(target));
     out.dest_y = copy.dest_y;
     if (out.resolve >= 0) {
       device.CopyTarget(out);
@@ -1280,7 +1389,7 @@ void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& draw
                                      run.targets.samples});
   const int target = found == g_targets.end() ? -1 : found->second;
   const int resolve = copy.texture && !g_debug_no_resolves && target >= 0 && drawn.contains(target) && (depth || (source == 0 && run.targets.color))
-                          ? g_textures->ResolveInto(run.dest.data())
+                          ? g_textures->ResolveInto(run.dest.data(), -1, ScaleOf(target))
                           : -1;
   if (g_dump) {
     *g_dump << fmt::format("R {} flags {:X} rect {} {} {} {} {} to {} {} level {} fetch f{} {}x{} {:05X} swizzle {:03X} type {} dim {} mips {} {} clear {} {} tgt {} {:08X} {:08X} {}\n", g_debug_id, copy.flags, copy.has_rect,
@@ -1292,6 +1401,9 @@ void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& draw
   const bool clears = (copy.flags & (kResolveClearColor | kResolveClearDepth)) != 0 && target >= 0 && drawn.contains(target);
   if (resolve >= 0) {
     CopyResolve(run, device, target, resolve, depth);
+    if (!depth && uint32_t(fetch.base_address) == g_front_page) {
+      g_next_front_target = target;
+    }
     bool read = false;
     {
       std::lock_guard lock(g_readback_mutex);
@@ -1339,16 +1451,110 @@ void WriteFrontBuffer(const FetchConstant& front_buffer, MetalDevice& device, Fr
 }
 
 // The front buffer's own resolve, at whatever size Metal drew it, for the swap to present.
-void CopyFrontBuffer(const FetchConstant& front_buffer, MetalDevice& device) {
+std::array<float, 16> Inverse(const std::array<float, 16>& m) {
+  // Cofactors, rows of m as rows.
+  std::array<double, 16> inv;
+  const auto a = [&](int r, int c) { return double(m[size_t(r * 4 + c)]); };
+  inv[0] = a(1,1)*a(2,2)*a(3,3) - a(1,1)*a(2,3)*a(3,2) - a(2,1)*a(1,2)*a(3,3) + a(2,1)*a(1,3)*a(3,2) + a(3,1)*a(1,2)*a(2,3) - a(3,1)*a(1,3)*a(2,2);
+  inv[4] = -a(1,0)*a(2,2)*a(3,3) + a(1,0)*a(2,3)*a(3,2) + a(2,0)*a(1,2)*a(3,3) - a(2,0)*a(1,3)*a(3,2) - a(3,0)*a(1,2)*a(2,3) + a(3,0)*a(1,3)*a(2,2);
+  inv[8] = a(1,0)*a(2,1)*a(3,3) - a(1,0)*a(2,3)*a(3,1) - a(2,0)*a(1,1)*a(3,3) + a(2,0)*a(1,3)*a(3,1) + a(3,0)*a(1,1)*a(2,3) - a(3,0)*a(1,3)*a(2,1);
+  inv[12] = -a(1,0)*a(2,1)*a(3,2) + a(1,0)*a(2,2)*a(3,1) + a(2,0)*a(1,1)*a(3,2) - a(2,0)*a(1,2)*a(3,1) - a(3,0)*a(1,1)*a(2,2) + a(3,0)*a(1,2)*a(2,1);
+  inv[1] = -a(0,1)*a(2,2)*a(3,3) + a(0,1)*a(2,3)*a(3,2) + a(2,1)*a(0,2)*a(3,3) - a(2,1)*a(0,3)*a(3,2) - a(3,1)*a(0,2)*a(2,3) + a(3,1)*a(0,3)*a(2,2);
+  inv[5] = a(0,0)*a(2,2)*a(3,3) - a(0,0)*a(2,3)*a(3,2) - a(2,0)*a(0,2)*a(3,3) + a(2,0)*a(0,3)*a(3,2) + a(3,0)*a(0,2)*a(2,3) - a(3,0)*a(0,3)*a(2,2);
+  inv[9] = -a(0,0)*a(2,1)*a(3,3) + a(0,0)*a(2,3)*a(3,1) + a(2,0)*a(0,1)*a(3,3) - a(2,0)*a(0,3)*a(3,1) - a(3,0)*a(0,1)*a(2,3) + a(3,0)*a(0,3)*a(2,1);
+  inv[13] = a(0,0)*a(2,1)*a(3,2) - a(0,0)*a(2,2)*a(3,1) - a(2,0)*a(0,1)*a(3,2) + a(2,0)*a(0,2)*a(3,1) + a(3,0)*a(0,1)*a(2,2) - a(3,0)*a(0,2)*a(2,1);
+  inv[2] = a(0,1)*a(1,2)*a(3,3) - a(0,1)*a(1,3)*a(3,2) - a(1,1)*a(0,2)*a(3,3) + a(1,1)*a(0,3)*a(3,2) + a(3,1)*a(0,2)*a(1,3) - a(3,1)*a(0,3)*a(1,2);
+  inv[6] = -a(0,0)*a(1,2)*a(3,3) + a(0,0)*a(1,3)*a(3,2) + a(1,0)*a(0,2)*a(3,3) - a(1,0)*a(0,3)*a(3,2) - a(3,0)*a(0,2)*a(1,3) + a(3,0)*a(0,3)*a(1,2);
+  inv[10] = a(0,0)*a(1,1)*a(3,3) - a(0,0)*a(1,3)*a(3,1) - a(1,0)*a(0,1)*a(3,3) + a(1,0)*a(0,3)*a(3,1) + a(3,0)*a(0,1)*a(1,3) - a(3,0)*a(0,3)*a(1,1);
+  inv[14] = -a(0,0)*a(1,1)*a(3,2) + a(0,0)*a(1,2)*a(3,1) + a(1,0)*a(0,1)*a(3,2) - a(1,0)*a(0,2)*a(3,1) - a(3,0)*a(0,1)*a(1,2) + a(3,0)*a(0,2)*a(1,1);
+  inv[3] = -a(0,1)*a(1,2)*a(2,3) + a(0,1)*a(1,3)*a(2,2) + a(1,1)*a(0,2)*a(2,3) - a(1,1)*a(0,3)*a(2,2) - a(2,1)*a(0,2)*a(1,3) + a(2,1)*a(0,3)*a(1,2);
+  inv[7] = a(0,0)*a(1,2)*a(2,3) - a(0,0)*a(1,3)*a(2,2) - a(1,0)*a(0,2)*a(2,3) + a(1,0)*a(0,3)*a(2,2) + a(2,0)*a(0,2)*a(1,3) - a(2,0)*a(0,3)*a(1,2);
+  inv[11] = -a(0,0)*a(1,1)*a(2,3) + a(0,0)*a(1,3)*a(2,1) + a(1,0)*a(0,1)*a(2,3) - a(1,0)*a(0,3)*a(2,1) - a(2,0)*a(0,1)*a(1,3) + a(2,0)*a(0,3)*a(1,1);
+  inv[15] = a(0,0)*a(1,1)*a(2,2) - a(0,0)*a(1,2)*a(2,1) - a(1,0)*a(0,1)*a(2,2) + a(1,0)*a(0,2)*a(2,1) + a(2,0)*a(0,1)*a(1,2) - a(2,0)*a(0,2)*a(1,1);
+  const double det = a(0,0) * inv[0] + a(0,1) * inv[4] + a(0,2) * inv[8] + a(0,3) * inv[12];
+  std::array<float, 16> out{};
+  if (std::abs(det) > 1e-12) {
+    for (size_t i = 0; i < 16; ++i) {
+      out[i] = float(inv[i] / det);
+    }
+  }
+  return out;
+}
+
+// The camera, from the view-projection most of the frame's world draws share, which the game keeps in c0 to c3. Its
+// projection is reversed and infinite: row 2 is (0, 0, 0, near).
+std::optional<MetalCamera> CameraOf(const std::array<float, 16>& view_projection, float delta_time) {
+  const auto length = [&](int row) {
+    return std::sqrt(view_projection[size_t(row * 4)] * view_projection[size_t(row * 4)] +
+                     view_projection[size_t(row * 4 + 1)] * view_projection[size_t(row * 4 + 1)] +
+                     view_projection[size_t(row * 4 + 2)] * view_projection[size_t(row * 4 + 2)]);
+  };
+  const float x_scale = length(0), y_scale = length(1), near_plane = view_projection[11];
+  if (x_scale <= 0.0f || y_scale <= 0.0f || near_plane <= 0.0f || length(2) > 1e-4f) {
+    return std::nullopt;
+  }
+  MetalCamera camera;
+  camera.view_projection = view_projection;
+  camera.inverse_view_projection = Inverse(view_projection);
+  camera.field_of_view = float(2.0 * std::atan(1.0 / y_scale) * 180.0 / 3.14159265358979);
+  camera.aspect = y_scale / x_scale;
+  camera.near_plane = near_plane;
+  camera.far_plane = kFrameGenerationFarPlane;
+  camera.delta_time = delta_time;
+  camera.previous_view_projection = g_last_view_projection ? *g_last_view_projection : view_projection;
+  camera.reset = !g_last_view_projection;
+  return camera;
+}
+
+void CopyFrontBuffer(const FetchConstant& front_buffer, MetalDevice& device, const std::optional<std::array<float, 16>>& view_projection) {
   const int resolve = g_textures->HasResolve(front_buffer.data()) ? g_textures->ResolveInto(front_buffer.data()) : -1;
   const uint32_t scale = uint32_t(std::clamp(REXCVAR_GET(crackdown_metalfx_upscale), 1, kMaxUpscale));
-  if (resolve < 0 || !device.CopyPicture(resolve, scale)) {
+  if (resolve < 0) {
+    ++g_totals.front_buffers_missed;
+    return;
+  }
+  if (g_frame_generation) {
+    const Clock::time_point now = Clock::now();
+    const float delta_time = g_last_frame_time.time_since_epoch().count()
+                                 ? std::clamp(std::chrono::duration<float>(now - g_last_frame_time).count(), 1.0f / 120.0f, 0.1f)
+                                 : 1.0f / 30.0f;
+    g_last_frame_time = now;
+    const std::optional<MetalCamera> camera = view_projection ? CameraOf(*view_projection, delta_time) : std::nullopt;
+    if (camera && device.InterpolatePicture(resolve, *camera, scale)) {
+      ++g_totals.frames_generated;
+    }
+    g_last_view_projection = camera ? view_projection : std::nullopt;
+  }
+  if (!device.CopyPicture(resolve, scale)) {
     ++g_totals.front_buffers_missed;
   }
 }
 
+// The view-projection most of a frame's draws to the front buffer's size used, by how many.
+using ViewProjections = std::map<std::array<float, 16>, uint32_t>;
+
+std::optional<std::array<float, 16>> BusiestViewProjection(const ViewProjections& counts) {
+  const auto busiest = std::max_element(counts.begin(), counts.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+  if (busiest == counts.end()) {
+    return std::nullopt;
+  }
+  return busiest->first;
+}
+
 void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswers& answers) {
   std::vector<QuerySlot>& query_slots = answers.queries;
+  // Frame generation: the camera, and the front buffer's scene as it stands before the HUD, which is the first draw on
+  // it after the 3D ones that tests no depth.
+  ViewProjections view_projections;
+  bool scene_drawn = false, snapshot_taken = false;
+  if (frame.front_buffer) {
+    xenos::xe_gpu_texture_fetch_t front;
+    std::memcpy(&front, frame.front_buffer->data(), sizeof(front));
+    g_front_page = uint32_t(front.base_address);
+    g_front_width = uint32_t(front.size_2d.width) + 1;
+    g_front_height = uint32_t(front.size_2d.height) + 1;
+  }
+  g_front_target = g_next_front_target;
   g_debug_id = 0;
   g_debug_stopped = false;
   device.CaptureAlpha(g_debug_alpha);
@@ -1481,6 +1687,22 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
           ++g_totals.no_target_draws;
           continue;
         }
+        if (g_frame_generation) {
+          const bool depth_tested = (draw.depth_control & kDepthEnable) != 0;
+          if (depth_tested && run.targets.width == g_front_width && run.targets.height == g_front_height) {
+            std::array<float, 16> view_projection;
+            std::memcpy(view_projection.data(), g_constants.data(), sizeof(view_projection));
+            ++view_projections[view_projection];
+          }
+          if (target == g_front_target && !snapshot_taken) {
+            if (depth_tested) {
+              scene_drawn = true;
+            } else if (scene_drawn && device.SnapshotScene(target)) {
+              snapshot_taken = true;
+              current_target = -1;
+            }
+          }
+        }
         const bool first_use = cleared.insert(target).second;
         const bool clear = run_cleared || first_use;
         if (target != current_target || clear) {
@@ -1514,6 +1736,13 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
             pc += fmt::format(" {:.3f}", word(g_constants[1024 + i]));
           }
           *g_dump << "PC" << pc << "\n";
+          if (g_debug_vertex_constants) {
+            std::string vc;
+            for (int i = 0; i < 64 * 4; ++i) {
+              vc += fmt::format(" {:.4f}", word(g_constants[i]));
+            }
+            *g_dump << "VC" << vc << "\n";
+          }
           for (const PixelSlot& slot : found_pixel.slots) {
             xenos::xe_gpu_texture_fetch_t fetch;
             std::memcpy(&fetch, f + size_t(slot.slot) * 6, sizeof(fetch));
@@ -1532,6 +1761,9 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
         out.alpha_to_coverage = (draw.color_control & kAlphaToCoverage) != 0;
         out.colorless = counting;
         out.query = open_query;
+        if (open_query >= 0) {
+          query_slots[size_t(open_query)].area = ScaleOf(target) * ScaleOf(target);
+        }
         if (counting && g_debug_mark_queries && g_debug_marked.contains(query_slots[size_t(open_query)].query)) {
           out.colorless = false;
           out.color_mask = kColorMaskFirstTarget;
@@ -1579,6 +1811,8 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
         std::memcpy(shared + kScreenScaleOffset, screen.data(), sizeof(float) * 2);
         std::memcpy(shared + kScreenOffsetOffset, screen.data() + 2, sizeof(float) * 2);
         std::memcpy(shared + kDepthOffsetOffset, &depth_offset, sizeof(depth_offset));
+        const float pixel_scale = 1.0f / ScaleOf(target);
+        std::memcpy(shared + kPixelScaleOffset, &pixel_scale, sizeof(pixel_scale));
         // Translated shaders read these as count, start and step.
         for (uint32_t i = 0; i < kLoopConstants; ++i) {
           const uint32_t loop = run.loops[i];
@@ -1628,9 +1862,11 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
     }
   }
   apply_queries(frame.runs.size());
+  answers.front_width = g_front_width;
+  answers.front_height = g_front_height;
   if (DrawsAlone() && frame.front_buffer && !g_debug_stopped) {
     if (g_external_present) {
-      CopyFrontBuffer(*frame.front_buffer, device);
+      CopyFrontBuffer(*frame.front_buffer, device, BusiestViewProjection(view_projections));
     } else {
       WriteFrontBuffer(*frame.front_buffer, device, answers);
     }
@@ -1717,7 +1953,8 @@ void Report(const MetalDevice& device) {
       R"("shaders_found":{},"shaders_missing":{},"shaders_failed":{},"index_copy_ms_per_frame":{:.3f},)"
       R"("capture_ms_per_frame":{:.4f},"wait_ms_per_frame":{:.3f},"encode_ms_p50":{:.3f},"encode_ms_p95":{:.3f},"encode_ms_max":{:.3f},)"
       R"("gpu_frames":{},"gpu_errors":{},"gpu_ms_per_frame":{:.3f},"gpu_ms_worst":{:.3f},)"
-      R"("guest_memory_wrapped":{},"guest_checks":{},"guest_matches":{},"front_buffers_missed":{},"picture":[{},{}],)",
+      R"("guest_memory_wrapped":{},"guest_checks":{},"guest_matches":{},"front_buffers_missed":{},"frames_generated_per_frame":{:.2f},"picture":[{},{}],)"
+      R"("render_scale":{:.2f},"resampled_copies":{},"dropped_copies":{},"dropped_stack_copies":{},"dropped_reads":{},"gpu_queued_ms_per_frame":{:.3f},"generation_ms_per_frame":{:.3f},)",
       guest_frames, g_totals.frames, dropped, g_totals.draws / frames, g_totals.skipped_draws / frames, g_totals.no_room,
       g_totals.recorded_draws / frames, g_totals.recorded_indices / frames, g_totals.no_shader_draws / frames,
       g_totals.no_target_draws / frames, g_totals.other_primitive_draws / frames, g_totals.other_index_order_draws / frames,
@@ -1730,7 +1967,8 @@ void Report(const MetalDevice& device) {
       Percentile(sorted, 0.5) / 1e3, Percentile(sorted, 0.95) / 1e3, Percentile(sorted, 1.0) / 1e3, gpu.frames, gpu.errors,
       gpu.gpu_ns / 1e6 / double(std::max<uint64_t>(gpu.frames, 1)), gpu.worst_gpu_ns / 1e6,
       device.guest_memory_wrapped() ? "true" : "false", g_totals.guest_checks, g_totals.guest_matches, g_totals.front_buffers_missed,
-      PictureWidth(), PictureHeight());
+      g_totals.frames_generated / frames, PictureWidth(), PictureHeight(), g_render_scale, gpu.resampled_copies, gpu.dropped_copies, gpu.dropped_stack_copies, gpu.dropped_reads,
+      gpu.queued_ns / 1e6 / double(std::max<uint64_t>(gpu.frames, 1)), gpu.generation_ns / 1e6 / double(std::max<uint64_t>(gpu.frames, 1)));
   QueryTotals queries;
   {
     std::lock_guard lock(g_query_mutex);
@@ -1810,6 +2048,13 @@ void RenderThread() {
   }
   if (DrawsAlone()) {
     UseExternalPresent();
+    // Shadow mode compares with the emulator, pixel for pixel, so only the Metal renderer draws bigger.
+    g_render_scale = float(std::clamp(REXCVAR_GET(crackdown_render_scale), 100, kMaxRenderScale)) / 100.0f;
+    g_textures->SetSceneScale(kScaledWidth, g_render_scale);
+    if (g_render_scale != 1.0f) {
+      REXLOG_INFO("Native only: the scene is drawn at {}x{}", std::lround(kScaledWidth * g_render_scale),
+                  std::lround(kScaledHeight * g_render_scale));
+    }
     std::lock_guard lock(g_pacing_mutex);
     g_set_fence_done = g_found_fence_done;
   }
@@ -1842,7 +2087,7 @@ void RenderThread() {
       std::string word;
       bool want_dump = false;
       std::string name = "live";
-      g_debug_skip_blended = g_debug_ids = g_debug_no_resolves = g_debug_alpha = g_debug_no_stencil = g_debug_no_clears = g_debug_mark_queries = false;
+      g_debug_skip_blended = g_debug_ids = g_debug_no_resolves = g_debug_alpha = g_debug_no_stencil = g_debug_no_clears = g_debug_mark_queries = g_debug_vertex_constants = false;
       g_debug_show = -1;
       g_debug_skip_ps.clear();
       g_debug_stop_ps = 0;
@@ -1854,6 +2099,7 @@ void RenderThread() {
         g_debug_no_stencil |= word == "no_stencil";
         g_debug_no_clears |= word == "no_clears";
         g_debug_mark_queries |= word == "mark_queries";
+        g_debug_vertex_constants |= word == "vconst";
         if (word.rfind("stop_ps=", 0) == 0) {
           g_debug_stop_ps = uint32_t(std::stoul(word.substr(8), nullptr, 16));
         }
@@ -1889,13 +2135,31 @@ void RenderThread() {
     const MetalFrameTiming timing =
         device->RecordFrame([&](uint8_t* memory) { Encode(*frame, *device, memory, *answers); }, capture,
                             [answers, fence = frame->fence, handed_over = frame->handed_over](const MetalFrameResults& results) {
-                              OnMetalSamples(answers->queries, results.query_samples);
-                              OnMetalPixels(answers->readbacks, results.readback);
-                              if (results.picture) {
+                              if (!results.pictures_only) {
+                                OnMetalSamples(answers->queries, results.query_samples);
+                                OnMetalPixels(answers->readbacks, results.readback);
+                              }
+                              if (results.picture_count && g_frame_generation) {
+                                PictureSet set;
+                                set.pictures = results.pictures;
+                                set.count = results.picture_count;
+                                set.width = results.picture_width;
+                                set.height = results.picture_height;
+                                set.guest_width = answers->front_width;
+                                set.guest_height = answers->front_height;
+                                {
+                                  std::lock_guard lock(g_present_mutex);
+                                  g_present_next = set;
+                                }
+                                g_present_wake.notify_one();
+                              } else if (results.picture_count) {
                                 std::lock_guard lock(g_picture_mutex);
-                                g_picture = results.picture;
+                                g_picture = results.pictures[results.picture_count - 1];
                                 g_picture_width = results.picture_width;
                                 g_picture_height = results.picture_height;
+                              }
+                              if (results.pictures_only) {
+                                return;
                               }
                               if (answers->front_buffer_bytes) {
                                 // The emulator reloads a texture when it's told its memory changed, as a CPU write would.

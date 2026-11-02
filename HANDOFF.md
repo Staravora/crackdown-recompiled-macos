@@ -1,5 +1,34 @@
 # Session handoff
 
+## 2026-11-02 — Metal resolution option: the scene at 1920x1080 or 2560x1440
+- **What:** Graphics, Metal resolution: 1280×720, 1920×1080 or 2560×1440, saved as `crackdown_render_scale` (100, 150, 200). Metal renderer only. Shadow mode stays at 100 so it still compares pixel for pixel.
+- **What's scaled:** only the 1280x720 targets, the scene's. Shadow maps, the reflection, bloom and exposure targets keep the guest's size. Every rectangle still comes from the game in guest pixels, and the device scales it: viewports, scissors, clears, copies, and the depth-bias slope. A resolve takes the scale of the first target copied into it. A copy between different scales goes through a `resample` compute kernel, counted as `resampled_copies` (none so far). A 1280-wide depth stack is scaled with the scene.
+- **Shaders:** the 70 screen-space pixel shaders read `input.iPos`, now multiplied by `1 / scale` from shared constant offset 304, so they still see guest pixels. `build_pixels.py` does it. **Rerun `build_pixels.py` after pulling.** Bruce's local `native-shaders` is rebuilt.
+- **Occlusion counts** are divided by scale², so the game sees what it would at 720p.
+- **Two bugs found on the way:** the scene's depth stack copy was dropped, which lost the sun shadows on the street. And the 320x180 exposure picture is drawn in a corner of the scene target, so its copy was scaled and its CPU readback refused, which washed the picture out. Both are fixed. Readbacks of a scaled resolve now go through `write_guest` at the guest's size.
+- **Result, street, 30 setting:**
+
+  | Resolution | FPS | GPU ms/frame | Wait at present |
+  |---|---|---|---|
+  | 1280×720 | 28.3 | 10.8 | 21.0 ms |
+  | 1920×1080 | 24.6 | 14.3 | 26.3 ms |
+  | 2560×1440 | 20.1 | 20.2 | 34.9 ms |
+
+  1280×720 is unchanged from before. Pictures at all three sizes match in exposure, shadows and HUD.
+- **Why it costs more than the GPU time suggests:** the game waits at each present for Metal's previous frame, and Metal only starts encoding a frame once the game has finished it. So any GPU time adds straight to the frame time. Encoding while the game builds the frame would let higher resolutions cost close to nothing until the GPU is full, at about 30 ms.
+- **Still dropped:** about 13 readbacks a frame overflow the 1 MB readback buffer (`dropped_reads`). Not yet checked whether 1280×720 drops the same ones silently. Exposure looks right.
+
+## 2026-11-02 — MetalFX frame generation (SDK patch 0018)
+- **What:** Graphics, Frame generation: Off or MetalFX, saved as `crackdown_metalfx_frame_generation`. Metal renderer only.
+- **How:** the camera's view-projection is in vertex constants c0–c3, the one most depth-tested draws on the scene target use. Metal snapshots the scene's colour and depth at the first draw without depth testing after depth-tested ones, which is where the HUD starts. The `camera_motion` kernel gives each pixel's motion, taking its depth back through this frame's camera and forward through the last frame's. `MTLFXFrameInterpolator` gets both snapshots, the depth, the motion and the finished picture as its HUD layer. The in-between frame is made in a command buffer of its own after the frame's, so the game's fences don't wait for it.
+- **SDK, 0018:** `rex_gpu_set_external_present_paced(true)` stops the game's swaps from presenting. `rex_gpu_present_external_frame(w, h)` presents on the command processor's thread, through a `ServiceExternalWork` hook. A `metal-present` thread shows the in-between frame when it's ready and the real one half a frame later, timed from how often frames arrive.
+- **Result, street, 30 setting:**
+  - **1280×720:** 26.0 FPS against 28.3 off, so about 52 frames a second on screen. The in-between frame takes 7.3 ms of GPU time, and the snapshots add 1.6 ms to the frame.
+  - **1920×1080:** 19.6 FPS, because the GPU needs 34 ms of work a frame. Not worth it on the M1 Air.
+- **Limits:** motion comes from the camera alone, so cars and people that move on their own may smear. About one frame of added delay.
+- **Not checked:** how it looks and feels in play, and whether the pacing on screen is even. Bruce has to play it.
+- **Process mistake, for the record:** `tools/stage-macos.sh` only copies `game-build-macos/crackdown`. It doesn't build. Run `cmake --build game-build-macos --target crackdown` first. Three test runs today used a stale binary because of this, and were first read as a change making things worse. Noise between identical frame-generation runs is about ±1 FPS.
+
 ## 2026-11-02 — Fences and ring space wait for Metal (SDK patch 0017): the one-frame flicker
 - **Bruce's report:** a flicker that "looks like an exploded texture or shader", one frame at a time, on the street out from the test spawn.
 - **Cause, from the code:** in Metal-only mode the command processor runs the ring well ahead of Metal (13 fences, about a frame). It wrote each fence and the ring read pointer as it reached them, so the game reused vertex memory and ring space for the next frame while Metal was still reading the last.

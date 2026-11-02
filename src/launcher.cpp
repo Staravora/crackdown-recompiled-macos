@@ -865,12 +865,22 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
 #if defined(__APPLE__)
     ui.Toggle("Renderer",
               "Metal draws the game natively instead of the emulated GPU. A preview: faster, and still missing a few "
-              "effects. Render resolution, internal resolution and multisampling don't apply to it yet.",
+              "effects. Render resolution, internal resolution and multisampling don't apply to it; it has its own "
+              "resolution below.",
               "crackdown_native_only", false, "Emulated", "Metal (preview)");
+    ui.Choice("Metal resolution",
+              "With the Metal renderer, how many pixels the scene is drawn with. The game's own is 1280\xC3\x97" "720. More is "
+              "sharper and costs GPU time in proportion: 1920\xC3\x97" "1080 is over twice the work.",
+              "crackdown_render_scale", "100",
+              {{"100", "1280\xC3\x97" "720"}, {"150", "1920\xC3\x97" "1080"}, {"200", "2560\xC3\x97" "1440"}});
     ui.Choice("Upscaling",
               "With the Metal renderer, MetalFX sharpens the picture as it doubles its size, before it's scaled to the "
               "window. Worth it in fullscreen or a large window. Costs a little GPU time.",
               "crackdown_metalfx_upscale", "1", {{"1", "Off"}, {"2", "MetalFX 2\xC3\x97"}});
+    ui.Toggle("Frame generation",
+              "With the Metal renderer, MetalFX makes a frame between each two the game draws, so the screen shows twice as "
+              "many. Adds about one frame of delay. A preview.",
+              "crackdown_metalfx_frame_generation", false, "Off", "MetalFX");
 #endif
     if (const std::optional<int> adapter = ResolveGraphicsAdapter(
             settings_.Get("crackdown_graphics_adapter"), graphics_adapters_)) {

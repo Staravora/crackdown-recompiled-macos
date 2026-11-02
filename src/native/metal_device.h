@@ -20,6 +20,12 @@ struct MetalGpuTotals {
   std::string last_error;
   uint64_t gpu_ns = 0;
   uint64_t worst_gpu_ns = 0;
+  uint64_t queued_ns = 0;      // From each frame's commit until the GPU starts on it.
+  uint64_t generation_ns = 0;  // GPU time of frame generation's own command buffers, also in gpu_ns.
+  uint64_t resampled_copies = 0;  // Copies between a target and a resolve drawn at different scales.
+  uint64_t dropped_copies = 0;    // Copies that couldn't be resampled.
+  uint64_t dropped_stack_copies = 0;  // Depth from a scaled target for a stack, which is the guest's size.
+  uint64_t dropped_reads = 0;         // ReadResolve of a scaled resolve, whose readers want the guest's size.
 };
 
 // What a resolve texture holds. Float is for the targets the water's FFT runs on.
@@ -160,9 +166,26 @@ struct MetalDraw {
 struct MetalFrameResults {
   const uint64_t* query_samples = nullptr;  // What each query slot counted.
   const uint8_t* readback = nullptr;        // Pixels from ReadResolve, as it placed them.
-  const uint8_t* picture = nullptr;         // From CopyPicture: BGRA8, picture_width * 4 bytes a row. Null if none.
+  // From CopyPicture, in the order they were made: BGRA8, picture_width * 4 bytes a row.
+  std::array<const uint8_t*, 2> pictures{};
+  uint32_t picture_count = 0;
   uint32_t picture_width = 0;
   uint32_t picture_height = 0;
+  // Frame generation finishes after the rest of the frame and reports its pictures alone, with nothing else set.
+  bool pictures_only = false;
+};
+
+// The camera a frame was drawn with, for working out how each pixel moved since the last.
+struct MetalCamera {
+  std::array<float, 16> view_projection{};           // Rows, as the game's shaders take it: clip = rows · world.
+  std::array<float, 16> inverse_view_projection{};
+  std::array<float, 16> previous_view_projection{};
+  float field_of_view = 0.0f;  // Vertical, in degrees.
+  float aspect = 0.0f;
+  float near_plane = 0.0f;
+  float far_plane = 0.0f;
+  float delta_time = 0.0f;
+  bool reset = false;  // No usable frame before this one.
 };
 
 // The only part of the native layer that touches Metal, so the rest stays plain C++. Everything but gpu_totals() is for
@@ -196,19 +219,22 @@ class MetalDevice {
   virtual int AddSampler(const MetalSamplerDesc& desc) = 0;
 
   // A texture render targets get copied into, and a descriptor for reading one. It reads colour bytes in the order guest
-  // memory would hold them, so a fetch constant's swizzle means what it did there.
-  virtual int AddResolve(uint32_t width, uint32_t height, uint32_t levels, MetalResolveFormat format) = 0;
+  // memory would hold them, so a fetch constant's swizzle means what it did there. Scale is as AddTarget's: the size is in
+  // the guest's pixels, and the texture holds scale times as many each way.
+  virtual int AddResolve(uint32_t width, uint32_t height, uint32_t levels, MetalResolveFormat format, float scale) = 0;
   virtual int ViewResolve(int resolve, bool gamma, const uint8_t* swizzle) = 0;
 
-  // A stack of depth maps, read as a 3D texture, and a descriptor for it.
-  virtual int AddStack(uint32_t width, uint32_t height, uint32_t depth) = 0;
+  // A stack of depth maps, read as a 3D texture, and a descriptor for it. Scale is as AddTarget's, each way across a slice.
+  virtual int AddStack(uint32_t width, uint32_t height, uint32_t depth, float scale) = 0;
 
   // Opens a window that shows every frame from here on.
   virtual void ShowWindow() = 0;
 
   // A render target, with a colour part only if asked for: shadow maps are depth alone. With samples above 1 it's
-  // multisampled, and reads of it see the samples resolved. Returns a handle.
-  virtual int AddTarget(uint32_t width, uint32_t height, bool has_color, bool float_color, uint32_t samples) = 0;
+  // multisampled, and reads of it see the samples resolved. Returns a handle. With scale above 1 it's drawn at that many
+  // times the guest's pixels each way. Everything else that names its pixels, viewports, scissors, clears and copies, still
+  // does so in the guest's, and the device scales them.
+  virtual int AddTarget(uint32_t width, uint32_t height, bool has_color, bool float_color, uint32_t samples, float scale) = 0;
 
   // Records and submits one frame. encode gets that frame's memory and calls BeginPass, Draw and ShowTarget. If capture
   // isn't empty, waits for the GPU and writes the shown target there as a PNG. finished runs on a Metal thread when the GPU
@@ -231,12 +257,19 @@ class MetalDevice {
   // pass.
   virtual size_t ReadResolve(int resolve) = 0;
 
-  // Queues a resolve's pixels for MetalFrameResults::picture, for showing outside Metal, upscaled scale times by MetalFX if
+  // Queues a resolve's pixels for MetalFrameResults::pictures, for showing outside Metal, upscaled scale times by MetalFX if
   // scale is above 1. They stay put until the frame slot comes round again, kFramesInFlight frames on. Ends any open pass.
   virtual bool CopyPicture(int resolve, uint32_t scale) = 0;
 
+  // Frame generation. SnapshotScene keeps a target's colour and depth as they stand, before the HUD goes on. Then
+  // InterpolatePicture has MetalFX make the frame halfway between the last snapshot and this one, with the HUD from the
+  // finished picture in resolve, and queues it as a picture ahead of the real one. False if it couldn't.
+  virtual bool SnapshotScene(int target) = 0;
+  virtual bool InterpolatePicture(int resolve, const MetalCamera& camera, uint32_t scale) = 0;
+
   // Writes a resolve into guest memory at byte offset at, as the Xenos lays out a 32-bit texture: by 32x32 tiles if
-  // tiled, and with each pixel's bytes reversed if swap. Pitch is in pixels. Ends any open pass.
+  // tiled, and with each pixel's bytes reversed if swap. Pitch is in pixels. A scaled resolve goes down to the guest's size
+  // on the way. Ends any open pass.
   virtual bool WriteResolveToGuest(int resolve, size_t at, uint32_t pitch, bool tiled, bool swap) = 0;
 
   // Which colour target this frame's window and capture show, and whether it goes through the gamma ramp on the way, as
