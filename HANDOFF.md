@@ -1,5 +1,25 @@
 # Session handoff
 
+## 2026-11-02 — Game speed above 30 measured: correct. Mac release planned.
+- **Measured:** the title's logical tick (timing object +16, 1/30 s steps) against wall time, every 5 s, in Metal mode at 1280×720.
+
+  | Cap | Actual FPS | Ticks per second |
+  |---|---|---|
+  | 30 | 29.4–30.0 | 29.4–30.0 |
+  | 60 | 40–47 | 28.8–29.7 |
+  | Uncapped | 40–51 | 28.8–30.0 |
+
+  The simulation runs at real time at every rate. When the Mac can't hold the chosen rate it runs 1–4% slow, not fast. The earlier "things accelerated" was most likely 30 running unpaced in Metal mode, fixed by `HostPaced`. The ship-check note calling this open was wrong. A particular effect running fast at 60 would need its own timer found, as upstream did for crowd animation and a cosmetic timer.
+- **Bruce's release decision:** two forms, a build-it-yourself path and a signed, notarized app download, with in-app updates. It must be plug-and-play for ordinary Mac users.
+- **Updater, from reading the code:** the client checks GitHub `releases/latest` for `saulob/crackdown-xbox360-recompiled` (`src/update_config.cpp:18-20`) and verifies by SHA-256. On a Mac it falls into the AppImage branch and reports updates as unsupported. A signed Mac app must be swapped whole after checking its signature, not file by file. The zip extractor also drops symlinks and exec bits (`src/updater/update_zip.cpp:144-171`).
+- **Release work:**
+  1. data and settings in `~/Library/Application Support`, and a bundle layout that signs: non-code files in `Resources`, nothing written inside the app;
+  2. the Metal shaders built into the app for the download, and automated or skipped for builders, with Emulated as the fallback when they're missing;
+  3. `package-macos.sh`: Developer ID signing, notarization, stapling, a zip with its `.sha256`;
+  4. the Mac updater: a whole-app swap after a codesign check, and the fork's own releases address;
+  5. launcher Mac polish: ⌘ shortcuts and hints, each renderer showing only its own rows, the app menu, Show in Finder;
+  6. a README macOS section, third-party notices, and a bundle ID of our own.
+
 - **2026-11-02 ship-check (public GitHub, next to upstream): NO-SHIP.** Secrets clean: gitleaks' 3 hits are upstream false positives, a key-code compare and two public GPG fingerprints. Tests 57/58, the failure being the known upstream release-script checks.
   - **Blocking:**
     - the README has no macOS section;
