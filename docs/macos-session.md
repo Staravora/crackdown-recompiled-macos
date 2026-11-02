@@ -29,7 +29,7 @@ Paths below are relative to the Codex workspace root, two directories above this
 
 `work/crackdown/game/assets` is an absolute symlink to the extracted game directory. The game's SDK folder also links to the installed SDK above. Update links if moving data; avoid duplicating the approximately 6.55 GB disc files. Preserve player data and `user_data/cache/shaders-before-black-screen-restore`.
 
-Original ISO: `~/Downloads/Crackdown (World) (En,Ja,Fr,De,Es,It,Zh,Ko,Cs,Hu).iso`. All 196 required files were verified. Required Default.xex SHA-256: `7aaa7a8920d1c3c737e58cf583debafe6013be0a96bec3ec136e5de7e3377e5a`.
+Source: a retail Crackdown disc image, the multi-language World release. All 196 required files were verified. Required Default.xex SHA-256: `7aaa7a8920d1c3c737e58cf583debafe6013be0a96bec3ec136e5de7e3377e5a`.
 
 ## Pinned sources and completed compatibility work
 

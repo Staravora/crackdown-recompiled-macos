@@ -62,11 +62,13 @@ Crackdown Recompiled is a native PC recompilation of Crackdown for Xbox 360, wit
 ### Platforms
 - **Windows** (primary): native build using Direct3D 12.
 - **Linux x86_64 and Steam Deck** (**Experimental**): native build using Vulkan, shipped as an AppImage. Not Proton or Wine.
+- **macOS on Apple silicon** (**Preview**): a native Mac app with its own Metal renderer, which draws the game directly on the GPU instead of through the emulated one. Signed and notarized.
 
 ## What you need
 
 - **Windows**: Windows 10 or 11, 64-bit, a DirectX 12 graphics card and the latest Microsoft Visual C++ 2015-2022 Redistributable (x64), **or**
 - **Linux / Steam Deck**: 64-bit x86 Linux with glibc 2.31 or newer, a Vulkan driver and an X11 or Wayland desktop
+- **Mac**: a Mac with Apple silicon (M1 or newer) and macOS 26 or newer
 - **Your own Crackdown disc** for Xbox 360, this exact game version:
 
 | | |
@@ -102,7 +104,18 @@ Windows may warn the first time you run the program, because the release is not 
 
 If the system cannot mount AppImages with FUSE, the AppImage unpacks itself into a temporary folder and runs from there. Everything is shared with Windows except **Graphics card selection**, which chooses a Direct3D 12 adapter and so exists on Windows only. Settings and saves are in `user_data`, and logs in `logs`, both next to the AppImage. Requirements, the startup behavior and building the AppImage are in [docs/linux.md](docs/linux.md).
 
-**No game files are included** in either download.
+### macOS
+
+**Preview.** A native Apple silicon build. Its Metal renderer is the default: faster than the emulated one, sharp at 1920×1080 on an M1, with a few effects still missing (see Known issues). The emulated renderer is one switch away on the **Graphics** page.
+
+1. Download **Crackdown-v0.6.2-macos-arm64.zip** from this repository's releases, open it, and drag **Crackdown Recompiled** to **Applications**.
+2. Open it. The launcher opens.
+3. On the **Play** page click **Install from disc image...** and pick your Crackdown `.iso`, or click **Install from folder...**. You can also drop either on the launcher window.
+4. Wait until **Ready to play** appears, then press **PLAY**.
+
+The game files, settings, saves and logs go in `~/Library/Application Support/Crackdown Recompiled`. The app updates itself when a new release comes out. **Metal resolution** on the **Graphics** page draws the game at 1280×720, 1920×1080 or 2560×1440; the M1 MacBook Air holds 30 FPS at 1920×1080.
+
+**No game files are included** in any download.
 
 ## Hotkeys
 
@@ -198,6 +211,7 @@ The launcher's **Achievements** page shows the same list without starting the ga
 ## Known issues
 
 - Background music may occasionally stop during gameplay while sound effects and voices continue.
+- **Mac, Metal renderer:** a green flash can show once before the main menu, some water differs from the Xbox, and a supply point's beam can be missing. A rare one-frame flicker has been seen. The emulated renderer on the **Graphics** page has none of these.
 
 ## Screenshots
 
@@ -225,6 +239,8 @@ In an existing clone, run `git submodule update --init --recursive`.
 4. `.\tools\build.ps1` builds `build\crackdown.exe`. It first checks that ReXGlue's runtime and Xenos GPU plugin in `tools\rexglue` were built from this project's patches (`patches\rexglue-sdk`) and rebuilds them from the v0.10.0 source when they were not (network access the first time). It does not regenerate the C++; when that is stale it says so.
 5. `.\tools\package-release.ps1` makes the release ZIP in `dist\`. It builds the same way, builds the update helper `trg-updater.exe` with MSYS2 CLANG64 (`pacman -S mingw-w64-clang-x86_64-toolchain`), refuses to package a runtime that does not match the patches, and publishes nothing.
 6. `.\tools\test.ps1` builds and runs the tests that need no game files.
+
+On a Mac with Apple silicon, `tools/build-macos.sh --run` downloads the pinned SDK, applies `patches/rexglue-sdk` and `patches/rexglue-sdk-macos`, builds the game and starts it with the files in `game/assets`. It needs Xcode's command-line tools and CMake. The Metal renderer's shaders come from your game files too: `tools/build-macos-shaders.sh <game folder> <data folder>/user_data/native-shaders <game binary>` makes them, with Xcode's Metal compiler. Without them the game uses the emulated renderer. `tools/stage-macos.sh` and `tools/package-macos.sh` assemble, sign and notarize the app.
 
 The Linux AppImage is built on Linux or WSL with `tools/package-linux.sh`, after the steps above have generated the C++, and `tools/build.sh` makes a plain Linux build without packaging. See [docs/linux.md](docs/linux.md) and [docs/build-workflow.md](docs/build-workflow.md).
 

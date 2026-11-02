@@ -98,9 +98,9 @@ trg::HeaderPainter LauncherHeader(ImTextureID art, float art_aspect) {
   };
 }
 
-// The Mac skin's backdrop: a picture the player keeps as launcher-backdrop.png or .jpg in their user data folder.
-// None ships with the app, as any Crackdown art is Microsoft's. Blurred 3 pixels in 1232 and saturated 1.1 times, as
-// the concept has it, once when it loads.
+// The Mac skin's backdrop: launcher-backdrop.png or .jpg from the player's user data folder, else the dusk skyline
+// the app ships (assets/launcher/README.md). Blurred 3 pixels in 1232 and saturated 1.1 times, as the concept has it,
+// once when it loads.
 struct Backdrop {
   std::unique_ptr<rex::ui::ImmediateTexture> texture;
   float aspect = 0.0f;
@@ -143,8 +143,10 @@ Backdrop LoadBackdrop(rex::ui::ImmediateDrawer* drawer, const std::filesystem::p
   if (!drawer) {
     return {};
   }
-  for (const char* name : {"launcher-backdrop.png", "launcher-backdrop.jpg"}) {
-    std::ifstream in(user_dir / name, std::ios::binary);
+  for (const std::filesystem::path& path :
+       {user_dir / "launcher-backdrop.png", user_dir / "launcher-backdrop.jpg",
+        crackdown::ResourceFolder() / "assets" / "launcher" / "backdrop-dusk.png"}) {
+    std::ifstream in(path, std::ios::binary);
     if (!in) {
       continue;
     }
@@ -152,7 +154,7 @@ Backdrop LoadBackdrop(rex::ui::ImmediateDrawer* drawer, const std::filesystem::p
     int width = 0, height = 0;
     std::vector<uint8_t> pixels = rex::ui::DecodeImageRGBA(encoded.data(), encoded.size(), width, height);
     if (pixels.empty() || width <= 0 || height <= 0) {
-      REXLOG_WARN("Launcher backdrop could not be decoded: {}", Utf8(user_dir / name));
+      REXLOG_WARN("Launcher backdrop could not be decoded: {}", Utf8(path));
       continue;
     }
     BlurAndSaturate(pixels, width, height);

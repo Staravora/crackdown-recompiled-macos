@@ -18,9 +18,13 @@ rm -f "$G/crackdown"
 cp "$W/game-build-macos/crackdown" "$G/crackdown"
 cat "$R/config/crackdown.toml" "$R/config/crackdown-macos.toml" > "$RES/crackdown.toml"
 cp "$R/packaging/glyphs/button_glyphs.dds" "$R/packaging/glyphs/button_glyphs.toml" "$RES/glyphs/"
-cp "$R/assets/launcher/header-art.png" "$RES/assets/launcher/"
+cp "$R/assets/launcher/header-art.png" "$R/assets/launcher/backdrop-dusk.png" "$RES/assets/launcher/"
 # The launcher's skin: Exo 2 and Michroma, with their licences (SIL OFL 1.1).
 cp "$R/packaging/fonts/"*.ttf "$R/packaging/fonts/"*-OFL.txt "$RES/fonts/"
+# Licences of everything the app ships.
+mkdir -p "$RES/licenses"
+cp "$R/LICENSE" "$RES/licenses/LICENSE.txt"
+cp "$R/packaging/licenses/ReXGlue-LICENSE.txt" "$R/packaging/licenses/THIRD-PARTY-LICENSES.txt" "$R/packaging/licenses/THIRD-PARTY-LICENSES-MACOS.txt" "$RES/licenses/"
 # The Vulkan loader finds MoltenVK through this, which the game points it at (UseBundledVulkanDriver).
 cat > "$RES/vulkan/icd.d/MoltenVK_icd.json" <<'JSON'
 {

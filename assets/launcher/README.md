@@ -19,3 +19,9 @@ $png = Join-Path (Resolve-Path assets/launcher).Path 'header-art.png'
 
 The launcher draws the PNG over its header gradient, anchored to the header's top-right corner at the
 full header height; the SVG's empty left side is what keeps the title readable.
+
+# Launcher backdrop (Mac)
+
+`backdrop-dusk.png` (1672x941) fills the window behind the Mac launcher's menu skin: a dusk skyline, an AI
+reinterpretation Bruce Porvaznik made for the port. The launcher blurs and saturates it when it loads and covers
+the window with it. A `launcher-backdrop.png` or `.jpg` in the player's user data folder takes its place.
