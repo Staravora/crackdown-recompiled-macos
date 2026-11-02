@@ -1,5 +1,16 @@
 # Session handoff
 
+## 2026-11-02 — 30 means 30 in Metal mode, and lighter texture checks
+- **Bruce's direction:** 1920×1080 at 30 is the target on the M1 Air. Every improvement on the way is wanted, and frame generation only if it can be made to hold up when jumping. In play, frame generation tore the player apart: camera-only motion gives him the world's motion while he moves with the camera.
+- **Pacing:** at 30 the title keeps its fixed step and its own limiter, which sleeps until 1000/32 ms after the frame starts. In Metal mode the host also paces on a 1/30 s grid. The title's sleeps woke late often enough to miss the grid, which then restarted, so 30 averaged 28.0–28.2. `LeavePacingToHost` in `frame_pacing.cpp` sets the title's limiter to its unlimited value when the host paces 30. The fixed step and game timing are unchanged. Result: 29.95 at 1280×720 and 29.70 at 1920×1080, median 33.3 ms. Before, frames ran 33–42 ms.
+- **Where Metal's encode time goes (profile):** about 70% is `TextureCache::FindTexture`, which re-checksums textures and reloads them. Three changes:
+  - **Per-page checks:** a watched host page covers four guest pages, so a write beside a texture marked the whole texture changed. About 230 textures a frame were checksummed whole and found unchanged. Each texture now keeps a version and checksum for every page, and only the pages that moved are checked.
+  - **Faster checksum:** it now runs four independent lanes.
+  - **Untiling:** fixed-size copies and word swaps for 1-, 2-, 4-, 8- and 16-byte blocks, in place of a `memcpy` call and a byte loop per block.
+- **Encode result:** 7.9 ms p50, down from 8.4–8.9, and uncapped 1280×720 runs at 48.9 FPS, up from 48.2. Most of what's left in `Load` is real loads. Encoding no longer limits 30.
+- **60 FPS on the M1 Air, measured:** uncapped 1280×720 gives about 49. The game's own work is about 16.5–17 ms a frame, at the limit, and Metal finishes a frame about 23 ms after hand-over. 1920×1080 needs 16.6 ms of GPU alone, so 1080p at 60 isn't realistic on the Air. The frame-rate option for faster Macs already exists, Gameplay → Frame rate, default 60. Game timings speeding up above 30 is still open.
+- **Emulated Render resolution has no 1.5×:** `draw_resolution_scale_x/y` are integers in the SDK, inherited from Xenia's EDRAM scaling. 1080p there is 2× with Internal render resolution at 75%. Metal resolution does have 1920×1080.
+
 ## 2026-11-02 — The game runs a frame ahead of Metal: higher resolutions cost nothing
 - **Found by a timeline trace:** after each swap, Present waits on the fence it wrote right after the previous swap. That fence is the device counter at that swap. A finished frame was reported as the counter less one, so that fence only passed when the *next* frame finished. The game waited for the frame it had just drawn, about 21 ms a frame, and every millisecond of encoding or GPU time added straight to the frame time.
 - **Checked before changing it:** between the swap and the end of that wait the counter goes up by exactly two, every frame. So Present writes both fences before the next frame draws anything, and the counter's value at the swap is preceded in the ring by that frame's work alone.

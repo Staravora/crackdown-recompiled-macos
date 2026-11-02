@@ -70,11 +70,19 @@ class TextureCache {
   uint32_t scene_width_ = 0;
   float scene_scale_ = 1.0f;
 
+  // A guest page of a texture's data, as of its last load.
+  struct PageCheck {
+    uint32_t version = 0;
+    uint64_t content = 0;
+  };
+
   struct Entry {
     int descriptor = 0;
     std::array<uint32_t, 6> fetch{};
     uint64_t version = 0;
-    uint64_t content = 0;
+    // By page, in order through both ranges. A write beside a texture bumps a page it shares, so only the pages that moved
+    // are hashed again, not the whole texture.
+    std::vector<PageCheck> pages;
     uint64_t checked_frame = 0;
   };
 

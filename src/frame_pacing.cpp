@@ -158,6 +158,16 @@ void SelectVariableStep(uint8_t* base, int rate) {
   }
 }
 
+// At 30 on the host's pacing the title keeps its fixed step, and with it its own limiter, which sleeps until 1000/32 ms
+// after the frame started. Its sleeps woke late often enough to miss the host's release, which then restarted its grid,
+// so 30 averaged 28. The host paces alone; the fixed step and the title's timing stay as shipped.
+void LeavePacingToHost(uint8_t* base) {
+  const uint32_t limiter = crackdown::LimiterFrameRateFor(crackdown::kFrameRateUnlimited);
+  if (LoadBE32(base, crackdown::Layout().limiter_frame_rate) != limiter) {
+    StoreBE32(base, crackdown::Layout().limiter_frame_rate, limiter);
+  }
+}
+
 // crackdown_debug_frame_dips: delays the frame's start, so the pacing below measures it as a late frame exactly like
 // one the GPU could not finish in time.
 void DebugFrameDip() {
@@ -240,6 +250,8 @@ void crackdown::hooks::FrameLoop(PPCContext& ctx, uint8_t* base, GuestFunction o
   BeginFrame(rate);
   if (HighFrameRate(rate)) {
     SelectVariableStep(base, rate);
+  } else if (HostPaced(rate)) {
+    LeavePacingToHost(base);
   }
   crackdown::UpdateButtonGlyphs(base);
   crackdown::NoteGuestFrame();

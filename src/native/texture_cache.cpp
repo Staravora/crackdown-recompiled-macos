@@ -1,6 +1,7 @@
 #include "texture_cache.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cstdlib>
@@ -75,17 +76,42 @@ uint64_t VersionOf(const Range& range) {
 
 // A watched page is 16 KB on this host, 4 guest pages, so a write beside a texture looks like a write to it. Comparing
 // what's there costs far less than reloading.
+// Four FNV-style lanes, so the multiplies don't wait on each other: hundreds of textures a frame get checked. Only ever
+// compared with itself.
 uint64_t ContentOf(const uint8_t* memory, size_t memory_bytes, const Range& range) {
-  uint64_t hash = 0xCBF29CE484222325ull;
+  constexpr uint64_t kPrime = 0x100000001B3ull;
+  std::array<uint64_t, 4> lanes = {0xCBF29CE484222325ull, 0x84222325CBF29CE4ull, 0x9E3779B97F4A7C15ull, 0xC2B2AE3D27D4EB4Full};
   if (uint64_t(range.start) + range.bytes > memory_bytes) {
-    return hash;
+    return lanes[0];
   }
-  for (size_t at = 0; at + 8 <= range.bytes; at += 8) {
+  const uint8_t* data = memory + range.start;
+  size_t at = 0;
+  for (; at + 32 <= range.bytes; at += 32) {
+    std::array<uint64_t, 4> words;
+    std::memcpy(words.data(), data + at, sizeof(words));
+    for (size_t i = 0; i < 4; ++i) {
+      lanes[i] = (lanes[i] ^ words[i]) * kPrime;
+    }
+  }
+  for (; at + 8 <= range.bytes; at += 8) {
     uint64_t word;
-    std::memcpy(&word, memory + range.start + at, sizeof(word));
-    hash = (hash ^ word) * 0x100000001B3ull;
+    std::memcpy(&word, data + at, sizeof(word));
+    lanes[0] = (lanes[0] ^ word) * kPrime;
   }
-  return hash;
+  return lanes[0] ^ std::rotl(lanes[1], 17) ^ std::rotl(lanes[2], 31) ^ std::rotl(lanes[3], 47);
+}
+
+// Calls f(page, part) for each guest page the ranges cover, part being the range clipped to that page.
+template <class F>
+void ForEachPage(const std::array<Range, 2>& ranges, F&& f) {
+  for (const Range& range : ranges) {
+    const uint64_t end = uint64_t(range.start) + range.bytes;
+    for (uint64_t at = range.start; at < end;) {
+      const uint64_t page_end = std::min(end, ((at >> kPageShift) + 1) << kPageShift);
+      f(uint32_t(std::min<uint64_t>(at >> kPageShift, kPages - 1)), Range{uint32_t(at), uint32_t(page_end - at)});
+      at = page_end;
+    }
+  }
 }
 
 std::pair<uint32_t, uint32_t> OnPagesChanged(void*, uint32_t start, uint32_t length, bool) {
@@ -171,6 +197,82 @@ void SwapBlock(uint8_t* block, uint32_t bytes, xenos::Endian endian) {
     for (uint32_t i = 0; i + 3 < bytes; i += 4) {
       std::swap(block[i], block[i + 2]);
       std::swap(block[i + 1], block[i + 3]);
+    }
+  }
+}
+
+uint32_t SwapWord(uint32_t word, xenos::Endian endian) {
+  switch (endian) {
+    case xenos::Endian::k8in16:
+      return ((word & 0x00FF00FFu) << 8) | ((word >> 8) & 0x00FF00FFu);
+    case xenos::Endian::k8in32:
+      return std::byteswap(word);
+    case xenos::Endian::k16in32:
+      return std::rotl(word, 16);
+    default:
+      return word;
+  }
+}
+
+// One face of one level, out of guest memory into rows of blocks, for blocks of whole 32-bit words: a fixed-size copy
+// and a word swap per block instead of a memcpy call and a byte loop.
+struct BlockCopy {
+  const uint8_t* memory;
+  size_t memory_bytes;
+  size_t face_address;
+  bool tiled;
+  uint32_t pitch_blocks;
+  uint32_t block_bytes_log2;
+  size_t row_pitch_bytes;
+  uint32_t offset_x;
+  uint32_t offset_y;
+  uint32_t blocks_x;
+  uint32_t blocks_y;
+  xenos::Endian endian;
+};
+
+// Blocks of one or two bytes, which SwapBlock only ever swaps within: two bytes for 8-in-16.
+template <uint32_t kBytes>
+void CopySmallBlocks(const BlockCopy& copy, uint8_t* output) {
+  const bool swap = kBytes == 2 && copy.endian == xenos::Endian::k8in16;
+  for (uint32_t y = 0; y < copy.blocks_y; ++y) {
+    uint8_t* row = output + size_t(y) * copy.blocks_x * kBytes;
+    for (uint32_t x = 0; x < copy.blocks_x; ++x) {
+      const size_t offset = copy.tiled ? size_t(texture_util::GetTiledOffset2D(int32_t(x + copy.offset_x), int32_t(y + copy.offset_y),
+                                                                              copy.pitch_blocks, copy.block_bytes_log2))
+                                       : size_t(y + copy.offset_y) * copy.row_pitch_bytes + size_t(x + copy.offset_x) * kBytes;
+      if (copy.face_address + offset + kBytes > copy.memory_bytes) {
+        continue;
+      }
+      const uint8_t* from = copy.memory + copy.face_address + offset;
+      uint8_t* to = row + size_t(x) * kBytes;
+      if constexpr (kBytes == 1) {
+        to[0] = from[0];
+      } else {
+        to[0] = from[swap ? 1 : 0];
+        to[1] = from[swap ? 0 : 1];
+      }
+    }
+  }
+}
+
+template <uint32_t kBytes>
+void CopyBlocks(const BlockCopy& copy, uint8_t* output) {
+  constexpr uint32_t kWords = kBytes / 4;
+  for (uint32_t y = 0; y < copy.blocks_y; ++y) {
+    for (uint32_t x = 0; x < copy.blocks_x; ++x) {
+      const size_t offset = copy.tiled ? size_t(texture_util::GetTiledOffset2D(int32_t(x + copy.offset_x), int32_t(y + copy.offset_y),
+                                                                              copy.pitch_blocks, copy.block_bytes_log2))
+                                       : size_t(y + copy.offset_y) * copy.row_pitch_bytes + size_t(x + copy.offset_x) * kBytes;
+      if (copy.face_address + offset + kBytes > copy.memory_bytes) {
+        continue;
+      }
+      std::array<uint32_t, kWords> words;
+      std::memcpy(words.data(), copy.memory + copy.face_address + offset, kBytes);
+      for (uint32_t& word : words) {
+        word = SwapWord(word, copy.endian);
+      }
+      std::memcpy(output + (size_t(y) * copy.blocks_x + x) * kBytes, words.data(), kBytes);
     }
   }
 }
@@ -405,15 +507,33 @@ int TextureCache::FindTexture(const uint32_t* fetch, int tile) {
             memory_->EnablePhysicalMemoryAccessCallbacks(range.start, range.bytes, true, false);
           }
         }
-        const uint64_t content = ContentOf(guest_memory_, guest_bytes_, ranges[0]) ^ ContentOf(guest_memory_, guest_bytes_, ranges[1]);
-        if (content == entry.content) {
+        // Each page's version is read before its data, so a write after the read shows up next time.
+        std::vector<PageCheck> pages = entry.pages;
+        bool changed = pages.empty();
+        size_t index = 0;
+        ForEachPage(ranges, [&](uint32_t page, const Range& part) {
+          if (index >= pages.size()) {
+            changed = true;
+            return;
+          }
+          PageCheck& check = pages[index++];
+          const uint32_t page_version = g_page_versions[page].load(std::memory_order_relaxed);
+          if (page_version != check.version) {
+            check.version = page_version;
+            const uint64_t content = ContentOf(guest_memory_, guest_bytes_, part);
+            changed |= content != check.content;
+            check.content = content;
+          }
+        });
+        if (!changed) {
           entry.version = version;
+          entry.pages = std::move(pages);
           ++textures_unchanged_;
         } else {
           const size_t budget_before = upload_budget_;
           if (Load(fetch, entry.descriptor) != int(kDummyDescriptor)) {
             entry.version = version;
-            entry.content = content;
+            entry.pages = std::move(pages);
             ++textures_reloaded_;
             reloaded_bytes_ += budget_before - upload_budget_;
           }
@@ -433,7 +553,9 @@ int TextureCache::FindTexture(const uint32_t* fetch, int tile) {
   if (has_layout) {
     ranges = RangesOf(decoded);
     entry.version = VersionOf(ranges[0]) + VersionOf(ranges[1]);
-    entry.content = ContentOf(guest_memory_, guest_bytes_, ranges[0]) ^ ContentOf(guest_memory_, guest_bytes_, ranges[1]);
+    ForEachPage(ranges, [&](uint32_t page, const Range& part) {
+      entry.pages.push_back({g_page_versions[page].load(std::memory_order_relaxed), ContentOf(guest_memory_, guest_bytes_, part)});
+    });
   }
   entry.descriptor = Load(fetch, -1);
   entry.checked_frame = frame_;
@@ -528,6 +650,20 @@ int TextureCache::Load(const uint32_t* fetch_dwords, int existing) {
     output.resize(size_t(blocks_x) * blocks_y * block_bytes);
     for (uint32_t face = 0; face < faces; ++face) {
       const size_t face_address = address + size_t(face) * guest.array_slice_stride_bytes;
+      const BlockCopy copy = {guest_memory_, guest_bytes_, face_address, bool(fetch.tiled), pitch_blocks, block_bytes_log2,
+                              guest.row_pitch_bytes, offset_x, offset_y, blocks_x, blocks_y, xenos::Endian(uint32_t(fetch.endianness))};
+      if (block_bytes == 1 || block_bytes == 2 || block_bytes == 4 || block_bytes == 8 || block_bytes == 16) {
+        switch (block_bytes) {
+          case 1: CopySmallBlocks<1>(copy, output.data()); break;
+          case 2: CopySmallBlocks<2>(copy, output.data()); break;
+          case 4: CopyBlocks<4>(copy, output.data()); break;
+          case 8: CopyBlocks<8>(copy, output.data()); break;
+          default: CopyBlocks<16>(copy, output.data()); break;
+        }
+        device_.FillTexture(descriptor, level, face, std::max(width >> level, 1u), std::max(height >> level, 1u), output.data(),
+                            size_t(blocks_x) * block_bytes);
+        continue;
+      }
       for (uint32_t y = 0; y < blocks_y; ++y) {
         for (uint32_t x = 0; x < blocks_x; ++x) {
           const size_t offset = fetch.tiled ? size_t(texture_util::GetTiledOffset2D(int32_t(x + offset_x), int32_t(y + offset_y),
