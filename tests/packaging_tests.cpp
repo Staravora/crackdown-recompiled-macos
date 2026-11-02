@@ -184,7 +184,8 @@ void TestRelaunchStillStartsTheAppImage() {
   CHECK(Has(relaunch, "appimage && *appimage ? std::string(appimage) : std::string(self_executable)"));
   const std::string platform = Read("src/platform.cpp");
   CHECK(Has(platform, "MakeRelaunchCommand(std::move(args), std::getenv(\"APPIMAGE\"), self, extra)"));
-  CHECK(Has(platform, "posix_spawn(&pid, command->executable.c_str(), nullptr, nullptr, argv.data(), environ)"));
+  // macOS has no environ in a dynamic library, so the environment comes from _NSGetEnviron there.
+  CHECK(Has(platform, "posix_spawn(&pid, command->executable.c_str(), nullptr, nullptr, argv.data(), environment)"));
 }
 
 void TestGuestSwitchRelaunchesTheSameProgram() {

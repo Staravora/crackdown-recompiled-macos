@@ -114,6 +114,7 @@ const std::vector<std::string> kGameSettingKeys = [] {
     keys.emplace_back(action.key);
   }
   keys.emplace_back("crackdown_trackpad_lock_on");
+  keys.emplace_back("crackdown_native_only");
   return keys;
 }();
 

@@ -171,10 +171,12 @@ void TestBindingsMatchTheRecord() {
   std::printf("each build's bindings are exactly the record's functions of that build\n");
   std::set<std::string> base, tu6;
   for (const Row& row : LoadMap()) {
-    if (row.kind != "fn" && row.kind != "call") {
+    if (row.kind != "fn" && row.kind != "call" && row.kind != "base") {
       continue;
     }
     CHECK(!row.tu0.empty());
+    // A base row is a hook that only the base build needs, such as the D3D census, so it has no Title Update 6 target.
+    CHECK(row.kind != "base" || row.tu6.empty());
     base.insert(Upper(row.tu0));
     if (!row.tu6.empty()) {
       tu6.insert(Upper(row.tu6));

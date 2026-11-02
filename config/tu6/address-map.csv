@@ -145,3 +145,18 @@ data,orb_list_vtable,820A83C8,820AD9D8,,,,,slots 0/1 are the matched position ge
 data,orb_supply_points,82DE2678,82E79AD4,,,,,allocation size 2816 (44 entries of 64 bytes) in both; the position getter indexes it at +64 with stride 64 in both
 data,orb_unset_pan,820722DC,820725DC,,,,,read by the orb pickup constructor and the pause map view's world-to-layout conversion identically in both
 data,orb_pan_factor,8207047C,82070594,,,,,base of the same constant block as orb_unset_pan in the pause map view's world-to-layout conversion
+base,D3D begin vertices,826B91E0,,,,,,base only: the census and native layer read base-game device fields; see docs/native-rendering-survey.md
+base,D3D begin indexed vertices,826B96D0,,,,,,base only: the census and native layer read base-game device fields; see docs/native-rendering-survey.md
+base,D3D draw vertices,826B9C08,,,,,,base only: the census and native layer read base-game device fields; see docs/native-rendering-survey.md
+base,D3D draw indexed,826B9FF8,,,,,,base only: the census and native layer read base-game device fields; see docs/native-rendering-survey.md
+base,D3D ring segment end,826BB1A0,,,,,,base only: the census and native layer read base-game device fields; see docs/native-rendering-survey.md
+base,D3D clear,826C04A0,,,,,,base only: the census and native layer read base-game device fields; see docs/native-rendering-survey.md
+base,D3D resolve,826BE578,,,,,,base only: the census and native layer read base-game device fields; see docs/native-rendering-survey.md
+base,D3D begin tiling,826BD488,,,,,,base only: the census and native layer read base-game device fields; see docs/native-rendering-survey.md
+base,D3D end tiling,826BDA38,,,,,,base only: the census and native layer read base-game device fields; see docs/native-rendering-survey.md
+base,D3D run command buffer,826C3750,,,,,,base only: the census and native layer read base-game device fields; see docs/native-rendering-survey.md
+base,D3D query issue,826C0B38,,,,,,base only: the census and native layer read base-game device fields; see docs/native-rendering-survey.md
+base,D3D query get data,826C0D38,,,,,,base only: the census and native layer read base-game device fields; see docs/native-rendering-survey.md
+base,D3D texture lock,826AE1C0,,,,,,base only: the census and native layer read base-game device fields; see docs/native-rendering-survey.md
+base,D3D create texture,826AEC58,,,,,,base only: the census and native layer read base-game device fields; see docs/native-rendering-survey.md
+base,D3D cache flush,826C4C70,,,,,,base only: the census and native layer read base-game device fields; see docs/native-rendering-survey.md

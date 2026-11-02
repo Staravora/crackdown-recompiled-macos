@@ -862,6 +862,12 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
   }
 
   void PageGraphics(trg::Ui& ui) {
+#if defined(__APPLE__)
+    ui.Toggle("Renderer",
+              "Metal draws the game natively instead of the emulated GPU. A preview: faster, and still missing a few "
+              "effects. Render resolution, internal resolution and multisampling don't apply to it yet.",
+              "crackdown_native_only", false, "Emulated", "Metal (preview)");
+#endif
     if (const std::optional<int> adapter = ResolveGraphicsAdapter(
             settings_.Get("crackdown_graphics_adapter"), graphics_adapters_)) {
       const std::string value = std::to_string(*adapter);

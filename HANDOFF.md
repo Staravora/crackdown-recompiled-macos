@@ -1,5 +1,13 @@
 # Session handoff
 
+## 2026-11-02 — Renderer choice in the launcher; two long-failing tests fixed
+- **Bruce's play-test in the main window:** "running well". 8 minutes at a median 29.2 FPS, lowest second 24.0. Closed normally. He also tried fullscreen.
+- **Launcher:** Graphics now starts with Renderer: Emulated or Metal (preview), saved as `crackdown_native_only` in `settings.toml`. macOS only. The launcher opens before the game starts its GPU and `shadow::Install` runs at Play, so the choice applies at once, with no relaunch. Checked by choosing Metal and pressing Play: the title screen came up drawn by Metal, paced on the host. Bruce's setting was put back to Emulated after the test. A `--crackdown_native_only` on the command line still wins over the saved choice.
+- **Tests:** the full suite had two failures nobody saw, because the usual run filters to the keyboard and action-key tests. Run the whole suite.
+  - `guest_layout_tests`: the D3D census hooks were never in `config/tu6/address-map.csv`. They're in now as a new kind, `base` (base-only hooks with no TU6 target), which the test accepts. The new query hook `826C0D38` is among them.
+  - `packaging_tests`: the relaunch check expected `environ`, but the macOS port uses `environment`, from `_NSGetEnviron`. Fixed.
+  - **Still failing, upstream:** two checks on `tools/package-release.ps1` lines Saulo changed in 757ad47 (2026-10-25) without updating his test. Left alone: Windows packaging is his.
+
 ## 2026-11-02 — Metal's picture in the main window
 - **How:** the emulator's swap reads the front buffer from guest memory, applies the gamma ramp, draws the ImGui overlays (cheat menu, frame counter, achievements, orb map, launcher) and presents. In `crackdown_native_only` Metal writes its own front buffer there, and that path does the rest unchanged. The SDK isn't touched.
   - **Which buffer:** `VdSwap`'s r4 points at the front buffer's texture header. `shadow::OnSwap` records it with the frame.
