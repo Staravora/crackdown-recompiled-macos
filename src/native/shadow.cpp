@@ -27,8 +27,10 @@
 #include <fmt/ranges.h>
 
 #include <rex/cvar.h>
+#include <rex/graphics/pipeline/texture/util.h>
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
+#include <rex/math.h>
 
 #include "../updater/sha256.h"
 #include "metal_device.h"
@@ -39,6 +41,9 @@ REXCVAR_DEFINE_BOOL(crackdown_native_shadow, false, "Crackdown",
 
 REXCVAR_DEFINE_BOOL(crackdown_native_shadow_window, false, "Crackdown", "Show shadow mode's picture in a window of its own");
 
+REXCVAR_DEFINE_BOOL(crackdown_native_exposure, false, "Crackdown",
+                    "With shadow mode on, the game's exposure reads Metal's picture rather than the emulator's");
+
 REXCVAR_DEFINE_BOOL(crackdown_native_shadow_debug, false, "Crackdown",
                     "Poll metal-debug.txt in the logs folder, so a running game can be examined from outside");
 
@@ -46,6 +51,7 @@ namespace crackdown::native::shadow {
 namespace {
 
 namespace xenos = rex::graphics::xenos;
+namespace texture_util = rex::graphics::texture_util;
 
 using Clock = std::chrono::steady_clock;
 
@@ -87,6 +93,11 @@ constexpr size_t kMaxPendingQueries = 8192;
 constexpr size_t kMaxQueryDisagreements = 32;
 constexpr uint64_t kSmallQuerySamples = 8;
 constexpr uint64_t kLargeQuerySamples = 64;
+constexpr uint32_t kReadbackCheckLocks = 30;  // Every 30th lock is compared.
+constexpr size_t kKeptReadbacks = 16;
+constexpr int kFarPixel = 8;
+constexpr uint32_t kPixelBytesLog2 = 2;
+constexpr uint64_t kExposureSkippedSamples = 600;  // The brightest few, which the game's exposure leaves out.
 constexpr int kQueryMarkId = 0xFF00;  // Magenta.
 constexpr std::array<double, 4> kQueryRatioBounds = {0.375, 0.75, 1.5, 3.0};
 
@@ -139,6 +150,7 @@ using FetchConstant = std::array<uint32_t, kFetchConstantDwords>;
 struct Run {
   std::optional<ResolveCopy> resolve;
   FetchConstant dest{};
+  uint64_t resolve_number = 0;  // How many resolves its texture has had, this one included.
   std::shared_ptr<const std::vector<BakedList>> lists;
   uint32_t pass_select = 0;
   uint32_t clear = 0;  // What the game cleared since the last run, as D3DCLEAR flags.
@@ -161,6 +173,44 @@ struct QueryEvent {
 struct QuerySlot {
   uint64_t id;
   uint32_t query;
+};
+
+// A texture's contents after a given resolve, by how many resolves it's had and its first page, so oldest sorts first.
+using ResolveKey = std::pair<uint64_t, uint32_t>;
+
+// Where a frame's readback holds a resolve.
+struct ReadbackSlot {
+  ResolveKey key;
+  size_t offset;
+  uint32_t width;
+  uint32_t height;
+};
+
+// What a frame hands the game back, in the order the slots of its results run.
+struct FrameAnswers {
+  std::vector<QuerySlot> queries;
+  std::vector<ReadbackSlot> readbacks;
+};
+
+// What the game saw when it locked a texture, for comparing with Metal's copy.
+struct GuestPixels {
+  std::vector<uint8_t> bytes;
+  uint32_t pitch;  // In pixels.
+  bool tiled;
+};
+
+// How Metal's copy of a resolve compares with what the game read, per byte of a pixel in guest memory, summed per comparison.
+struct ReadbackTotals {
+  uint64_t compared = 0;
+  uint64_t missed = 0;
+  uint64_t written = 0;
+  uint64_t late = 0;
+  std::array<double, 4> guest_mean{};
+  std::array<double, 4> metal_mean{};
+  std::array<double, 4> difference{};  // Mean absolute.
+  std::array<double, 4> far{};         // Share of pixels more than kFarPixel apart.
+  double guest_exposure = 0.0;
+  double metal_exposure = 0.0;
 };
 
 struct Frame {
@@ -232,6 +282,7 @@ struct QueryTotals {
   std::array<uint64_t, 3> metal_only_sizes{};  // Under kSmallQuerySamples, under kLargeQuerySamples, and the rest.
   std::vector<QueryDisagreement> disagreements;
   std::map<uint32_t, QueryAsks> asks;  // By where in the game they came from.
+  std::map<std::array<uint32_t, 5>, uint64_t> locks;  // By caller, base page, format, width and height.
   uint64_t quads = 0;
 };
 
@@ -257,6 +308,14 @@ uint64_t g_last_query = 0;
 std::unordered_map<uint32_t, uint64_t> g_latest_query;  // The last issue of each query object.
 std::map<uint64_t, QueryAnswers> g_query_answers;
 QueryTotals g_query_totals;
+
+std::mutex g_readback_mutex;
+std::unordered_map<uint32_t, uint64_t> g_resolve_numbers;  // By first page.
+std::set<std::array<uint32_t, 3>> g_read_textures;  // Page, width and height of what the game locks, which Metal copies out.
+std::map<ResolveKey, std::vector<uint8_t>> g_metal_pixels;
+std::map<ResolveKey, GuestPixels> g_guest_pixels;
+uint64_t g_locks_seen = 0;
+ReadbackTotals g_readback_totals;
 
 // Render thread only from here down.
 uint8_t* g_guest = nullptr;
@@ -855,6 +914,77 @@ void OnMetalSamples(const std::vector<QuerySlot>& slots, const uint64_t* samples
   }
 }
 
+// The mean of a histogram with the brightest few left out, which is near enough what the game's exposure works from.
+double ExposureOf(const std::array<uint64_t, 256>& histogram) {
+  uint64_t skipped = 0, samples = 0, sum = 0;
+  for (int value = 255; value >= 0; --value) {
+    const uint64_t skip = std::min(histogram[size_t(value)], kExposureSkippedSamples - skipped);
+    skipped += skip;
+    samples += histogram[size_t(value)] - skip;
+    sum += (histogram[size_t(value)] - skip) * uint64_t(value);
+  }
+  return samples ? double(sum) / double(samples) : 0.0;
+}
+
+// Where a pixel of a resolved texture sits, from the start of its memory.
+size_t GuestPixelOffset(uint32_t x, uint32_t y, uint32_t pitch, bool tiled) {
+  return tiled ? size_t(texture_util::GetTiledOffset2D(int32_t(x), int32_t(y), pitch, kPixelBytesLog2)) : (size_t(y) * pitch + x) * 4;
+}
+
+// Takes g_readback_mutex. Lays Metal's copy beside what the game read, if both are here.
+void CompareReadback(const ResolveKey& key, uint32_t width, uint32_t height) {
+  const auto metal = g_metal_pixels.find(key);
+  const auto guest = g_guest_pixels.find(key);
+  if (metal == g_metal_pixels.end() || guest == g_guest_pixels.end()) {
+    return;
+  }
+  std::array<std::array<uint64_t, 256>, 2> byte_zero{};
+  std::array<uint64_t, 4> guest_sum{}, metal_sum{}, difference{}, far{};
+  for (uint32_t y = 0; y < height; ++y) {
+    for (uint32_t x = 0; x < width; ++x) {
+      const size_t at = GuestPixelOffset(x, y, guest->second.pitch, guest->second.tiled);
+      if (at + 4 > guest->second.bytes.size()) {
+        continue;
+      }
+      const uint8_t* guest_pixel = guest->second.bytes.data() + at;
+      const uint8_t* metal_pixel = metal->second.data() + (size_t(y) * width + x) * 4;
+      ++byte_zero[0][guest_pixel[0]];
+      ++byte_zero[1][metal_pixel[3]];
+      for (size_t i = 0; i < 4; ++i) {
+        const int apart = std::abs(int(guest_pixel[i]) - int(metal_pixel[3 - i]));
+        guest_sum[i] += guest_pixel[i];
+        metal_sum[i] += metal_pixel[3 - i];
+        difference[i] += uint64_t(apart);
+        far[i] += apart > kFarPixel;
+      }
+    }
+  }
+  const double pixels = double(width) * height;
+  ReadbackTotals& totals = g_readback_totals;
+  ++totals.compared;
+  for (size_t i = 0; i < 4; ++i) {
+    totals.guest_mean[i] += double(guest_sum[i]) / pixels;
+    totals.metal_mean[i] += double(metal_sum[i]) / pixels;
+    totals.difference[i] += double(difference[i]) / pixels;
+    totals.far[i] += double(far[i]) / pixels;
+  }
+  totals.guest_exposure += ExposureOf(byte_zero[0]);
+  totals.metal_exposure += ExposureOf(byte_zero[1]);
+  g_guest_pixels.erase(guest);
+}
+
+void OnMetalPixels(const std::vector<ReadbackSlot>& slots, const uint8_t* pixels) {
+  std::lock_guard lock(g_readback_mutex);
+  for (const ReadbackSlot& slot : slots) {
+    const uint8_t* start = pixels + slot.offset;
+    g_metal_pixels[slot.key].assign(start, start + size_t(slot.width) * slot.height * 4);
+    CompareReadback(slot.key, slot.width, slot.height);
+    if (g_metal_pixels.size() > kKeptReadbacks) {
+      g_metal_pixels.erase(g_metal_pixels.begin());
+    }
+  }
+}
+
 void CopyResolve(const Run& run, MetalDevice& device, int target, int resolve, bool depth) {
   const ResolveCopy& copy = *run.resolve;
   xenos::xe_gpu_texture_fetch_t fetch;
@@ -915,7 +1045,7 @@ void ClearAfterResolve(const Run& run, MetalDevice& device, int target) {
 }
 
 // A target nothing has drawn to this frame holds nothing worth copying, so the texture goes back to what guest memory has.
-void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& drawn, int& current_target) {
+void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& drawn, int& current_target, std::vector<ReadbackSlot>& readbacks) {
   const ResolveCopy& copy = *run.resolve;
   xenos::xe_gpu_texture_fetch_t fetch;
   std::memcpy(&fetch, run.dest.data(), sizeof(fetch));
@@ -937,6 +1067,15 @@ void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& draw
   const bool clears = (copy.flags & (kResolveClearColor | kResolveClearDepth)) != 0 && target >= 0 && drawn.contains(target);
   if (resolve >= 0) {
     CopyResolve(run, device, target, resolve, depth);
+    bool read = false;
+    {
+      std::lock_guard lock(g_readback_mutex);
+      read = !depth && g_read_textures.contains({uint32_t(fetch.base_address), uint32_t(fetch.size_2d.width) + 1, uint32_t(fetch.size_2d.height) + 1});
+    }
+    const size_t offset = read ? device.ReadResolve(resolve) : SIZE_MAX;
+    if (offset != SIZE_MAX) {
+      readbacks.push_back({{run.resolve_number, uint32_t(fetch.base_address)}, offset, uint32_t(fetch.size_2d.width) + 1, uint32_t(fetch.size_2d.height) + 1});
+    }
   } else if (copy.texture) {
     ++g_totals.missed_resolves;
     g_textures->ForgetResolve(run.dest.data());
@@ -949,7 +1088,8 @@ void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& draw
   }
 }
 
-void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, std::vector<QuerySlot>& query_slots) {
+void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswers& answers) {
+  std::vector<QuerySlot>& query_slots = answers.queries;
   g_debug_id = 0;
   g_debug_stopped = false;
   device.CaptureAlpha(g_debug_alpha);
@@ -980,7 +1120,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, std::vecto
     apply_queries(run_number);
     if (run.resolve) {
       if (!g_debug_stopped) {
-        ApplyResolve(run, device, cleared, current_target);
+        ApplyResolve(run, device, cleared, current_target, answers.readbacks);
       }
       continue;
     }
@@ -1339,6 +1479,27 @@ void Report(const MetalDevice& device) {
   for (const auto& [caller, count] : queries.asks) {
     asks += fmt::format(R"({}"{:08X}":{{"waiting":{},"none":{},"some":{},"largest":{}}})", asks.empty() ? "" : ",", caller, count.waiting, count.none, count.some, count.largest);
   }
+  std::string locks;
+  for (const auto& [key, count] : queries.locks) {
+    locks += fmt::format(R"({}["{:08X}","{:05X}",{},{},{},{}])", locks.empty() ? "" : ",", key[0], key[1], key[2], key[3], key[4], count);
+  }
+  out << fmt::format(R"("locks":[{}],)", locks);
+  ReadbackTotals readbacks;
+  {
+    std::lock_guard lock(g_readback_mutex);
+    readbacks = std::exchange(g_readback_totals, {});
+  }
+  const double compared = double(std::max<uint64_t>(readbacks.compared, 1));
+  const auto means = [&](const auto& values) {
+    std::string joined;
+    for (const double value : values) {
+      joined += fmt::format("{}{:.3f}", joined.empty() ? "" : ",", value / compared);
+    }
+    return joined;
+  };
+  out << fmt::format(R"("readback":{{"compared":{},"missed":{},"written":{},"late":{},"guest_mean":[{}],"metal_mean":[{}],"difference":[{}],"far":[{}],"guest_exposure":{:.3f},"metal_exposure":{:.3f}}},)",
+                     readbacks.compared, readbacks.missed, readbacks.written, readbacks.late, means(readbacks.guest_mean), means(readbacks.metal_mean), means(readbacks.difference),
+                     means(readbacks.far), readbacks.guest_exposure / compared, readbacks.metal_exposure / compared);
   out << fmt::format(R"("queries":{{"both_none":{},"both_some":{},"metal_only":{},"emulator_only":{},"unanswered":{},"no_room":{},"quads":{},"samples_ratio":{:.3f},"ratios":[{}],"metal_only_sizes":[{}],"asks":{{{}}},"disagreements":[{}]}}}})",
                      queries.both_none, queries.both_some, queries.metal_only, queries.emulator_only, queries.unanswered, g_totals.queries_no_room, queries.quads,
                      double(queries.metal_samples) / double(std::max<uint64_t>(queries.emulator_samples, 1)), fmt::join(queries.ratios, ","), fmt::join(queries.metal_only_sizes, ","), asks, disagreements);
@@ -1434,10 +1595,12 @@ void RenderThread() {
         g_dump = dump.get();
       }
     }
-    auto query_slots = std::make_shared<std::vector<QuerySlot>>();
+    auto answers = std::make_shared<FrameAnswers>();
     const MetalFrameTiming timing =
-        device->RecordFrame([&](uint8_t* memory) { Encode(*frame, *device, memory, *query_slots); }, capture,
-                            [query_slots](const uint64_t* samples) { OnMetalSamples(*query_slots, samples); });
+        device->RecordFrame([&](uint8_t* memory) { Encode(*frame, *device, memory, *answers); }, capture, [answers](const MetalFrameResults& results) {
+          OnMetalSamples(answers->queries, results.query_samples);
+          OnMetalPixels(answers->readbacks, results.readback);
+        });
     g_dump = nullptr;
     frame->runs.clear();
     frame->queries.clear();
@@ -1537,14 +1700,86 @@ void OnResolve(const ResolveCopy& copy, const Targets& targets, const uint8_t* b
     }
     TextureCache::MarkResolved(fetch.data());
   }
+  uint64_t resolve_number = 0;
+  if (copy.texture) {
+    xenos::xe_gpu_texture_fetch_t decoded;
+    std::memcpy(&decoded, fetch.data(), sizeof(decoded));
+    std::lock_guard lock(g_readback_mutex);
+    resolve_number = ++g_resolve_numbers[uint32_t(decoded.base_address)];
+  }
   std::lock_guard lock(g_mutex);
   if (copy.texture) {
     g_resolved_this_frame.push_back(fetch);
   }
   Run& run = g_current->runs.emplace_back();
   run.resolve = copy;
+  run.resolve_number = resolve_number;
   run.dest = fetch;
   run.targets = targets;
+}
+
+void OnTextureLock(uint32_t caller, uint32_t texture, const uint8_t* base) {
+  if (!Enabled() || !texture) {
+    return;
+  }
+  FetchConstant fetch{};
+  std::memcpy(fetch.data(), base + texture + kTextureFetchConstant + rex::memory::detail::PhysicalHostOffset(texture), sizeof(fetch));
+  for (uint32_t& dword : fetch) {
+    dword = std::byteswap(dword);
+  }
+  xenos::xe_gpu_texture_fetch_t decoded;
+  std::memcpy(&decoded, fetch.data(), sizeof(decoded));
+  const uint32_t page = uint32_t(decoded.base_address), width = uint32_t(decoded.size_2d.width) + 1, height = uint32_t(decoded.size_2d.height) + 1;
+  {
+    std::lock_guard lock(g_query_mutex);
+    ++g_query_totals.locks[{caller, page, uint32_t(decoded.format), width, height}];
+  }
+  if (xenos::TextureFormat(uint32_t(decoded.format)) != xenos::TextureFormat::k_8_8_8_8) {
+    return;
+  }
+  std::lock_guard lock(g_readback_mutex);
+  g_read_textures.insert({page, width, height});
+  const auto number = g_resolve_numbers.find(page);
+  const bool check = ++g_locks_seen % kReadbackCheckLocks == 0;
+  const bool use_metal = REXCVAR_GET(crackdown_native_exposure);
+  if (number == g_resolve_numbers.end() || (!check && !use_metal)) {
+    return;
+  }
+  // A tiled surface runs past its last row, up to the next whole tile.
+  const uint32_t pitch = uint32_t(decoded.pitch) * 32;
+  const size_t bytes = size_t(pitch) * rex::align(height, 32u) * 4;
+  const uint32_t address = ((page << 12) & kGuestMask) + rex::memory::detail::PhysicalHostOffset(page << 12);
+  if (!pitch || address + bytes > kGuestBytes) {
+    return;
+  }
+  const ResolveKey key = {number->second, page};
+  if (check) {
+    GuestPixels& pixels = g_guest_pixels[key];
+    pixels.bytes.assign(g_guest + address, g_guest + address + bytes);
+    pixels.pitch = pitch;
+    pixels.tiled = decoded.tiled;
+    CompareReadback(key, width, height);
+    if (g_guest_pixels.size() > kKeptReadbacks) {
+      g_guest_pixels.erase(g_guest_pixels.begin());
+      ++g_readback_totals.missed;
+    }
+  }
+  if (use_metal) {
+    const auto metal = g_metal_pixels.find(key);
+    if (metal == g_metal_pixels.end()) {
+      ++g_readback_totals.late;
+      return;
+    }
+    for (uint32_t y = 0; y < height; ++y) {
+      for (uint32_t x = 0; x < width; ++x) {
+        uint32_t pixel;
+        std::memcpy(&pixel, metal->second.data() + (size_t(y) * width + x) * 4, sizeof(pixel));
+        pixel = std::byteswap(pixel);
+        std::memcpy(g_guest + address + GuestPixelOffset(x, y, pitch, decoded.tiled), &pixel, sizeof(pixel));
+      }
+    }
+    ++g_readback_totals.written;
+  }
 }
 
 void OnQuery(uint32_t query, bool begin) {

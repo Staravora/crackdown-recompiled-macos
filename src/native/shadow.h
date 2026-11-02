@@ -64,6 +64,8 @@ void OnResolve(const ResolveCopy& copy, const Targets& targets, const uint8_t* b
 void OnQuery(uint32_t query, bool begin);
 // ready is false while the game asks and the answer hasn't come. caller is where in the game it asked from.
 void OnQueryAsked(uint32_t caller, uint32_t query, bool ready, uint32_t samples);
+// The game locks a texture to read it. caller is where in the game it did.
+void OnTextureLock(uint32_t caller, uint32_t texture, const uint8_t* base);
 void SetRingDesyncs(uint64_t desyncs);
 void SetGammaRamp(const uint32_t* ramp);
 #else
@@ -79,6 +81,7 @@ inline void CountDirectDraw() {}
 inline void OnResolve(const ResolveCopy&, const Targets&, const uint8_t*) {}
 inline void OnQuery(uint32_t, bool) {}
 inline void OnQueryAsked(uint32_t, uint32_t, bool, uint32_t) {}
+inline void OnTextureLock(uint32_t, uint32_t, const uint8_t*) {}
 inline void SetRingDesyncs(uint64_t) {}
 inline void SetGammaRamp(const uint32_t*) {}
 #endif

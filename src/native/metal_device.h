@@ -154,12 +154,19 @@ struct MetalDraw {
   int32_t base_vertex = 0;
 };
 
+// What a frame leaves behind once the GPU is done with it.
+struct MetalFrameResults {
+  const uint64_t* query_samples = nullptr;  // What each query slot counted.
+  const uint8_t* readback = nullptr;        // Pixels from ReadResolve, as it placed them.
+};
+
 // The only part of the native layer that touches Metal, so the rest stays plain C++. Everything but gpu_totals() is for
 // one thread.
 class MetalDevice {
  public:
   static constexpr int kFramesInFlight = 3;
   static constexpr uint32_t kMaxQueries = 1024;
+  static constexpr size_t kReadbackBytes = 1 << 20;
 
   // Wraps guest memory for the GPU without copying it. Compiling pipelines makes this slow, so call it off the game's
   // threads. Returns null if the Mac has no Metal device.
@@ -199,9 +206,9 @@ class MetalDevice {
 
   // Records and submits one frame. encode gets that frame's memory and calls BeginPass, Draw and ShowTarget. If capture
   // isn't empty, waits for the GPU and writes the shown target there as a PNG. finished runs on a Metal thread when the GPU
-  // is done, with the samples each query slot counted.
+  // is done.
   virtual MetalFrameTiming RecordFrame(const std::function<void(uint8_t* frame)>& encode, const std::filesystem::path& capture,
-                                       const std::function<void(const uint64_t* query_samples)>& finished) = 0;
+                                       const std::function<void(const MetalFrameResults&)>& finished) = 0;
 
   // Ends any open pass and starts one on a target.
   virtual void BeginPass(int target, const MetalClear& clear) = 0;
@@ -212,6 +219,11 @@ class MetalDevice {
   virtual void CopyTarget(const MetalCopy& copy) = 0;
   virtual void ClearRect(const MetalRectClear& clear) = 0;
   virtual void CopyDepthToStack(int target, int stack, uint32_t slice) = 0;
+
+  // Queues a resolve's pixels for MetalFrameResults::readback, at width * 4 bytes a row, as Metal holds them: each is the
+  // reverse of the four bytes in guest memory. Returns where in it they'll be, or SIZE_MAX if they don't fit. Ends any open
+  // pass.
+  virtual size_t ReadResolve(int resolve) = 0;
 
   // Which colour target this frame's window and capture show, and whether it goes through the gamma ramp on the way, as
   // the Xenos's display does.

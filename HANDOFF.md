@@ -1,5 +1,26 @@
 # Session handoff
 
+## 2026-11-02 — Exposure readback from Metal
+- **What the game reads:** one lock site, `825AA170`, once a frame, rotating through three 320x180 8888 textures at `F9578`, `F95B6` and `F95F4`. Each is read about two frames after it's resolved. Nothing else showed up in a 300-frame street run. A read that doesn't lock wouldn't show.
+- **What it does with them:** auto-exposure. A 256-bin histogram of byte 0 of every pixel, leaving out the brightest 600 samples or so. Byte 0 is the target's alpha, so the other three bytes don't matter to the game.
+- **What's in:** `ReadResolve` copies a resolve to a shared buffer in the frame, for any texture the game has locked, matched on page and size. Every 30th lock compares it with what the game is about to read. `crackdown_native_exposure` (default off) overwrites guest memory at the lock, so the game really reads Metal's picture.
+- **Layout, for the takeover:** guest pixels are tiled, and each is Metal's four bytes reversed. Addresses from `0xE0000000` up sit `0x1000` further along, which cost one wrong run: the picture came out shifted one 32x32 tile.
+- **Results, with the switch on, comparing ten pictures per run:**
+
+| Spot | Emulator input | Metal input | Reads served by Metal |
+|---|---|---|---|
+| Shift+3 street | 75.01 | 75.06 | 301, none late |
+| Tunnel | 76.16 | 73.15 | 300, none late |
+| Ocean high | 110.02 | 117.42 | 300, none late |
+
+- **Street, pixel by pixel:** byte 0 differs by about 1 level of 255, with 1 to 2% of pixels more than 8 apart. Fine, and the input is the mean the game works from, near enough, but not its exact sum.
+- **Tunnel and ocean:** only byte 0 is off, because the water's alpha differs. The water shader's alpha is a shoreline fade: `lerp(1, fade, w)`, where `fade` comes from scene depth (`DepthTexture`) minus the water's depth. At the tunnel spot Metal has alpha 0 in a wedge at lower left, on the water over the dock wall, where the emulator doesn't. At sea, Metal has a bright vertical streak and the water reads a little brighter. Not caused by the stencil fans: turning off their depth test changed nothing. Scene depth at those pixels is the next thing to check. It's likely tied to the far-water band too, but that's a guess.
+- **Effect on play:** exposure would run 4% to 7% off the emulator's at those spots. Not looked at in motion: the switch has only had timed runs from a fixed camera, so nobody has watched it for flicker.
+- **Texture loader:** `RangesOf` and the texture read now add that same `0x1000`, through `PhysicalOf`. `FirstPageOf` already did. Any texture loaded from that range was reading one page early. Street differences didn't change, and I don't know whether any live texture was affected.
+- **For the takeover:** write on Metal's completion rather than at the lock, since there'll be no emulator to overwrite it. Keep the two frames the game allows: every read so far found Metal's copy ready. That headroom shrinks if Metal falls behind, so a frame that isn't ready needs handling.
+- **Report:** `readback` and `locks` in `native-shadow-*.json`.
+- **Try it:** add `--crackdown_native_exposure=true` to the launch.
+
 ## 2026-11-02 — Occlusion queries counted in Metal, side by side with the emulator
 - **What's in:** Metal gives every occlusion query its own visibility slot, in counting mode, in the pass. `826C0B38` (issue) marks where queries begin and end in the stream, after reading the ring up to that point so a query's own draws land inside it. `826C0D38` (get data) is hooked for the emulator's answer. Query quads now draw, as depth tests with no pixel shader and no colour, through `ColorlessPipeline`. They were skipped before.
 - **Agreement, Shift+3 street by day, last 300 frames of each run:** visible or hidden matches on about 96% of queries. Last run: both hidden 16891, both visible 5962, Metal only 622, emulator only 236.

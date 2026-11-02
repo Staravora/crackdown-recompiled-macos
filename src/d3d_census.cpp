@@ -746,6 +746,7 @@ void CensusQueryData(PPCContext& ctx, uint8_t* base, GuestFunction original) {
 
 void CensusTextureLock(PPCContext& ctx, uint8_t* base, GuestFunction original) {
   native::textures::OnLock(ctx.r3.u32);
+  native::shadow::OnTextureLock(uint32_t(ctx.lr), ctx.r3.u32, base);
   if (census::Counting()) {
     const auto fetch = census::DecodeFetch(census::GuestPointer(base, ctx.r3.u32 + census::kTextureFetchConstant));
     std::lock_guard lock(census::g_mutex);

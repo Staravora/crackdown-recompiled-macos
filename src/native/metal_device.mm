@@ -269,6 +269,7 @@ class MetalDeviceImpl final : public MetalDevice {
     for (size_t i = 0; i < frames_.size(); ++i) {
       frames_[i] = [device_ newBufferWithLength:frame_bytes options:untracked | MTLResourceCPUCacheModeWriteCombined];
       query_samples_[i] = [device_ newBufferWithLength:kMaxQueries * sizeof(uint64_t) options:MTLResourceStorageModeShared];
+      readbacks_[i] = [device_ newBufferWithLength:kReadbackBytes options:MTLResourceStorageModeShared];
     }
     elements_ = [device_ newBufferWithLength:kElementsBytes options:untracked];
 
@@ -602,8 +603,31 @@ class MetalDeviceImpl final : public MetalDevice {
     [blit endEncoding];
   }
 
+  size_t ReadResolve(int resolve) override {
+    EndPass();
+    id<MTLTexture> texture = resolves_[size_t(resolve)];
+    const size_t row = texture.width * 4, bytes = row * texture.height;
+    if (texture.pixelFormat != MTLPixelFormatBGRA8Unorm || readback_used_ + bytes > kReadbackBytes) {
+      return SIZE_MAX;
+    }
+    const size_t offset = readback_used_;
+    readback_used_ += bytes;
+    id<MTLBlitCommandEncoder> blit = [buffer_ blitCommandEncoder];
+    [blit copyFromTexture:texture
+                     sourceSlice:0
+                     sourceLevel:0
+                    sourceOrigin:MTLOriginMake(0, 0, 0)
+                      sourceSize:MTLSizeMake(texture.width, texture.height, 1)
+                        toBuffer:frame_readback_
+               destinationOffset:offset
+          destinationBytesPerRow:row
+        destinationBytesPerImage:bytes];
+    [blit endEncoding];
+    return offset;
+  }
+
   MetalFrameTiming RecordFrame(const std::function<void(uint8_t* frame)>& encode, const std::filesystem::path& capture,
-                               const std::function<void(const uint64_t* query_samples)>& finished) override {
+                               const std::function<void(const MetalFrameResults&)>& finished) override {
     MetalFrameTiming timing;
     @autoreleasepool {
       const Clock::time_point wait_start = Clock::now();
@@ -619,6 +643,9 @@ class MetalDeviceImpl final : public MetalDevice {
       id<MTLBuffer> query_samples = query_samples_[slot_];
       frame_query_samples_ = query_samples;
       std::memset(query_samples.contents, 0, query_samples.length);
+      id<MTLBuffer> readback_pixels = readbacks_[slot_];
+      frame_readback_ = readback_pixels;
+      readback_used_ = 0;
       slot_ = (slot_ + 1) % kFramesInFlight;
       frame_address_ = frame_.gpuAddress;
       shown_target_ = -1;
@@ -664,7 +691,7 @@ class MetalDeviceImpl final : public MetalDevice {
       }
 
       dispatch_semaphore_t slots = slots_;
-      std::function<void(const uint64_t*)> report_queries = finished;
+      std::function<void(const MetalFrameResults&)> report_results = finished;
       [buffer addCompletedHandler:^(id<MTLCommandBuffer> done) {
         if (done.status == MTLCommandBufferStatusError) {
           errors_.fetch_add(1, std::memory_order_relaxed);
@@ -677,8 +704,8 @@ class MetalDeviceImpl final : public MetalDevice {
         while (worst < gpu_ns && !worst_gpu_ns_.compare_exchange_weak(worst, gpu_ns, std::memory_order_relaxed)) {
         }
         completed_.fetch_add(1, std::memory_order_relaxed);
-        if (report_queries) {
-          report_queries(static_cast<const uint64_t*>(query_samples.contents));
+        if (report_results) {
+          report_results({static_cast<const uint64_t*>(query_samples.contents), static_cast<const uint8_t*>(readback_pixels.contents)});
         }
         dispatch_semaphore_signal(slots);
       }];
@@ -1131,6 +1158,9 @@ class MetalDeviceImpl final : public MetalDevice {
   std::array<id<MTLBuffer>, kFramesInFlight> frames_{};
   std::array<id<MTLBuffer>, kFramesInFlight> query_samples_{};
   id<MTLBuffer> frame_query_samples_ = nil;
+  std::array<id<MTLBuffer>, kFramesInFlight> readbacks_{};
+  id<MTLBuffer> frame_readback_ = nil;
+  size_t readback_used_ = 0;
   std::array<id<MTLBuffer>, kDescriptorHeaps> heaps_{};
   std::vector<Pipeline> pipelines_;
   std::vector<PixelShader> pixel_shaders_;

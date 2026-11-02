@@ -90,6 +90,11 @@ std::pair<uint32_t, uint32_t> OnPagesChanged(void*, uint32_t start, uint32_t len
   return {start, length};
 }
 
+// Addresses from 0xE0000000 up sit a page further along in physical memory.
+uint32_t PhysicalOf(uint32_t address) {
+  return (address & kPhysicalMask) + (address >> kPageShift >= kMirrorFirstPage ? 1u << kPageShift : 0);
+}
+
 // The memory a texture reads: its top level, then its mips.
 std::array<Range, 2> RangesOf(const xenos::xe_gpu_texture_fetch_t& fetch) {
   const xenos::TextureFormat format = xenos::TextureFormat(uint32_t(fetch.format));
@@ -99,8 +104,8 @@ std::array<Range, 2> RangesOf(const xenos::xe_gpu_texture_fetch_t& fetch) {
   const texture_util::TextureGuestLayout layout = texture_util::GetGuestTextureLayout(
       cube ? xenos::DataDimension::kCube : xenos::DataDimension::k2DOrStacked, fetch.pitch, width, height, cube ? kCubeFaces : 1,
       fetch.tiled, format, fetch.packed_mips, true, mip_address ? uint32_t(fetch.mip_max_level) : 0);
-  return {Range{(uint32_t(fetch.base_address) << 12) & kPhysicalMask, layout.base.level_data_extent_bytes},
-          Range{mip_address & kPhysicalMask, mip_address ? layout.mips_total_extent_bytes : 0}};
+  return {Range{PhysicalOf(uint32_t(fetch.base_address) << 12), layout.base.level_data_extent_bytes},
+          Range{PhysicalOf(mip_address), mip_address ? layout.mips_total_extent_bytes : 0}};
 }
 
 std::optional<MetalTextureFormat> MetalFormatOf(xenos::TextureFormat format, bool gamma) {
@@ -502,8 +507,8 @@ int TextureCache::Load(const uint32_t* fetch_dwords, int existing) {
       texture_util::GetGuestTextureLayout(cube ? xenos::DataDimension::kCube : xenos::DataDimension::k2DOrStacked, fetch.pitch, width,
                                           height, faces, fetch.tiled, format, fetch.packed_mips, true, levels - 1);
   const uint32_t block_bytes_log2 = std::bit_width(block_bytes) - 1;
-  const size_t base_address = (size_t(uint32_t(fetch.base_address)) << 12) & (guest_bytes_ - 1);
-  const size_t mips_address = size_t(mip_address) & (guest_bytes_ - 1);
+  const size_t base_address = PhysicalOf(uint32_t(fetch.base_address) << 12);
+  const size_t mips_address = PhysicalOf(mip_address);
   std::vector<uint8_t> output;
   for (uint32_t level = 0; level < levels; ++level) {
     // A level in the packed tail shares the tail's storage, at an offset within it.
