@@ -225,6 +225,10 @@ class MetalDevice {
   // pass.
   virtual size_t ReadResolve(int resolve) = 0;
 
+  // Writes a resolve into guest memory at byte offset at, as the Xenos lays out a 32-bit texture: by 32x32 tiles if
+  // tiled, and with each pixel's bytes reversed if swap. Pitch is in pixels. Ends any open pass.
+  virtual bool WriteResolveToGuest(int resolve, size_t at, uint32_t pitch, bool tiled, bool swap) = 0;
+
   // Which colour target this frame's window and capture show, and whether it goes through the gamma ramp on the way, as
   // the Xenos's display does.
   virtual void ShowTarget(int target, bool gamma) = 0;

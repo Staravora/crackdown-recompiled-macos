@@ -18,6 +18,7 @@
 #include "benchmark.h"
 #include "guest_hooks.h"
 #include "guest_layout.h"
+#include "native/shadow.h"
 #include "platform.h"
 #include "settings.h"
 #include "window_title.h"
@@ -149,8 +150,10 @@ void crackdown::hooks::SwapBuilder(PPCContext& ctx, uint8_t* base, GuestFunction
 
 // Named like the SDK's export, so REX_EXTERN would call this hook again: the original is called by its entry point.
 REX_HOOK_RAW(__imp__VdSwap) {
+  const uint32_t fetch_address = ctx.r4.u32;
   rex::ppc::HostToGuestFunction<rex::kernel::xboxkrnl::VdSwap_entry>(ctx, base);
   if (!t_repeat_present) {
+    crackdown::native::shadow::OnSwap(fetch_address, base);
     crackdown::CountGuestFrame();
     crackdown::benchmark::OnGuestFrame();
   }

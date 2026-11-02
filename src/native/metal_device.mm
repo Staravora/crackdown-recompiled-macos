@@ -89,6 +89,32 @@ fragment float4 display_fragment(float4 position [[position]], texture2d<float> 
   uint3 color = uint3(source.read(uint2(position.xy)).rgb * 255.0 + 0.5);
   return float4(ramp.read(color.r).r, ramp.read(color.g).g, ramp.read(color.b).b, 1.0);
 }
+// A picture into guest memory as the Xenos lays out a 32-bit texture: by 32x32 tiles, as texture_util::GetTiledOffset2D
+// does, and with each pixel's four bytes reversed from Metal's order for an 8-in-32 texture.
+struct GuestWrite {
+  uint at;
+  uint pitch;
+  uint tiled;
+  uint swap;
+};
+uint tiled_offset(int x, int y, uint pitch) {
+  pitch = (pitch + 31) & ~31u;
+  int macro = ((x >> 5) + (y >> 5) * int(pitch >> 5)) << 9;
+  int micro = ((x & 7) + ((y & 0xE) << 2)) << 2;
+  int offset = macro + ((micro & ~0xF) << 1) + (micro & 0xF) + ((y & 1) << 4);
+  return uint(((offset & ~0x1FF) << 3) + ((y & 16) << 7) + ((offset & 0x1C0) << 2) + (((((y & 8) >> 2) + (x >> 3)) & 3) << 6) +
+              (offset & 0x3F));
+}
+kernel void write_guest(texture2d<float, access::read> picture [[texture(0)]], device uint* guest [[buffer(0)]],
+                        constant GuestWrite& write [[buffer(1)]], uint2 at [[thread_position_in_grid]]) {
+  if (at.x >= picture.get_width() || at.y >= picture.get_height()) {
+    return;
+  }
+  const uint4 c = uint4(round(saturate(picture.read(at)) * 255.0));
+  const uint value = write.swap ? (c.a | (c.r << 8) | (c.g << 16) | (c.b << 24)) : (c.b | (c.g << 8) | (c.r << 16) | (c.a << 24));
+  const uint offset = write.tiled ? tiled_offset(int(at.x), int(at.y), write.pitch) : (at.y * write.pitch + at.x) * 4;
+  guest[(write.at + offset) / 4] = value;
+}
 fragment float4 clay_fragment(float4 position [[position]], constant float4& tint [[buffer(4)]]) {
   if (tint.a > 0.5) {
     return tint;
@@ -301,6 +327,7 @@ class MetalDeviceImpl final : public MetalDevice {
     ramp.width = kGammaEntries;
     ramp.storageMode = MTLStorageModeShared;
     gamma_ramp_ = [device_ newTextureWithDescriptor:ramp];
+    write_guest_ = [device_ newComputePipelineStateWithFunction:[library newFunctionWithName:@"write_guest"] error:&error];
     if (!display_pipeline_ || !gamma_ramp_) {
       return false;
     }
@@ -601,6 +628,25 @@ class MetalDeviceImpl final : public MetalDevice {
          destinationLevel:copy.level
         destinationOrigin:MTLOriginMake(dest_x, dest_y, 0)];
     [blit endEncoding];
+  }
+
+  bool WriteResolveToGuest(int resolve, size_t at, uint32_t pitch, bool tiled, bool swap) override {
+    id<MTLTexture> texture = resolves_[size_t(resolve)];
+    if (!guest_ || !write_guest_ || texture.pixelFormat != MTLPixelFormatBGRA8Unorm || at > UINT32_MAX) {
+      return false;
+    }
+    EndPass();
+    const struct {
+      uint32_t at, pitch, tiled, swap;
+    } write = {uint32_t(at), pitch, tiled, swap};
+    id<MTLComputeCommandEncoder> compute = [buffer_ computeCommandEncoder];
+    [compute setComputePipelineState:write_guest_];
+    [compute setTexture:texture atIndex:0];
+    [compute setBuffer:guest_ offset:0 atIndex:0];
+    [compute setBytes:&write length:sizeof(write) atIndex:1];
+    [compute dispatchThreads:MTLSizeMake(texture.width, texture.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    [compute endEncoding];
+    return true;
   }
 
   size_t ReadResolve(int resolve) override {
@@ -1158,6 +1204,7 @@ class MetalDeviceImpl final : public MetalDevice {
   std::array<id<MTLBuffer>, kFramesInFlight> frames_{};
   std::array<id<MTLBuffer>, kFramesInFlight> query_samples_{};
   id<MTLBuffer> frame_query_samples_ = nil;
+  id<MTLComputePipelineState> write_guest_ = nil;
   std::array<id<MTLBuffer>, kFramesInFlight> readbacks_{};
   id<MTLBuffer> frame_readback_ = nil;
   size_t readback_used_ = 0;

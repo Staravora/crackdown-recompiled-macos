@@ -31,6 +31,7 @@
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/thread/mutex.h>
 
 #include "../updater/sha256.h"
 #include "metal_device.h"
@@ -207,6 +208,8 @@ struct ReadbackSlot {
 struct FrameAnswers {
   std::vector<QuerySlot> queries;
   std::vector<ReadbackSlot> readbacks;
+  uint32_t front_buffer = 0;  // Guest memory Metal wrote the front buffer to, by its virtual address, and how much.
+  uint32_t front_buffer_bytes = 0;
 };
 
 // What the game saw when it locked a texture, for comparing with Metal's copy.
@@ -255,6 +258,7 @@ struct Frame {
   std::vector<Run> runs;
   std::vector<QueryEvent> queries;
   uint32_t fence = 0;  // The newest the game had issued when it handed the frame over.
+  std::optional<FetchConstant> front_buffer;  // What the game swapped to the screen, as its texture header says.
   Clock::time_point handed_over;
 };
 
@@ -287,6 +291,7 @@ struct Totals {
   uint64_t guest_checks = 0;
   uint64_t guest_matches = 0;
   uint64_t queries_no_room = 0;
+  uint64_t front_buffers_missed = 0;
 };
 
 // Each query's answers until both have arrived. Metal's come when its frame finishes and the emulator's when the game asks.
@@ -1191,6 +1196,31 @@ void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& draw
   }
 }
 
+// With the emulator drawing nothing, its swap still reads the front buffer from guest memory, applies the gamma ramp,
+// draws the overlays and presents. So Metal's copy goes there, as the Xenos would have laid it out.
+void WriteFrontBuffer(const FetchConstant& front_buffer, MetalDevice& device, FrameAnswers& answers) {
+  xenos::xe_gpu_texture_fetch_t fetch;
+  std::memcpy(&fetch, front_buffer.data(), sizeof(fetch));
+  const xenos::Endian endian = xenos::Endian(uint32_t(fetch.endianness));
+  if (!g_textures->HasResolve(front_buffer.data()) || (endian != xenos::Endian::kNone && endian != xenos::Endian::k8in32)) {
+    ++g_totals.front_buffers_missed;
+    return;
+  }
+  const int resolve = g_textures->ResolveInto(front_buffer.data());
+  const uint32_t address = uint32_t(fetch.base_address) << 12;
+  const uint32_t pitch = uint32_t(fetch.pitch) * 32;
+  const uint32_t height = uint32_t(fetch.size_2d.height) + 1;
+  const uint32_t bytes = pitch * (fetch.tiled ? rex::align(height, 32u) : height) * 4;
+  const size_t at = (address & kGuestMask) + rex::memory::detail::PhysicalHostOffset(address);
+  if (resolve < 0 || !pitch || at + bytes > kGuestBytes ||
+      !device.WriteResolveToGuest(resolve, at, pitch, fetch.tiled, endian == xenos::Endian::k8in32)) {
+    ++g_totals.front_buffers_missed;
+    return;
+  }
+  answers.front_buffer = address;
+  answers.front_buffer_bytes = bytes;
+}
+
 void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswers& answers) {
   std::vector<QuerySlot>& query_slots = answers.queries;
   g_debug_id = 0;
@@ -1471,6 +1501,9 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
     }
   }
   apply_queries(frame.runs.size());
+  if (DrawsAlone() && frame.front_buffer && !g_debug_stopped) {
+    WriteFrontBuffer(*frame.front_buffer, device, answers);
+  }
   const int shown = g_debug_show >= 0 ? g_debug_show : last_color_target;
   if (shown >= 0) {
     device.ShowTarget(shown, g_debug_show < 0);
@@ -1553,7 +1586,7 @@ void Report(const MetalDevice& device) {
       R"("shaders_found":{},"shaders_missing":{},"shaders_failed":{},"index_copy_ms_per_frame":{:.3f},)"
       R"("capture_ms_per_frame":{:.4f},"wait_ms_per_frame":{:.3f},"encode_ms_p50":{:.3f},"encode_ms_p95":{:.3f},"encode_ms_max":{:.3f},)"
       R"("gpu_frames":{},"gpu_errors":{},"gpu_ms_per_frame":{:.3f},"gpu_ms_worst":{:.3f},)"
-      R"("guest_memory_wrapped":{},"guest_checks":{},"guest_matches":{},)",
+      R"("guest_memory_wrapped":{},"guest_checks":{},"guest_matches":{},"front_buffers_missed":{},)",
       guest_frames, g_totals.frames, dropped, g_totals.draws / frames, g_totals.skipped_draws / frames, g_totals.no_room,
       g_totals.recorded_draws / frames, g_totals.recorded_indices / frames, g_totals.no_shader_draws / frames,
       g_totals.no_target_draws / frames, g_totals.other_primitive_draws / frames, g_totals.other_index_order_draws / frames,
@@ -1565,7 +1598,7 @@ void Report(const MetalDevice& device) {
       capture_ns / 1e6 / double(std::max<uint64_t>(guest_frames, 1)), g_totals.wait_ns / 1e6 / frames,
       Percentile(sorted, 0.5) / 1e3, Percentile(sorted, 0.95) / 1e3, Percentile(sorted, 1.0) / 1e3, gpu.frames, gpu.errors,
       gpu.gpu_ns / 1e6 / double(std::max<uint64_t>(gpu.frames, 1)), gpu.worst_gpu_ns / 1e6,
-      device.guest_memory_wrapped() ? "true" : "false", g_totals.guest_checks, g_totals.guest_matches);
+      device.guest_memory_wrapped() ? "true" : "false", g_totals.guest_checks, g_totals.guest_matches, g_totals.front_buffers_missed);
   QueryTotals queries;
   {
     std::lock_guard lock(g_query_mutex);
@@ -1717,11 +1750,17 @@ void RenderThread() {
                             [answers, fence = frame->fence, handed_over = frame->handed_over](const MetalFrameResults& results) {
                               OnMetalSamples(answers->queries, results.query_samples);
                               OnMetalPixels(answers->readbacks, results.readback);
+                              if (answers->front_buffer_bytes) {
+                                // The emulator reloads a texture when it's told its memory changed, as a CPU write would.
+                                g_memory->TriggerPhysicalMemoryCallbacks(rex::thread::global_critical_region::AcquireDirect(),
+                                                                         answers->front_buffer, answers->front_buffer_bytes, true, false);
+                              }
                               OnFrameFinished(fence, handed_over);
                             });
     g_dump = nullptr;
     frame->runs.clear();
     frame->queries.clear();
+    frame->front_buffer.reset();
     {
       std::lock_guard lock(g_mutex);
       g_free.push_back(std::move(frame));
@@ -1754,7 +1793,7 @@ void Install(rex::memory::Memory* memory, const std::filesystem::path& shader_di
   if (REXCVAR_GET(crackdown_native_only)) {
     // The emulator still runs the ring, so fences, waits and swaps carry on. It leaves query answers to Metal (SDK patch
     // 0015).
-    for (const auto& [name, value] : {std::pair{"crackdown_native_shadow", "true"}, {"crackdown_native_shadow_window", "true"},
+    for (const auto& [name, value] : {std::pair{"crackdown_native_shadow", "true"},
                                       {"crackdown_native_pacing", "true"}, {"crackdown_native_exposure", "true"},
                                       {"vulkan_skip_guest_drawing", "true"}}) {
       if (!rex::cvar::SetFlagByName(name, value)) {
@@ -1812,6 +1851,7 @@ void OnGuestFrame() {
     ++g_dropped;
     g_current->runs.clear();
     g_current->queries.clear();
+    g_current->front_buffer.reset();
     return;
   }
   g_current->fence = fence;
@@ -1933,6 +1973,19 @@ void OnTextureLock(uint32_t caller, uint32_t texture, const uint8_t* base) {
     }
     ++g_readback_totals.written;
   }
+}
+
+void OnSwap(uint32_t fetch_address, const uint8_t* base) {
+  if (!Enabled() || !fetch_address) {
+    return;
+  }
+  FetchConstant fetch;
+  std::memcpy(fetch.data(), rex::memory::GuestPtr<const uint8_t*>(const_cast<uint8_t*>(base), fetch_address), sizeof(fetch));
+  for (uint32_t& dword : fetch) {
+    dword = std::byteswap(dword);
+  }
+  std::lock_guard lock(g_mutex);
+  g_current->front_buffer = fetch;
 }
 
 void SetDevice(uint32_t device, const uint8_t* base) {

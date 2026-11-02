@@ -1,5 +1,15 @@
 # Session handoff
 
+## 2026-11-02 — Metal's picture in the main window
+- **How:** the emulator's swap reads the front buffer from guest memory, applies the gamma ramp, draws the ImGui overlays (cheat menu, frame counter, achievements, orb map, launcher) and presents. In `crackdown_native_only` Metal writes its own front buffer there, and that path does the rest unchanged. The SDK isn't touched.
+  - **Which buffer:** `VdSwap`'s r4 points at the front buffer's texture header. `shadow::OnSwap` records it with the frame.
+  - **The write:** at the end of the frame Metal runs `write_guest`, a compute kernel, from the front buffer's resolve into guest memory through the no-copy buffer: 32x32 tiled and byte-reversed for 8-in-32, as `GetTiledOffset2D` lays it out.
+  - **The reload:** when the GPU finishes, `Memory::TriggerPhysicalMemoryCallbacks` on that range makes the emulator reload it, as a CPU write would have.
+- **The separate Metal window** no longer opens in this mode. `--crackdown_native_shadow_window=true` still opens it.
+- **Seen working:** a timed run at the Shift+3 street spot, 30 setting. The main window showed the supply point picker, then the street, drawn by Metal. No front buffers missed, no GPU errors.
+- **Cost:** 28.2 FPS average, median 34.3 ms, 1% low 23.8, against 29.2 FPS, 33.7 ms and 27.0 without it. That's the emulator reloading and drawing a 1280x720 texture every frame, plus the write.
+- **Not checked:** overlays, the pause menu, resizing and fullscreen haven't been tried by hand. Possible tearing: the emulator can read the front buffer while Metal writes the next one, since nothing orders the two GPUs. It's a candidate for Bruce's one-frame flicker.
+
 ## 2026-11-02 — Metal-only preview: 29 FPS steady at the 30 setting, 52 uncapped
 - **What it is:** `--crackdown_native_only=true`. Metal draws the game in its own window and the emulator draws nothing. Its command processor still runs the ring for fences, ring space and swaps. A preview, not the takeover.
 - **What it turns on:** shadow mode, its window, pacing and exposure, and the SDK's `vulkan_skip_guest_drawing` (patch `0015`). Under that switch the command processor skips draws and copies and writes no occlusion results. Metal writes each answer where the GPU would: per tile, an end block then a begin block, little-endian, at the query's `+24` pointers (count at `+144`), with the first word last.
