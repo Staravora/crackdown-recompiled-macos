@@ -1,5 +1,24 @@
 # Session handoff
 
+## 2026-11-02 — The game runs a frame ahead of Metal: higher resolutions cost nothing
+- **Found by a timeline trace:** after each swap, Present waits on the fence it wrote right after the previous swap. That fence is the device counter at that swap. A finished frame was reported as the counter less one, so that fence only passed when the *next* frame finished. The game waited for the frame it had just drawn, about 21 ms a frame, and every millisecond of encoding or GPU time added straight to the frame time.
+- **Checked before changing it:** between the swap and the end of that wait the counter goes up by exactly two, every frame. So Present writes both fences before the next frame draws anything, and the counter's value at the swap is preceded in the ring by that frame's work alone.
+- **Change:** a finished frame reports its swap's counter. `SetFenceDone` never reports a lower number than before, since the idle release, at the counter less one, can be one behind. `kMaxFramesBehind` is 2, so Metal encodes a frame while the GPU draws the one before.
+- **First attempt hung at boot:** `OnFrameFinished` still looked for its queue entry at the fence less one, so no frame was ever marked done. A five-second stall log found it in one run.
+- **Result, street, 30 setting:**
+
+  | Setting | FPS before | FPS now |
+  |---|---|---|
+  | 1280×720 | 28.3 | 28.2 |
+  | 1920×1080 | 24.6 | 28.0 |
+  | 2560×1440 | 20.1 | 28.0 |
+  | Frame generation, 1280×720 | 26.0 | 28.2 |
+
+  No GPU errors. Exposure readbacks are all on time, and match the game's own to 0.1 of 255 at 2560×1440. The 2560×1440 picture is clean.
+- **What changes for the game:** occlusion answers are no longer always ready when it asks. 1 ask a frame for objects and about 113 for light coronas get "not ready" and are asked again later, as against the Xbox's own asynchronous GPU. Coronas and object visibility may update a frame later.
+- **Not checked:** play. A memory-reuse mistake would show as brief broken geometry, and a still frame wouldn't catch it. 28 FPS is the same ceiling the emulator path has had, short of 30.
+- **Test runs:** `bench-macos.sh` retries a run with no result, and my waiting script only watched for the game, so a hanging build piled up three games at once. The scratchpad `solo.sh` now refuses while a game or a benchmark script runs, and `waitdone.sh` waits for both.
+
 ## 2026-11-02 — Metal resolution option: the scene at 1920x1080 or 2560x1440
 - **What:** Graphics, Metal resolution: 1280×720, 1920×1080 or 2560×1440, saved as `crackdown_render_scale` (100, 150, 200). Metal renderer only. Shadow mode stays at 100 so it still compares pixel for pixel.
 - **What's scaled:** only the 1280x720 targets, the scene's. Shadow maps, the reflection, bloom and exposure targets keep the guest's size. Every rectangle still comes from the game in guest pixels, and the device scales it: viewports, scissors, clears, copies, and the depth-bias slope. A resolve takes the scale of the first target copied into it. A copy between different scales goes through a `resample` compute kernel, counted as `resampled_copies` (none so far). A 1280-wide depth stack is scaled with the scene.

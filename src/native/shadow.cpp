@@ -125,7 +125,9 @@ constexpr uint32_t kQueryZPass = 4;
 constexpr uint32_t kDeviceWriteback = 10768;
 constexpr uint32_t kDeviceFence = 10780;
 constexpr auto kIdleFenceRelease = std::chrono::milliseconds(50);
-constexpr uint64_t kMaxFramesBehind = 1;  // As D3D's present allows: each waits for the frame before it.
+// D3D's present waits for the frame before it, so the game is never more than this far ahead. Two lets Metal encode a frame
+// while the GPU draws the one before.
+constexpr uint64_t kMaxFramesBehind = 2;
 constexpr auto kLongestHold = std::chrono::milliseconds(250);
 constexpr uint32_t kReadbackCheckLocks = 30;  // Every 30th lock is compared.
 constexpr size_t kKeptReadbacks = 16;
@@ -1153,6 +1155,18 @@ uint32_t LoadGuestWord(uint32_t address) {
   return std::byteswap(value);
 }
 
+// Under g_pacing_mutex. Never goes back: a frame reports the fence its present writes next, which the idle release, at
+// every fence issued so far, can be one behind.
+void SetFenceDone(uint32_t done) {
+  static bool reported = false;
+  static uint32_t last = 0;
+  if (g_set_fence_done && (!reported || int32_t(done - last) > 0)) {
+    g_set_fence_done(done);
+    reported = true;
+    last = done;
+  }
+}
+
 // Under g_pacing_mutex. Tells the emulator how far Metal has got, as far as every earlier frame is done too.
 void ReportFences() {
   uint32_t done = 0;
@@ -1162,8 +1176,8 @@ void ReportFences() {
     any = true;
     g_frame_fences.pop_front();
   }
-  if (any && g_set_fence_done) {
-    g_set_fence_done(done);
+  if (any) {
+    SetFenceDone(done);
   }
 }
 
@@ -1172,18 +1186,19 @@ void ReleaseIdleFences() {
   const uint32_t device = g_device.load(std::memory_order_relaxed);
   const uint32_t fence = device ? LoadGuestWord(device + kDeviceFence) : 0;
   std::lock_guard lock(g_pacing_mutex);
-  if (g_set_fence_done && g_frame_fences.empty() && fence) {
-    g_set_fence_done(fence - 1);
+  if (g_frame_fences.empty() && fence) {
+    SetFenceDone(fence - 1);
   }
 }
 
 // Under g_pacing_mutex. A frame handed over, or one with nothing for Metal to draw, which is done at once.
 void NoteFrameFence(uint32_t fence, bool finished) {
-  // The device's counter is the next fence, so the frame's work ends at the one before it.
+  // The device's counter is the next fence. Present writes that one right after the swap, before the next frame draws
+  // anything, and its next present waits for it, so it passes once this frame is done, as it would on the Xenos.
   if (!g_set_fence_done || !fence) {
     return;
   }
-  g_frame_fences.push_back({fence - 1, finished});
+  g_frame_fences.push_back({fence, finished});
   ReportFences();
 }
 
@@ -1203,7 +1218,7 @@ void OnFrameFinished(uint32_t fence, Clock::time_point handed_over) {
     totals.emulator_lead += lead;
     ++g_frames_finished;
     for (FrameFence& frame : g_frame_fences) {
-      if (!frame.finished && frame.fence == fence - 1) {
+      if (!frame.finished && frame.fence == fence) {
         frame.finished = true;
         break;
       }
