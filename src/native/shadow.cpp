@@ -207,6 +207,7 @@ struct PixelSlot {
 };
 struct PixelShader {
   int handle = -1;
+  std::string name;
   std::vector<PixelSlot> slots;
   bool reads_whole_picture = false;  // By pixel position, so it wants joined-up textures even when drawn for one tile.
 };
@@ -514,6 +515,7 @@ const PixelShader& FindPixelShader(MetalDevice& device, const BakedDraw& draw) {
     } else {
       std::string error;
       shader.handle = device.AddPixelShader(g_shader_dir / ("ps_" + name + ".metallib"), error);
+      shader.name = name;
       shader.slots = manifest->second;
       shader.reads_whole_picture = g_screen_shaders.contains(name);
       if (shader.handle < 0) {
@@ -961,9 +963,9 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
             slots += fmt::format(" {}k{}:f{}:{}x{}:{:05X}:s{}{}{}{}", slot.slot, slot.kind, uint32_t(fetch.format), uint32_t(fetch.size_2d.width) + 1,
                                  uint32_t(fetch.size_2d.height) + 1, uint32_t(fetch.base_address), uint32_t(fetch.sign_x), uint32_t(fetch.sign_y), uint32_t(fetch.sign_z), uint32_t(fetch.sign_w));
           }
-          *g_dump << fmt::format("{} {} vs {} ps {:08X} {} prim {} n {} tgt {} tiles {:X} vp0 {} {} mode {:X} poly {:.6f} {:.6f} depth {:08X} st {:06X} blend {:08X} cc {:08X} mask {:X} bools {:08X} vp {} {} slots{}\n", g_debug_id, run.pass_select == ~0u ? "D" : "B",
+          *g_dump << fmt::format("{} {} vs {} ps {:08X} {} prim {} n {} tgt {} tiles {:X} vp0 {} {} mode {:X} poly {:.6f} {:.6f} depth {:08X} st {:06X} blend {:08X} cc {:08X} mask {:X} bools {:08X} vp {} {} name {} slots{}\n", g_debug_id, run.pass_select == ~0u ? "D" : "B",
                                  draw.vertex_shader_dwords, draw.pixel_shader, draw.pixel_shader_dwords, primitive, index_count, target, uint32_t(draw.mask), viewport.x, viewport.y, draw.mode_control, std::bit_cast<float>(draw.polygon_offset[0]), std::bit_cast<float>(draw.polygon_offset[1]), draw.depth_control, draw.stencil_front, draw.blend_control, draw.color_control,
-                                 draw.color_mask, draw.booleans, viewport.width, viewport.height, slots);
+                                 draw.color_mask, draw.booleans, viewport.width, viewport.height, found_pixel.name, slots);
         }
         ++g_debug_id;
         out.blend_control = draw.blend_control;
