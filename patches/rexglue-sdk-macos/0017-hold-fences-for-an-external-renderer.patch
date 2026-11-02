@@ -1,0 +1,143 @@
+diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -13,6 +13,7 @@
+ 
+ #include <atomic>
+ #include <cstring>
++#include <deque>
+ #include <functional>
+ #include <memory>
+ #include <mutex>
+@@ -261,6 +262,26 @@
+   uint32_t read_ptr_update_freq_ = 0;
+   uint32_t read_ptr_writeback_ptr_ = 0;
+ 
++  // When a renderer outside the emulator draws (rex_gpu_set_external_fence_done), the fence writes and the read pointer
++  // write-back the guest sees wait until it has finished the work they cover, so the guest can't reuse memory it's still
++  // reading. Each waits for the fence named by tag. They're released by whichever thread reports progress, at once.
++  struct HeldWrite {
++    uint32_t address;  // Physical.
++    uint32_t value;    // As it goes into memory.
++    uint32_t tag;
++  };
++  void HoldOrWrite(uint32_t address, uint32_t value, uint32_t tag);
++
++ public:
++  void ReleaseHeldWrites();
++
++ protected:
++  std::mutex held_writes_mutex_;
++  std::deque<HeldWrite> held_writes_;
++  uint32_t last_fence_ = 0;  // Command processor thread only.
++  // Where the primary ring's read index stood just after the last fence write, when it was in the primary ring.
++  uint32_t last_fence_index_ = UINT32_MAX;
++
+   std::unique_ptr<rex::thread::Event> write_ptr_index_event_;
+   std::atomic<uint32_t> write_ptr_index_;
+ 
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -89,6 +89,25 @@
+                     "pipelines are being prepared.")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++#include <rex/system/gpu_plugin.h>
++
++namespace {
++
++// The newest fence a renderer outside the emulator has finished. Set means that renderer draws.
++std::atomic<bool> g_external_fences{false};
++std::atomic<uint32_t> g_external_fence_done{0};
++std::atomic<rex::graphics::CommandProcessor*> g_external_fence_holder{nullptr};
++
++}  // namespace
++
++extern "C" REX_GPU_PLUGIN_EXPORT void rex_gpu_set_external_fence_done(uint32_t done) {
++  g_external_fence_done.store(done, std::memory_order_release);
++  g_external_fences.store(true, std::memory_order_release);
++  if (rex::graphics::CommandProcessor* holder = g_external_fence_holder.load(std::memory_order_acquire)) {
++    holder->ReleaseHeldWrites();
++  }
++}
++
+ namespace rex::graphics {
+ 
+ using namespace rex::graphics::xenos;
+@@ -274,6 +293,7 @@
+       fn();
+     }
+ 
++    ReleaseHeldWrites();
+     uint32_t write_ptr_index = write_ptr_index_.load();
+     if (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index) {
+       SCOPE_profile_cpu_i("gpu", "rex::graphics::CommandProcessor::Stall");
+@@ -296,6 +316,7 @@
+                             std::chrono::milliseconds(poll_background_work ? 1 : 5));
+         }
+         write_ptr_index = write_ptr_index_.load();
++        ReleaseHeldWrites();
+         if (poll_background_work) {
+           poll_background_work = PollBackgroundWork();
+         }
+@@ -314,9 +335,10 @@
+     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
+     //     that many indices.
+     if (read_ptr_writeback_ptr_) {
+-      memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(read_ptr_writeback_ptr_),
+-                                       read_ptr_index_);
+-      WakeGuestWordWaiters(memory_->TranslatePhysical(read_ptr_writeback_ptr_));
++      // Stopping right after a fence, everything read is covered by it. Anything read past one is only covered by the
++      // next, which may not come until the next frame.
++      const uint32_t tag = read_ptr_index_ == last_fence_index_ ? last_fence_ : last_fence_ + 1;
++      HoldOrWrite(read_ptr_writeback_ptr_, rex::byte_swap(read_ptr_index_), tag);
+     }
+ 
+     // FIXME: We're supposed to process the WAIT_UNTIL register at this point,
+@@ -1304,12 +1326,43 @@
+   }
+   auto endianness = static_cast<xenos::Endian>(address & 0x3);
+   address &= ~0x3;
++  const uint32_t fence = data_value;
+   data_value = GpuSwap(data_value, endianness);
+-  memory::store(memory_->TranslatePhysical(address), data_value);
+-  WakeGuestWordWaiters(memory_->TranslatePhysical(address));
++  HoldOrWrite(address, data_value, fence);
++  if (g_external_fences.load(std::memory_order_acquire)) {
++    last_fence_ = fence;
++    const uintptr_t primary = uintptr_t(memory_->TranslatePhysical(primary_buffer_ptr_));
++    const uintptr_t at = reader->read_ptr();
++    last_fence_index_ = at >= primary && at < primary + primary_buffer_size_ ? uint32_t((at - primary) / sizeof(uint32_t)) : UINT32_MAX;
++  }
+   return true;
+ }
+ 
++void CommandProcessor::HoldOrWrite(uint32_t address, uint32_t value, uint32_t tag) {
++  if (!g_external_fences.load(std::memory_order_acquire)) {
++    memory::store(memory_->TranslatePhysical(address), value);
++    WakeGuestWordWaiters(memory_->TranslatePhysical(address));
++    return;
++  }
++  g_external_fence_holder.store(this, std::memory_order_release);
++  {
++    std::lock_guard lock(held_writes_mutex_);
++    held_writes_.push_back({address, value, tag});
++  }
++  ReleaseHeldWrites();
++}
++
++void CommandProcessor::ReleaseHeldWrites() {
++  std::lock_guard lock(held_writes_mutex_);
++  const uint32_t done = g_external_fence_done.load(std::memory_order_acquire);
++  while (!held_writes_.empty() && int32_t(done - held_writes_.front().tag) >= 0) {
++    const HeldWrite& write = held_writes_.front();
++    memory::store(memory_->TranslatePhysical(write.address), write.value);
++    WakeGuestWordWaiters(memory_->TranslatePhysical(write.address));
++    held_writes_.pop_front();
++  }
++}
++
+ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_EXT(memory::RingBuffer* reader,
+                                                           uint32_t packet, uint32_t count) {
+   // generate a screen extent event

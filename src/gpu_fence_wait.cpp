@@ -230,6 +230,10 @@ void crackdown::hooks::GpuFence(PPCContext& ctx, uint8_t* base, GuestFunction or
   const uint32_t current = LoadGuest32(base, device + kDeviceFenceOffset);
   const uint32_t passed = LoadGuest32(base, LoadGuest32(base, device + kDeviceWritebackOffset));
   const bool pending = current - fence < current - passed;
+  if (pending) {
+    // With nothing of Metal's in flight, what the game waits for can't be held back for it.
+    crackdown::native::shadow::OnFenceWaitStarting();
+  }
   const auto start = std::chrono::steady_clock::now();
   t_wait = {};
   original(ctx, base);

@@ -1,5 +1,17 @@
 # Session handoff
 
+## 2026-11-02 — Fences and ring space wait for Metal (SDK patch 0017): the one-frame flicker
+- **Bruce's report:** a flicker that "looks like an exploded texture or shader", one frame at a time, on the street out from the test spawn.
+- **Cause, from the code:** in Metal-only mode the command processor runs the ring well ahead of Metal (13 fences, about a frame). It wrote each fence and the ring read pointer as it reached them, so the game reused vertex memory and ring space for the next frame while Metal was still reading the last.
+- **SDK, 0017:** once the game calls `rex_gpu_set_external_fence_done(done)`, `EVENT_WRITE_SHD` writes and the read-pointer write-back are queued, tagged with a fence, and released as Metal reports progress. The release runs on the reporting thread, at once. A fence write waits for its own fence. The read pointer waits for the last fence if the command processor stopped right after it, else for the next.
+- **Game:** a queue in hand-over order of each frame's last fence (the device counter at the swap, less one). When a frame finishes, the newest fence with every earlier frame done is reported. Frames with no draws report at once. Idle release, so loading can't hang: at a fence wait with nothing of Metal's pending and no draws yet towards the next frame, fences up to the newest issued go through, with the same after 50 ms without a frame.
+- **Iterations, for the record:**
+  - **First:** releasing on the command processor's loop and after 50 ms idle gave 24.7 FPS and an 8 s slower start.
+  - **Second:** releasing at once and at fence waits gave a normal start but 26.9 FPS, with 49 frames over 50 ms. Tagging the read pointer with the next fence held ring space back a whole frame.
+  - **Third:** 28.4 FPS, median 34.8 ms, 1% low 24.2, 7 frames over 50 ms, against 29.0, 26.7 and 8 without the fix. No stalls through the title screen, loading, picker and play.
+- **Not yet seen:** whether the flicker is gone. Bruce has to drive that street.
+- **Remaining cost:** each present waits about 21 ms for Metal's frame before. Encoding a frame as the game builds it, not all at the swap, would shorten that.
+
 ## 2026-11-02 — MetalFX upscaling option
 - **What:** Graphics, Upscaling: Off or MetalFX 2×, saved as `crackdown_metalfx_upscale` (1 or 2), macOS only and Metal renderer only. The front buffer goes through MetalFX's spatial scaler in perceptual mode, from 1280x720 to 2560x1440, before it's handed to the swap. The swap's gamma, FXAA and window scaling then work on the larger picture. The game links `MetalFX.framework`.
 - **Checked:** the report's new `picture` field read `[2560, 1440]`, with no front buffers missed and no GPU errors. Street, 30 setting: 28.95 FPS against 29.03 off, 1% low 24.9 against 26.7.

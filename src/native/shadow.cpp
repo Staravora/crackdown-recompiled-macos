@@ -114,6 +114,7 @@ constexpr uint32_t kQueryTotal = 0;
 constexpr uint32_t kQueryZPass = 4;
 constexpr uint32_t kDeviceWriteback = 10768;
 constexpr uint32_t kDeviceFence = 10780;
+constexpr auto kIdleFenceRelease = std::chrono::milliseconds(50);
 constexpr uint64_t kMaxFramesBehind = 1;  // As D3D's present allows: each waits for the frame before it.
 constexpr auto kLongestHold = std::chrono::milliseconds(250);
 constexpr uint32_t kReadbackCheckLocks = 30;  // Every 30th lock is compared.
@@ -225,6 +226,7 @@ const uint8_t* g_picture = nullptr;
 uint32_t g_picture_width = 0;
 uint32_t g_picture_height = 0;
 bool g_external_present = false;  // Render thread only after it's set.
+void (*g_found_fence_done)(uint32_t) = nullptr;  // Render thread. RenderThread passes it on to g_set_fence_done.
 
 uint32_t PictureWidth() {
   std::lock_guard lock(g_picture_mutex);
@@ -266,6 +268,12 @@ void UseExternalPresent() {
   set_source(PictureSize, FillPicture, nullptr);
   g_external_present = true;
   REXLOG_INFO("Native only: the swap presents Metal's pictures directly");
+  g_found_fence_done = reinterpret_cast<void (*)(uint32_t)>(dlsym(plugin, "rex_gpu_set_external_fence_done"));
+  if (g_found_fence_done) {
+    REXLOG_INFO("Native only: fences wait for Metal");
+  } else {
+    REXLOG_WARN("Native only: the GPU plugin can't hold fences for Metal, so the game may reuse memory Metal is reading");
+  }
 }
 
 // What the game saw when it locked a texture, for comparing with Metal's copy.
@@ -406,6 +414,14 @@ bool g_gamma_ramp_new = false;
 
 std::mutex g_pacing_mutex;
 std::condition_variable g_frame_finished;
+// With the emulator drawing nothing, its fence and read pointer writes wait for Metal (SDK patch 0017). Frames in the order
+// they were handed over, by the last fence each covers, so a frame only counts as done once those before it are.
+struct FrameFence {
+  uint32_t fence;
+  bool finished;
+};
+std::deque<FrameFence> g_frame_fences;  // Under g_pacing_mutex.
+void (*g_set_fence_done)(uint32_t) = nullptr;
 PacingTotals g_pacing_totals;
 uint64_t g_frames_handed_over = 0;
 uint64_t g_frames_finished = 0;
@@ -1029,6 +1045,40 @@ uint32_t LoadGuestWord(uint32_t address) {
   return std::byteswap(value);
 }
 
+// Under g_pacing_mutex. Tells the emulator how far Metal has got, as far as every earlier frame is done too.
+void ReportFences() {
+  uint32_t done = 0;
+  bool any = false;
+  while (!g_frame_fences.empty() && g_frame_fences.front().finished) {
+    done = g_frame_fences.front().fence;
+    any = true;
+    g_frame_fences.pop_front();
+  }
+  if (any && g_set_fence_done) {
+    g_set_fence_done(done);
+  }
+}
+
+// Nothing of Metal's is pending, so every fence issued so far can pass.
+void ReleaseIdleFences() {
+  const uint32_t device = g_device.load(std::memory_order_relaxed);
+  const uint32_t fence = device ? LoadGuestWord(device + kDeviceFence) : 0;
+  std::lock_guard lock(g_pacing_mutex);
+  if (g_set_fence_done && g_frame_fences.empty() && fence) {
+    g_set_fence_done(fence - 1);
+  }
+}
+
+// Under g_pacing_mutex. A frame handed over, or one with nothing for Metal to draw, which is done at once.
+void NoteFrameFence(uint32_t fence, bool finished) {
+  // The device's counter is the next fence, so the frame's work ends at the one before it.
+  if (!g_set_fence_done || !fence) {
+    return;
+  }
+  g_frame_fences.push_back({fence - 1, finished});
+  ReportFences();
+}
+
 // Any thread. Metal has finished a frame, which is the moment it could report that frame's fence to the game.
 void OnFrameFinished(uint32_t fence, Clock::time_point handed_over) {
   const uint64_t metal_ns = Since(handed_over);
@@ -1044,6 +1094,13 @@ void OnFrameFinished(uint32_t fence, Clock::time_point handed_over) {
     totals.worst_metal_ns = std::max(totals.worst_metal_ns, metal_ns);
     totals.emulator_lead += lead;
     ++g_frames_finished;
+    for (FrameFence& frame : g_frame_fences) {
+      if (!frame.finished && frame.fence == fence - 1) {
+        frame.finished = true;
+        break;
+      }
+    }
+    ReportFences();
   }
   g_frame_finished.notify_all();
 }
@@ -1753,12 +1810,18 @@ void RenderThread() {
   }
   if (DrawsAlone()) {
     UseExternalPresent();
+    std::lock_guard lock(g_pacing_mutex);
+    g_set_fence_done = g_found_fence_done;
   }
   while (true) {
     std::unique_ptr<Frame> frame;
     {
       std::unique_lock lock(g_mutex);
-      g_wake.wait(lock, [] { return !g_ready.empty(); });
+      // The game can wait for the GPU to go idle with no frame to show, on loading. With nothing of Metal's pending,
+      // fences up to the newest issued are let through, or that wait would never end.
+      while (!g_wake.wait_for(lock, kIdleFenceRelease, [] { return !g_ready.empty(); })) {
+        ReleaseIdleFences();
+      }
       frame = std::move(g_ready.front());
       g_ready.pop_front();
       if (g_gamma_ramp_new) {
@@ -1928,10 +1991,14 @@ void OnGuestFrame() {
   }
   g_resolved_last_frame.swap(g_resolved_this_frame);
   g_resolved_this_frame.clear();
-  if (g_current->runs.empty()) {
-    return;
-  }
-  if (g_free.empty()) {
+  if (g_current->runs.empty() || g_free.empty()) {
+    {
+      std::lock_guard pacing_lock(g_pacing_mutex);
+      NoteFrameFence(fence, true);
+    }
+    if (g_current->runs.empty()) {
+      return;
+    }
     ++g_dropped;
     g_current->runs.clear();
     g_current->queries.clear();
@@ -1943,6 +2010,7 @@ void OnGuestFrame() {
   {
     std::lock_guard pacing_lock(g_pacing_mutex);
     ++g_frames_handed_over;
+    NoteFrameFence(fence, false);
     g_pacing_totals.fences += fence - g_handed_over_fence.load(std::memory_order_relaxed);
   }
   g_handed_over_fence.store(fence, std::memory_order_relaxed);
@@ -2075,6 +2143,21 @@ void OnSwap(uint32_t fetch_address, const uint8_t* base) {
 void SetDevice(uint32_t device, const uint8_t* base) {
   g_virtual_guest.store(const_cast<uint8_t*>(base), std::memory_order_relaxed);
   g_device.store(device, std::memory_order_relaxed);
+}
+
+// A wait between frames, as on loading, with no draws towards the next one. At a present the frame just drawn hasn't been
+// handed over yet, and letting its fences through would let the game write over what Metal is about to read.
+void OnFenceWaitStarting() {
+  if (!Enabled()) {
+    return;
+  }
+  {
+    std::lock_guard lock(g_mutex);
+    if (!g_current->runs.empty()) {
+      return;
+    }
+  }
+  ReleaseIdleFences();
 }
 
 void OnFenceWait(uint32_t caller, uint32_t fence, uint64_t waited_ns) {
