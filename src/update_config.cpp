@@ -10,7 +10,12 @@
 #include <rex/logging.h>
 
 #include "platform.h"
+#include "updater/update_paths.h"
 #include "updater/update_platform.h"
+
+#if defined(__APPLE__)
+#include <unistd.h>
+#endif
 
 namespace crackdown {
 namespace {
@@ -94,6 +99,42 @@ trg::update::UpdateConfig MakeUpdateConfig(const std::filesystem::path& install_
   if (!config.install_supported) {
     config.install_unsupported_reason =
         "The update helper is missing from this installation. Reinstall this release to enable automatic updates.";
+  }
+#elif defined(__APPLE__)
+  // The Mac app is released from its own repository, set at configure time; without one it never checks.
+  const std::string repository = CRACKDOWN_MAC_UPDATE_REPOSITORY;
+  if (repository.empty()) {
+    config.releases_url.clear();
+    config.download_url_prefix.clear();
+  } else {
+    config.releases_url = "https://api.github.com/repos/" + repository + "/releases/latest";
+    config.download_url_prefix = "https://github.com/" + repository + "/releases/download/";
+  }
+  config.package_kind = UpdatePackageKind::kMacApp;
+  config.asset_name = [](const SemanticVersion& version) {
+    return "Crackdown-v" + version.CoreString() + "-macos-arm64.zip";
+  };
+  config.checksum_asset_name = [](const SemanticVersion& version) {
+    return "Crackdown-v" + version.CoreString() + "-macos-arm64.sha256";
+  };
+  // <app>/Contents/MacOS/crackdown
+  const std::filesystem::path app = trg::update::CurrentExecutablePath().parent_path().parent_path().parent_path();
+  std::string team;
+  std::string identifier;
+  if (app.extension() != ".app") {
+    config.install_unsupported_reason = "Updates install themselves in the app download.";
+  } else if (trg::update::Utf8Path(app).find("/AppTranslocation/") != std::string::npos) {
+    // Gatekeeper runs a downloaded app from a read-only copy until it has been moved.
+    config.install_unsupported_reason =
+        "Move Crackdown Recompiled into your Applications folder and open it from there to install updates.";
+  } else if (access(app.parent_path().c_str(), W_OK) != 0 || access(app.c_str(), W_OK) != 0) {
+    config.install_unsupported_reason = "This Mac account cannot change the folder the app is in.";
+  } else if (!trg::update::RunningAppSigning(team, identifier) || team.empty()) {
+    config.install_unsupported_reason = "This build is not signed with a Developer ID, so it cannot install updates.";
+  } else {
+    config.mac_app_path = app;
+    config.restart_executable = app;
+    config.install_supported = true;
   }
 #else
   config.package_kind = UpdatePackageKind::kAppImage;

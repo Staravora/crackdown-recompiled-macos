@@ -272,7 +272,7 @@ if(APPLE)
     enable_language(OBJCXX)
     set(CMAKE_OBJCXX_STANDARD 23)
     list(APPEND CRACKDOWN_SOURCES src/native/shadow.cpp
-        src/native/texture_cache.cpp src/native/metal_device.mm)
+        src/native/texture_cache.cpp src/native/metal_device.mm src/updater/mac_app_signature.cpp)
     set_source_files_properties(src/native/metal_device.mm PROPERTIES
         COMPILE_OPTIONS "-fobjc-arc" SKIP_PRECOMPILE_HEADERS ON)
 endif()
@@ -317,10 +317,13 @@ rexglue_setup_host_target(crackdown GPU_PLUGINS xenos)
 target_link_libraries(crackdown PRIVATE trg::launcher)
 if(APPLE)
     target_link_libraries(crackdown PRIVATE "-framework Metal" "-framework Foundation" "-framework CoreGraphics"
-        "-framework ImageIO" "-framework UniformTypeIdentifiers" "-framework AppKit" "-framework QuartzCore" "-framework MetalFX")
+        "-framework ImageIO" "-framework UniformTypeIdentifiers" "-framework AppKit" "-framework QuartzCore" "-framework MetalFX" "-framework Security")
 endif()
+# owner/name of the GitHub repository the signed Mac app updates itself from; empty leaves the Mac build without updates.
+set(CRACKDOWN_MAC_UPDATE_REPOSITORY "" CACHE STRING "GitHub owner/name the Mac app's releases come from")
 target_compile_definitions(crackdown PRIVATE
     CRACKDOWN_PORT_VERSION="${PROJECT_VERSION}"
+    CRACKDOWN_MAC_UPDATE_REPOSITORY="${CRACKDOWN_MAC_UPDATE_REPOSITORY}"
     CRACKDOWN_TRG_VERSION="${CRACKDOWN_TRG_VERSION}"
     # CD_UPDATE_TEST* environment overrides for manual updater testing; release packages are built as Release.
     $<$<NOT:$<CONFIG:Release>>:CRACKDOWN_UPDATE_TEST_OVERRIDES>)

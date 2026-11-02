@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -10,12 +11,17 @@
 #include <utility>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <sys/stat.h>
+#endif
+
 #include "updater/github_release.h"
 #include "updater/install_transaction.h"
 #include "updater/sha256.h"
 #include "updater/third_party/miniz/miniz.h"
 #include "updater/update_job.h"
 #include "updater/update_paths.h"
+#include "updater/update_platform.h"
 #include "updater/update_zip.h"
 #include "updater/url_policy.h"
 #include "updater/version.h"
@@ -501,6 +507,11 @@ void TestPackagingNames() {
   CHECK(config.find("\"https://github.com/saulob/crackdown-xbox360-recompiled/releases/download/\"") !=
         std::string::npos);
   CHECK(cmake.find("$<$<NOT:$<CONFIG:Release>>:CRACKDOWN_UPDATE_TEST_OVERRIDES>") != std::string::npos);
+  const std::string mac_package = ReadFile(root / "tools" / "package-macos.sh");
+  CHECK(config.find("Crackdown-v\" + version.CoreString() + \"-macos-arm64.zip") != std::string::npos);
+  CHECK(config.find("Crackdown-v\" + version.CoreString() + \"-macos-arm64.sha256") != std::string::npos);
+  CHECK(mac_package.find("NAME=\"Crackdown-v$VERSION-macos-arm64\"") != std::string::npos);
+  CHECK(mac_package.find("> \"$NAME.sha256\"") != std::string::npos);
   CHECK(config.find("*value == \"1\"") != std::string::npos);
 
   CHECK(cmake.find("project(crackdown VERSION") != std::string::npos);
@@ -599,6 +610,53 @@ void TestPaths() {
 
 }  // namespace
 
+#if defined(__APPLE__)
+// ditto keeps what a signed bundle needs, and the swap leaves the old copy aside under a hidden name.
+void TestMacApp() {
+  std::printf("mac app\n");
+  TempDir temp;
+  const std::filesystem::path built = temp.path / "build" / "Game.app";
+  WriteFile(built / "Contents" / "MacOS" / "game", "new");
+  chmod((built / "Contents" / "MacOS" / "game").c_str(), 0755);
+  std::error_code ec;
+  std::filesystem::create_directory_symlink("MacOS", built / "Contents" / "Link", ec);
+  const std::filesystem::path zip = temp.path / "Game.zip";
+  CHECK(std::system(("/usr/bin/ditto -c -k --keepParent '" + Utf8Path(built) + "' '" + Utf8Path(zip) + "'").c_str()) ==
+        0);
+
+  std::filesystem::path app;
+  std::string error;
+  std::filesystem::create_directories(temp.path / "staging", ec);
+  CHECK(ExtractMacApp(zip, temp.path / "staging", app, error));
+  CHECK(app.filename() == "Game.app");
+  CHECK(std::filesystem::is_symlink(app / "Contents" / "Link", ec));
+  struct stat status {};
+  CHECK(stat((app / "Contents" / "MacOS" / "game").c_str(), &status) == 0 && (status.st_mode & S_IXUSR));
+
+  const std::filesystem::path installed = temp.path / "Applications" / "Game.app";
+  WriteFile(installed / "Contents" / "MacOS" / "game", "old");
+  std::filesystem::path backup;
+  CHECK(SwapMacApp(app, installed, backup, error));
+  CHECK(ReadFile(installed / "Contents" / "MacOS" / "game") == "new");
+  CHECK(ReadFile(backup / "Contents" / "MacOS" / "game") == "old");
+  CHECK(backup.parent_path() == installed.parent_path());
+  CHECK(backup.filename().string().rfind(".Game.app.old-", 0) == 0);
+  CHECK(!std::filesystem::exists(app, ec));
+
+  CHECK(!SwapMacApp(temp.path / "missing.app", installed, backup, error));
+  CHECK(ReadFile(installed / "Contents" / "MacOS" / "game") == "new");
+
+  // A package must hold exactly one app.
+  WriteFile(temp.path / "two" / "A.app" / "x", "a");
+  WriteFile(temp.path / "two" / "B.app" / "x", "b");
+  const std::filesystem::path two = temp.path / "two.zip";
+  CHECK(std::system(("cd '" + Utf8Path(temp.path / "two") + "' && /usr/bin/ditto -c -k . '" + Utf8Path(two) + "'")
+                        .c_str()) == 0);
+  std::filesystem::create_directories(temp.path / "staging-two", ec);
+  CHECK(!ExtractMacApp(two, temp.path / "staging-two", app, error));
+}
+#endif
+
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   TestVersions();
@@ -612,6 +670,9 @@ int main() {
   TestPackagingNames();
   TestUrlPolicy();
   TestPaths();
+#if defined(__APPLE__)
+  TestMacApp();
+#endif
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

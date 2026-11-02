@@ -113,7 +113,7 @@ If the system cannot mount AppImages with FUSE, the AppImage unpacks itself into
 3. On the **Play** page click **Install from disc image...** and pick your Crackdown `.iso`, or click **Install from folder...**. You can also drop either on the launcher window.
 4. Wait until **Ready to play** appears, then press **PLAY**.
 
-The game files, settings, saves and logs go in `~/Library/Application Support/Crackdown Recompiled`. The app updates itself when a new release comes out. **Metal resolution** on the **Graphics** page draws the game at 1280×720, 1920×1080 or 2560×1440; the M1 MacBook Air holds 30 FPS at 1920×1080.
+The game files, settings, saves and logs go in `~/Library/Application Support/Crackdown Recompiled`. When a new release comes out the launcher offers it; **Install and restart** downloads it, checks it's signed by the same developer, and swaps it in. Updates need the app in **Applications** (or another folder your account can write to), opened from there. **Metal resolution** on the **Graphics** page draws the game at 1280×720, 1920×1080 or 2560×1440; the M1 MacBook Air holds 30 FPS at 1920×1080.
 
 **No game files are included** in any download.
 

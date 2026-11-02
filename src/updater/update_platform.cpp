@@ -27,6 +27,7 @@
 #include <fcntl.h>
 #include <spawn.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <crt_externs.h>
@@ -461,6 +462,157 @@ bool ApplyAppImageUpdate(const std::filesystem::path& downloaded, const std::fil
   std::filesystem::remove(backup, ec);
   return true;
 }
+
+
+#if defined(__APPLE__)
+
+namespace {
+
+bool RunTool(const std::vector<std::string>& arguments, std::string& error) {
+  std::vector<std::string> storage = arguments;
+  std::vector<char*> argv;
+  argv.reserve(storage.size() + 1);
+  for (std::string& argument : storage) {
+    argv.push_back(argument.data());
+  }
+  argv.push_back(nullptr);
+  pid_t pid = 0;
+  const int result = posix_spawn(&pid, argv.front(), nullptr, nullptr, argv.data(), environ);
+  if (result != 0) {
+    error = "Could not start " + arguments.front() + " (" + std::to_string(result) + ").";
+    return false;
+  }
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno != EINTR) {
+      error = "Lost track of " + arguments.front() + ".";
+      return false;
+    }
+  }
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    error = arguments.front() + " failed.";
+    return false;
+  }
+  return true;
+}
+
+// A free hidden name beside the app, so a rename stays on its volume.
+std::filesystem::path FreeSibling(const std::filesystem::path& app, const std::string& tag) {
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    const std::filesystem::path candidate =
+        app.parent_path() / ("." + Utf8Path(app.filename()) + "." + tag + "-" + std::to_string(CurrentProcessId()) +
+                             "-" + std::to_string(attempt));
+    struct stat status {};
+    if (lstat(candidate.c_str(), &status) != 0 && errno == ENOENT) {
+      return candidate;
+    }
+  }
+  return {};
+}
+
+}  // namespace
+
+bool ExtractMacApp(const std::filesystem::path& zip, const std::filesystem::path& folder, std::filesystem::path& app,
+                   std::string& error) {
+  error.clear();
+  if (!RunTool({"/usr/bin/ditto", "-x", "-k", Utf8Path(zip), Utf8Path(folder)}, error)) {
+    error = "Cannot unpack the update.";
+    return false;
+  }
+  std::error_code ec;
+  std::filesystem::path found;
+  int entries = 0;
+  for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(folder, ec)) {
+    if (entry.path().filename() == "__MACOSX") {
+      continue;
+    }
+    ++entries;
+    if (entry.path().extension() == ".app" && entry.is_directory(ec) && !entry.is_symlink(ec)) {
+      found = entry.path();
+    }
+  }
+  if (ec || entries != 1 || found.empty()) {
+    error = "The update does not hold one app.";
+    return false;
+  }
+  app = found;
+  return true;
+}
+
+bool SwapMacApp(const std::filesystem::path& staged, const std::filesystem::path& installed,
+                std::filesystem::path& backup, std::string& error) {
+  error.clear();
+  std::error_code ec;
+  if (!std::filesystem::is_directory(staged, ec) || !std::filesystem::is_directory(installed, ec)) {
+    error = "The update or the installed app is missing.";
+    return false;
+  }
+  const std::filesystem::path incoming = FreeSibling(installed, "update");
+  backup = FreeSibling(installed, "old");
+  if (incoming.empty() || backup.empty()) {
+    error = "Cannot find a free name next to the app.";
+    return false;
+  }
+  if (rename(staged.c_str(), incoming.c_str()) != 0) {
+    // The update was unpacked on another volume.
+    const int rename_error = errno;
+    std::string copy_error;
+    if (rename_error != EXDEV || !RunTool({"/usr/bin/ditto", Utf8Path(staged), Utf8Path(incoming)}, copy_error)) {
+      std::filesystem::remove_all(incoming, ec);
+      error = "Cannot write the update next to the app.";
+      return false;
+    }
+  }
+  if (rename(installed.c_str(), backup.c_str()) != 0) {
+    std::filesystem::remove_all(incoming, ec);
+    error = "Cannot move the installed app aside.";
+    return false;
+  }
+  if (rename(incoming.c_str(), installed.c_str()) != 0) {
+    rename(backup.c_str(), installed.c_str());
+    std::filesystem::remove_all(incoming, ec);
+    error = "Cannot put the update in the app's place.";
+    return false;
+  }
+  return true;
+}
+
+bool ApplyMacAppUpdate(const std::filesystem::path& staged, const std::filesystem::path& installed,
+                       const std::vector<std::string>& arguments, std::string& error) {
+  std::filesystem::path backup;
+  if (!SwapMacApp(staged, installed, backup, error)) {
+    return false;
+  }
+  // Waits up to a minute for this process to quit, so the new copy never runs beside the old one.
+  static constexpr const char* kScript =
+      "pid=$1; app=$2; old=$3; shift 3; i=0\n"
+      "while kill -0 \"$pid\" 2>/dev/null; do\n"
+      "  i=$((i + 1)); [ \"$i\" -gt 600 ] && break\n"
+      "  sleep 0.1\n"
+      "done\n"
+      "[ \"$i\" -le 600 ] && rm -rf \"$old\"\n"
+      "exec /usr/bin/open -n \"$app\" --args \"$@\"\n";
+  std::vector<std::string> shell = {"-c", kScript, "sh", std::to_string(CurrentProcessId()), Utf8Path(installed),
+                                    Utf8Path(backup)};
+  shell.insert(shell.end(), arguments.begin(), arguments.end());
+  std::string launch_error;
+  if (!LaunchApplication("/bin/sh", shell, installed.parent_path(), launch_error, true)) {
+    // Put the old copy back so the next start is the version that was running.
+    std::error_code ec;
+    const std::filesystem::path aside = FreeSibling(installed, "failed");
+    if (aside.empty() || rename(installed.c_str(), aside.c_str()) != 0 ||
+        rename(backup.c_str(), installed.c_str()) != 0) {
+      error = launch_error + " The previous version could not be restored.";
+      return false;
+    }
+    std::filesystem::remove_all(aside, ec);
+    error = launch_error;
+    return false;
+  }
+  return true;
+}
+
+#endif
 
 #endif
 

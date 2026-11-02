@@ -28,7 +28,8 @@ enum class UpdateState {
   kFailed,
 };
 
-enum class UpdatePackageKind { kZip, kAppImage };
+// kMacApp: a zip holding one signed .app, swapped in whole after the launcher quits.
+enum class UpdatePackageKind { kZip, kAppImage, kMacApp };
 
 struct UpdateConfig {
   std::string current_version;
@@ -42,6 +43,7 @@ struct UpdateConfig {
   std::function<std::string(const SemanticVersion&)> checksum_asset_name;
   std::filesystem::path install_dir;
   std::filesystem::path appimage_path;
+  std::filesystem::path mac_app_path;
   std::filesystem::path restart_executable;
   std::vector<std::string> restart_arguments;
   std::vector<std::string> required_staged_files;

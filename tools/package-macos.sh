@@ -65,6 +65,6 @@ if $NOTARIZE; then
   spctl -a -t exec -vv "$APP"
 fi
 ditto -c -k --keepParent "$APP" "$ZIP"
-(cd "$OUT" && shasum -a 256 "$NAME.zip" > "$NAME.zip.sha256")
+(cd "$OUT" && shasum -a 256 "$NAME.zip" > "$NAME.sha256")
 echo "Made $ZIP"
-cat "$ZIP.sha256"
+cat "$OUT/$NAME.sha256"

@@ -1,5 +1,19 @@
 # Session handoff
 
+## 2026-11-02 (evening) — Mac in-app updater; release to-dos closed
+- **Updater (`UpdatePackageKind::kMacApp`):**
+  - **Check:** `releases/latest` of the repository set at configure time with `-DCRACKDOWN_MAC_UPDATE_REPOSITORY=owner/name`. **Empty by default, and an empty one never checks**, so the Mac build doesn't look at Saulo's Windows/Linux releases. Bruce's GitHub owner/name still has to be chosen.
+  - **Assets:** `Crackdown-v<ver>-macos-arm64.zip` and `Crackdown-v<ver>-macos-arm64.sha256`. `package-macos.sh` now names the checksum that way (was `.zip.sha256`).
+  - **Download:** SHA-256 as on the other platforms, then `ditto -x -k` (keeps links, modes and signatures, which the generic zip extractor drops). The zip must hold exactly one `.app`.
+  - **Signature (`src/updater/mac_app_signature.cpp`, Security framework):** the new app must pass strict, nested validation against `anchor apple generic`, the running app's team (2PDAUA4SU2) and its identifier. Tested: the signed package passes in about a second; a tampered copy (-67054), an ad hoc copy and an unsigned running build are refused.
+  - **Install:** the new app moves next to the old one under a hidden name, the old one becomes `.<name>.old-<pid>-<n>`, the new one takes its name. A `/bin/sh` waiter waits up to 60 s for the launcher to quit, deletes the old copy, and runs `open -n <app> --args <restart args>`. If the waiter can't start, the old copy is put back. Tested with a dummy app: relaunched with the arguments, old copy and staging gone.
+  - **Not offered (the reason shows instead):** a copy run from App Translocation (not moved out of Downloads), a folder the account can't write, a build not signed with a Developer ID.
+  - **Not tested:** a real download from a GitHub release, since there is no release repository yet.
+- **Backdrop:** Bruce's ChatGPT reinterpretation of the dusk skyline now ships as `assets/launcher/backdrop-dusk.png` (Bruce approved it as his own image). A player's `launcher-backdrop.png` still wins.
+- **Release paperwork:** `THIRD-PARTY-LICENSES-MACOS.txt` (MoltenVK, Vulkan Loader, fonts) ships in `Resources/licenses`; the README has a macOS section; `tools/build-macos-shaders.sh` builds the Metal shaders for self-builders (not yet run end to end); the personal path is gone from `docs/macos-session.md`.
+- **Tests:** 57 of 58 pass; `packaging_tests` keeps its two known upstream failures.
+- **Still open:** Bruce's GitHub repo for releases (sets `CRACKDOWN_MAC_UPDATE_REPOSITORY` and the README links); notarization profile; README "Reporting problems" still points at Saulo's tracker; Metal gaps (green flash, water, supply beam).
+
 ## 2026-11-02 — Mac release groundwork, and the launcher in the game's menu look
 - **App layout, signable:**
   - `Contents/MacOS` holds only the game and its libraries; everything else is in `Contents/Resources`, found through `ResourceFolder()`.

@@ -156,6 +156,10 @@ void UpdateController::StartCheck(bool manual) {
   if (snapshot_.state == UpdateState::kChecking) {
     return;
   }
+  // A build with no release address never checks.
+  if (config_.releases_url.empty() && !config_.release_json_override) {
+    return;
+  }
 
   snapshot_.state = UpdateState::kChecking;
   snapshot_.manual_check = manual;
@@ -393,6 +397,16 @@ void UpdateController::StartDownload() {
       if (!manifest) {
         return std::string("Cannot write the update manifest.");
       }
+    } else if (config.package_kind == UpdatePackageKind::kMacApp) {
+#if defined(__APPLE__)
+      std::filesystem::path app;
+      if (!ExtractMacApp(download_path, staging_path, app, error) || !VerifyMacApp(app, error)) {
+        return error;
+      }
+      *staging_root = app;
+#else
+      return std::string("Mac app updates are only installed on a Mac.");
+#endif
     }
     return std::string();
   });
@@ -410,7 +424,8 @@ void UpdateController::FinishDownload(trg::Task::State state, const std::string&
     Fail(error.empty() ? "The update download failed." : error, RetryKind::kDownload, false);
     return;
   }
-  if (config_.package_kind == UpdatePackageKind::kZip && staging_root_ && !staging_root_->empty()) {
+  if ((config_.package_kind == UpdatePackageKind::kZip || config_.package_kind == UpdatePackageKind::kMacApp) &&
+      staging_root_ && !staging_root_->empty()) {
     staging_path_ = *staging_root_;
   }
   snapshot_.state = UpdateState::kReadyToRestart;
@@ -486,6 +501,20 @@ bool UpdateController::BeginInstall() {
     return true;
 #else
     Fail("The update helper is only used on Windows.", RetryKind::kInstall, false);
+    return false;
+#endif
+  }
+
+  if (config_.package_kind == UpdatePackageKind::kMacApp) {
+#if defined(__APPLE__)
+    if (!ApplyMacAppUpdate(staging_path_, config_.mac_app_path, config_.restart_arguments, error)) {
+      Fail(error, RetryKind::kInstall, false);
+      return false;
+    }
+    Log(config_, "Updated app swapped in; it opens when the launcher quits");
+    return true;
+#else
+    Fail("Mac app updates are only installed on a Mac.", RetryKind::kInstall, false);
     return false;
 #endif
   }
