@@ -269,6 +269,8 @@ void crackdown::hooks::FireWeaponTracked(PPCContext& ctx, uint8_t* base, GuestFu
                               crackdown::cheats::OwnedByPlayer);
 }
 
+bool crackdown::cheats::PlayerIsDriving(uint8_t* base) { return crackdown::cheats::PlayerDrivenVehicle(base) != 0; }
+
 void crackdown::hooks::VehicleDamage(PPCContext& ctx, uint8_t* base, GuestFunction original) {
   crackdown::cheats::GuardVehicle(ctx, base, original);
 }

@@ -156,10 +156,26 @@ Optional gameplay modifiers, all off by default. They start with the values save
 
 ### Controls
 - Xbox and XInput controllers work without setup; any connected pad can press Start
-- **Keyboard and mouse**: enabled or disabled (off by default). By default **W A S D** move, the mouse turns the camera and aims, the **left mouse button** fires and the **right mouse button** locks on. It works together with any connected Xbox controller.
+- **Keyboard and mouse**: enabled or disabled (off by default). It works together with any connected Xbox controller. By default:
+
+| Key | On foot | Driving |
+| --- | --- | --- |
+| **W A S D** | Move | **W** gas, **S** brake and reverse, **A D** steer |
+| **Mouse** | Camera and aim | Camera |
+| **Left click** / **Right click** | Fire / lock on | Gas / brake, as the triggers |
+| **Space** | Jump | Flip the vehicle |
+| **E** | Enter, exit, garage, supply point, lift | Exit |
+| **F** | Kick. Hold to pick up | |
+| **G** | Pick up or drop with one press | |
+| **R** | Reload. Hold to equip | |
+| **Q** / **C** | Throw grenade / crouch | |
+| **1 2 3 4** | D-pad | D-pad |
+| **Tab** / **Esc** | Map / pause | Map / pause |
+
 - **Direct mouse look**: the mouse turns the camera directly, not by emulating the right stick, so there is no stick deadzone or speed curve. A click in gameplay captures the mouse. **Esc** always releases it, and so do the keys bound to Start and Back, so rebinding those also changes which keys release it.
 - **Mouse sensitivity**: 0.10x to 10.00x (default 1.00x).
-- **Remappable keyboard controls**: every keyboard control, including Start and Back, can be rebound on the Controls page: click a control, then press the new key (**Esc** cancels). **Reset to defaults** restores the default keys and sensitivity. By default, plain arrow keys also turn the camera, and menus use **W A S D** or **Shift + arrow** keys.
+- **Trackpad lock-on**: off by default. Hold **Shift** to lock on, so one hand can stay on the trackpad.
+- **Remappable keyboard controls**: every keyboard control can be rebound on the Controls page: click a control, then press the new key (**Esc** cancels). Shift, Control, Option and Command can be bound on their own. **Reset to defaults** restores the default keys and sensitivity. By default, arrow keys also turn the camera, and menus use **W A S D** or **Shift + arrow** keys. **Esc** can't be chosen as a new key, since it cancels the choice.
 
 ### Achievements
 - Every achievement with its icon, description, Gamerscore and unlock status. It shows the same progress as the in-game **F7** list.

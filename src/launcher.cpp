@@ -970,6 +970,8 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     ui.SliderFloat("Mouse sensitivity", "How fast the mouse turns the camera.", "mnk_sensitivity",
                    float(mouse_look::kDefaultSensitivity), float(mouse_look::kMinSensitivity),
                    float(mouse_look::kMaxSensitivity), "%.2fx");
+    ui.Toggle("Trackpad lock-on", "Hold Shift to lock on, so one hand can stay on the trackpad. Shift then does nothing "
+              "else in the game.", "crackdown_trackpad_lock_on", false, "Off", "On");
     ImGui::EndDisabled();
     if (ui.ConfirmRow("Keyboard and mouse defaults",
                       "Restores the default keyboard controls and mouse sensitivity.", "Reset to defaults",
@@ -984,6 +986,9 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
         ImGui::BeginDisabled();
       }
       for (const KeyboardAction& action : kKeyboardActions) {
+        KeyboardRow(ui, action);
+      }
+      for (const KeyboardAction& action : kCrackdownActions) {
         KeyboardRow(ui, action);
       }
       if (!enabled) {

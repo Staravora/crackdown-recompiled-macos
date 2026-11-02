@@ -71,30 +71,30 @@ void TestMapping() {
     const char* label;
     const char* default_binding;
   } kExpected[] = {
-      {"keybind_a", "A", "Semicolon,Space"},
-      {"keybind_b", "B", "Quote,Backspace"},
-      {"keybind_x", "X", "L"},
-      {"keybind_y", "Y", "P"},
-      {"keybind_left_shoulder", "Left bumper", "1"},
-      {"keybind_right_shoulder", "Right bumper", "3"},
-      {"keybind_left_trigger", "Left trigger", "Q,I,RMB"},
-      {"keybind_right_trigger", "Right trigger", "E,O,LMB"},
-      {"keybind_lstick_up", "Left stick up", "W"},
-      {"keybind_lstick_down", "Left stick down", "S"},
-      {"keybind_lstick_left", "Left stick left", "A"},
-      {"keybind_lstick_right", "Left stick right", "D"},
-      {"keybind_lstick_press", "Left stick press", "F"},
-      {"keybind_rstick_up", "Right stick up", "Up"},
-      {"keybind_rstick_down", "Right stick down", "Down"},
-      {"keybind_rstick_left", "Right stick left", "Left"},
-      {"keybind_rstick_right", "Right stick right", "Right"},
-      {"keybind_rstick_press", "Right stick press", "K"},
-      {"keybind_dpad_up", "D-pad up", "Shift+Up"},
-      {"keybind_dpad_down", "D-pad down", "Shift+Down"},
-      {"keybind_dpad_left", "D-pad left", "Shift+Left"},
-      {"keybind_dpad_right", "D-pad right", "Shift+Right"},
-      {"keybind_back", "View / Back", "Z,Tab"},
-      {"keybind_start", "Menu / Start", "X,Return"},
+      {"keybind_lstick_up", "Move forward", "W"},
+      {"keybind_lstick_down", "Move back", "S"},
+      {"keybind_lstick_left", "Move left", "A"},
+      {"keybind_lstick_right", "Move right", "D"},
+      {"keybind_a", "Jump / Accept", "Space,Return"},
+      {"keybind_b", "Kick (hold: pick up) / Back", "F,Backspace"},
+      {"keybind_x", "Reload (hold: equip)", "R"},
+      {"keybind_y", "Enter / Exit / Use", "E"},
+      {"keybind_right_trigger", "Fire", "LMB"},
+      {"keybind_left_trigger", "Lock on", "RMB"},
+      {"keybind_right_shoulder", "Throw grenade", "Q"},
+      {"keybind_left_shoulder", "Left bumper", "V"},
+      {"keybind_lstick_press", "Crouch", "C"},
+      {"keybind_rstick_press", "Right stick press", "B"},
+      {"keybind_rstick_up", "Camera up", "Up"},
+      {"keybind_rstick_down", "Camera down", "Down"},
+      {"keybind_rstick_left", "Camera left", "Left"},
+      {"keybind_rstick_right", "Camera right", "Right"},
+      {"keybind_dpad_up", "D-pad up", "1,Shift+Up"},
+      {"keybind_dpad_down", "D-pad down", "2,Shift+Down"},
+      {"keybind_dpad_left", "D-pad left", "3,Shift+Left"},
+      {"keybind_dpad_right", "D-pad right", "4,Shift+Right"},
+      {"keybind_back", "Map", "Tab"},
+      {"keybind_start", "Pause", "Escape"},
   };
   CHECK(sizeof(kExpected) / sizeof(kExpected[0]) == kKeyboardActions.size());
   for (const auto& expected : kExpected) {
@@ -130,10 +130,12 @@ void TestCapture() {
 }
 
 void TestRejection() {
-  for (ImGuiKey key : {ImGuiKey_LeftShift, ImGuiKey_RightShift, ImGuiKey_LeftCtrl, ImGuiKey_RightCtrl,
-                       ImGuiKey_LeftAlt, ImGuiKey_RightAlt}) {
-    CHECK(KeyboardBindingFor(key, false, false, false).empty());
-  }
+  CHECK(KeyboardBindingFor(ImGuiKey_LeftShift, true, false, false) == "Shift");
+  CHECK(KeyboardBindingFor(ImGuiKey_RightCtrl, false, true, false) == "Control");
+  CHECK(KeyboardBindingFor(ImGuiKey_LeftAlt, false, false, true) == "Option");
+  CHECK(KeyboardBindingFor(ImGuiKey_LeftSuper, false, false, false) == "Command");
+  CHECK(KeyboardBindingIsValid("Shift"));
+  CHECK(KeyboardBindingIsValid("Option,Command"));
   for (ImGuiKey key : {ImGuiKey_F2, ImGuiKey_F3, ImGuiKey_F4, ImGuiKey_F7, ImGuiKey_F10, ImGuiKey_F11,
                        ImGuiKey_F12, ImGuiKey_Escape, ImGuiKey_GraveAccent}) {
     CHECK(KeyboardBindingIsReserved(key));
@@ -145,7 +147,7 @@ void TestRejection() {
     CHECK(KeyboardKeyName(key) == nullptr);
     CHECK(KeyboardBindingFor(key, false, false, false).empty());
   }
-  CHECK(!KeyboardBindingIsValid("Escape"));
+  CHECK(KeyboardBindingIsValid("Escape"));
   CHECK(!KeyboardBindingIsValid("F12"));
   CHECK(!KeyboardBindingIsValid("Backtick"));
 }
@@ -166,10 +168,10 @@ void TestEscapeCancelsCapture() {
 
 void TestValidity() {
   for (const char* good : {"Space", "Semicolon,Space", "Shift+Up", "Ctrl+Shift+W", "NumpadPlus", "F1",
-                           "Shift+Up,Shift+Down", " Z , Tab ", "Q,I,RMB", "E,O,LMB", "LMB"}) {
+                           "Shift+Up,Shift+Down", " Z , Tab ", "Q,I,RMB", "E,O,LMB", "LMB", "Shift", "Escape"}) {
     CHECK(KeyboardBindingIsValid(good));
   }
-  for (const char* bad : {"", "NotAKey", "Shift", "Shift+", "Foo+Up", "Up,", ",Up", "Up,,Down", "Shift+Escape",
+  for (const char* bad : {"", "NotAKey", "Shift+", "Foo+Up", "Up,", ",Up", "Up,,Down", "Shift+Escape",
                           "Ctrl+F3", "Control+", "Return+", "MouseMove"}) {
     CHECK(!KeyboardBindingIsValid(bad));
   }
@@ -179,7 +181,12 @@ void TestLabel() {
   CHECK(KeyboardBindingLabel("Semicolon,Space") == "Semicolon or Space");
   CHECK(KeyboardBindingLabel("Shift+Up") == "Shift+Up");
   CHECK(KeyboardBindingLabel("Z,Tab") == "Z or Tab");
+#if defined(__APPLE__)
+  CHECK(KeyboardBindingLabel("Q,I,RMB") == "Q or I or Right click");
+  CHECK(KeyboardBindingLabel("Alt+Up,LMB") == "Option+Up or Click");
+#else
   CHECK(KeyboardBindingLabel("Q,I,RMB") == "Q or I or RMB");
+#endif
   CHECK(KeyboardBindingLabel("") == "None");
 }
 
@@ -192,11 +199,11 @@ void TestSaved() {
   CHECK(SavedKeyboardBinding(store, *Find("keybind_a")) == "Shift+Up");
   CHECK(KeyboardBindingLabel(SavedKeyboardBinding(store, *Find("keybind_a"))) == "Shift+Up");
   store.Set("keybind_b", "NotAKey");
-  CHECK(SavedKeyboardBinding(store, *Find("keybind_b")) == "Quote,Backspace");
+  CHECK(SavedKeyboardBinding(store, *Find("keybind_b")) == "F,Backspace");
   store.Set("keybind_start", "F12");
-  CHECK(SavedKeyboardBinding(store, *Find("keybind_start")) == "X,Return");
-  CHECK(KeyboardBindingLabel(SavedKeyboardBinding(store, *Find("keybind_back"))) == "Z or Tab");
-  CHECK(SavedKeyboardBinding(store, *Find("keybind_right_trigger")) == "E,O,LMB");
+  CHECK(SavedKeyboardBinding(store, *Find("keybind_start")) == "Escape");
+  CHECK(KeyboardBindingLabel(SavedKeyboardBinding(store, *Find("keybind_back"))) == "Tab");
+  CHECK(SavedKeyboardBinding(store, *Find("keybind_right_trigger")) == "LMB");
 }
 
 void TestPendingAndReset() {
@@ -210,7 +217,7 @@ void TestPendingAndReset() {
 
   store.Set("keybind_a", "G");
   CHECK(SavedKeyboardBinding(store, *Find("keybind_a")) == "G");
-  CHECK(store.saved["keybind_a"] == "Semicolon,Space");
+  CHECK(store.saved["keybind_a"] == "Space,Return");
   CHECK(store.Save());
   CHECK(store.saved["keybind_a"] == "G");
 
@@ -222,9 +229,9 @@ void TestPendingAndReset() {
   CHECK(store.Get("crackdown_show_fps") == "true");
   CHECK(store.saved["keybind_a"] == "G");
   CHECK(store.Save());
-  CHECK(store.saved["keybind_a"] == "Semicolon,Space");
-  CHECK(store.Get("keybind_right_trigger") == "E,O,LMB");
-  CHECK(store.Get("keybind_left_trigger") == "Q,I,RMB");
+  CHECK(store.saved["keybind_a"] == "Space,Return");
+  CHECK(store.Get("keybind_right_trigger") == "LMB");
+  CHECK(store.Get("keybind_left_trigger") == "RMB");
 }
 
 void TestKeyboardAndMouseReset() {
@@ -289,8 +296,8 @@ void TestSources() {
 void TestKeyboardToggle() {
   const std::string config = check::ReadText(std::string(CRACKDOWN_SRC_DIR) + "/../config/crackdown.toml");
   CHECK(Has(config, "mnk_mouse = true"));
-  CHECK(Has(config, "keybind_right_trigger = \"E,O,LMB\""));
-  CHECK(Has(config, "keybind_left_trigger = \"Q,I,RMB\""));
+  CHECK(Has(config, "keybind_right_trigger = \"LMB\""));
+  CHECK(Has(config, "keybind_left_trigger = \"RMB\""));
 
   PendingStore store;
   CHECK(store.Get("mnk_mode", "false") == "false");
@@ -304,7 +311,7 @@ void TestKeyboardToggle() {
   CHECK(store.Save());
   ResetKeyboardDefaults(store);
   CHECK(store.Get("mnk_mode") == "false");
-  CHECK(store.Get("keybind_a") == "Semicolon,Space");
+  CHECK(store.Get("keybind_a") == "Space,Return");
 
   store.Set("keybind_b", "H");
   store.Set("mnk_mode", "false");
@@ -350,12 +357,12 @@ bool ReleasesCapture(VirtualKey key, const std::map<std::string, std::string>& b
 void TestMenuIntentFollowsBindings() {
   const std::map<std::string, std::string> defaults = {{"keybind_start", Find("keybind_start")->default_binding},
                                                        {"keybind_back", Find("keybind_back")->default_binding}};
-  for (const VirtualKey key : {VirtualKey::kEscape, VirtualKey::kX, VirtualKey::kReturn, VirtualKey::kZ,
-                               VirtualKey::kTab}) {
+  for (const VirtualKey key : {VirtualKey::kEscape, VirtualKey::kTab}) {
     CHECK(ReleasesCapture(key, defaults));
   }
   CHECK(!ReleasesCapture(VirtualKey::kP, defaults));
-  CHECK(!ReleasesCapture(VirtualKey::kX, defaults, {.shift = true}));
+  CHECK(!ReleasesCapture(VirtualKey::kReturn, defaults));
+  CHECK(!ReleasesCapture(VirtualKey::kTab, defaults, {.shift = true}));
 
   const std::map<std::string, std::string> remapped = {{"keybind_start", "P"}, {"keybind_back", "Shift+Up"}};
   CHECK(!ReleasesCapture(VirtualKey::kX, remapped));

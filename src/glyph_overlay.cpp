@@ -138,6 +138,10 @@ std::optional<GlyphSheet> LoadSheet(const std::vector<uint8_t>& manifest_bytes, 
 }
 
 std::string BindValue(const char* cvar) {
+  // Shift locks on too with this set, and it's the point of the setting, so prompts show it over the mouse button.
+  if (std::string_view(cvar) == "keybind_left_trigger" && rex::cvar::GetFlagByName("crackdown_trackpad_lock_on") == "true") {
+    return "Shift";
+  }
   return rex::cvar::GetFlagByName(cvar);
 }
 

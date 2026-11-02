@@ -11,6 +11,7 @@
 #include <rex/ppc.h>
 
 #include "achievements_overlay_rules.h"
+#include "action_keys.h"
 #include "cheat_hooks.h"
 #include "cheat_menu_input.h"
 #include "guest_hooks.h"
@@ -78,6 +79,9 @@ void crackdown::hooks::FilterPadState(PPCContext& ctx, uint8_t* base, GuestFunct
   const uint32_t state = ctx.r4.u32;
   original(ctx, base);
   if (state && ctx.r3.u32 == 0) {
+    if (user == 0) {
+      crackdown::action_keys::Filter(base, state, crackdown::cheats::PlayerIsDriving(base));
+    }
     crackdown::cheats::FilterMenuInput(base, user, state);
   }
   if (user == 0) {

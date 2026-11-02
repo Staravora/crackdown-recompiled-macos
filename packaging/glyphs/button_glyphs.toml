@@ -1215,3 +1215,19 @@ x = 1024
 y = 1152
 w = 128
 h = 128
+
+[[key]]
+name = "Option"
+svg = "key-option.svg"
+x = 1152
+y = 1152
+w = 128
+h = 128
+
+[[key]]
+name = "Command"
+svg = "key-command.svg"
+x = 1280
+y = 1152
+w = 128
+h = 128

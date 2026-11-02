@@ -110,6 +110,10 @@ const std::vector<std::string> kGameSettingKeys = [] {
   for (const KeyboardAction& action : kKeyboardActions) {
     keys.emplace_back(action.key);
   }
+  for (const KeyboardAction& action : kCrackdownActions) {
+    keys.emplace_back(action.key);
+  }
+  keys.emplace_back("crackdown_trackpad_lock_on");
   return keys;
 }();
 

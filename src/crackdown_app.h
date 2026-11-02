@@ -49,6 +49,7 @@
 #include "log_filter.h"
 #include "log_path.h"
 #include "main_menu_quit.h"
+#include "action_keys.h"
 #include "mouse_look.h"
 #include "orb_map.h"
 #include "platform.h"
@@ -298,6 +299,7 @@ class CrackdownApp : public rex::ReXApp {
       crackdown::CheckWindowDisplay(window()->GetNativeWindowHandle(), REXCVAR_GET(monitor));
       crackdown::StartHangWatchdog(window()->GetNativeWindowHandle(), LogsDir(user_data_root()));
       crackdown::mouse_look::Install(window());
+      crackdown::action_keys::Install(window());
       if (runtime()) {
         crackdown::free_camera::Install(window(), runtime()->virtual_membase(), user_data_root());
       }

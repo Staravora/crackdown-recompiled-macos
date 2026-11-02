@@ -22,30 +22,37 @@ struct KeyboardAction {
 
 // keybind_guide is omitted: it is empty by default and the pad ignores it.
 inline constexpr std::array<KeyboardAction, 24> kKeyboardActions = {{
-    {"keybind_a", "A", "Semicolon,Space"},
-    {"keybind_b", "B", "Quote,Backspace"},
-    {"keybind_x", "X", "L"},
-    {"keybind_y", "Y", "P"},
-    {"keybind_left_shoulder", "Left bumper", "1"},
-    {"keybind_right_shoulder", "Right bumper", "3"},
-    {"keybind_left_trigger", "Left trigger", "Q,I,RMB"},
-    {"keybind_right_trigger", "Right trigger", "E,O,LMB"},
-    {"keybind_lstick_up", "Left stick up", "W"},
-    {"keybind_lstick_down", "Left stick down", "S"},
-    {"keybind_lstick_left", "Left stick left", "A"},
-    {"keybind_lstick_right", "Left stick right", "D"},
-    {"keybind_lstick_press", "Left stick press", "F"},
-    {"keybind_rstick_up", "Right stick up", "Up"},
-    {"keybind_rstick_down", "Right stick down", "Down"},
-    {"keybind_rstick_left", "Right stick left", "Left"},
-    {"keybind_rstick_right", "Right stick right", "Right"},
-    {"keybind_rstick_press", "Right stick press", "K"},
-    {"keybind_dpad_up", "D-pad up", "Shift+Up"},
-    {"keybind_dpad_down", "D-pad down", "Shift+Down"},
-    {"keybind_dpad_left", "D-pad left", "Shift+Left"},
-    {"keybind_dpad_right", "D-pad right", "Shift+Right"},
-    {"keybind_back", "View / Back", "Z,Tab"},
-    {"keybind_start", "Menu / Start", "X,Return"},
+    {"keybind_lstick_up", "Move forward", "W"},
+    {"keybind_lstick_down", "Move back", "S"},
+    {"keybind_lstick_left", "Move left", "A"},
+    {"keybind_lstick_right", "Move right", "D"},
+    {"keybind_a", "Jump / Accept", "Space,Return"},
+    {"keybind_b", "Kick (hold: pick up) / Back", "F,Backspace"},
+    {"keybind_x", "Reload (hold: equip)", "R"},
+    {"keybind_y", "Enter / Exit / Use", "E"},
+    {"keybind_right_trigger", "Fire", "LMB"},
+    {"keybind_left_trigger", "Lock on", "RMB"},
+    {"keybind_right_shoulder", "Throw grenade", "Q"},
+    {"keybind_left_shoulder", "Left bumper", "V"},
+    {"keybind_lstick_press", "Crouch", "C"},
+    {"keybind_rstick_press", "Right stick press", "B"},
+    {"keybind_rstick_up", "Camera up", "Up"},
+    {"keybind_rstick_down", "Camera down", "Down"},
+    {"keybind_rstick_left", "Camera left", "Left"},
+    {"keybind_rstick_right", "Camera right", "Right"},
+    {"keybind_dpad_up", "D-pad up", "1,Shift+Up"},
+    {"keybind_dpad_down", "D-pad down", "2,Shift+Down"},
+    {"keybind_dpad_left", "D-pad left", "3,Shift+Left"},
+    {"keybind_dpad_right", "D-pad right", "4,Shift+Right"},
+    {"keybind_back", "Map", "Tab"},
+    {"keybind_start", "Pause", "Escape"},
+}};
+
+// Keys that do more than one pad press. See action_keys.h.
+inline constexpr std::array<KeyboardAction, 3> kCrackdownActions = {{
+    {"crackdown_key_pickup", "Pick up / Drop (one press)", "G"},
+    {"crackdown_key_gas", "Gas, while driving", "W"},
+    {"crackdown_key_brake", "Brake / Reverse, while driving", "S"},
 }};
 
 namespace keybind_detail {
@@ -97,11 +104,16 @@ inline const char* KeyboardKeyName(ImGuiKey key) {
       return "Escape";
     case ImGuiKey_LeftCtrl:
     case ImGuiKey_RightCtrl:
+      return "Control";
     case ImGuiKey_LeftShift:
     case ImGuiKey_RightShift:
+      return "Shift";
     case ImGuiKey_LeftAlt:
     case ImGuiKey_RightAlt:
-      return nullptr;
+      return "Option";
+    case ImGuiKey_LeftSuper:
+    case ImGuiKey_RightSuper:
+      return "Command";
     case ImGuiKey_Apostrophe:
       return "Quote";
     case ImGuiKey_Comma:
@@ -188,11 +200,19 @@ inline bool KeyboardBindingIsReserved(ImGuiKey key) {
   }
 }
 
+// A modifier held on its own. The driver can't read these, so action_keys.cpp does.
+inline bool KeyboardKeyIsModifier(std::string_view name) {
+  return name == "Shift" || name == "Control" || name == "Option" || name == "Command";
+}
+
 // The binding to store for a captured key, e.g. "Space" or "Shift+Up".
 inline std::string KeyboardBindingFor(ImGuiKey key, bool shift, bool ctrl, bool alt) {
   const char* name = KeyboardKeyName(key);
   if (!name || KeyboardBindingIsReserved(key)) {
     return {};
+  }
+  if (KeyboardKeyIsModifier(name)) {
+    return name;
   }
   std::string binding;
   if (shift) {
@@ -208,6 +228,35 @@ inline std::string KeyboardBindingFor(ImGuiKey key, bool shift, bool ctrl, bool 
   return binding;
 }
 
+namespace keybind_detail {
+
+// A key as the player's own keyboard calls it.
+inline std::string KeyWord(std::string_view part) {
+#if defined(__APPLE__)
+  std::string shown;
+  for (size_t plus = part.find('+'); plus != std::string_view::npos && plus != 0; plus = part.find('+')) {
+    const std::string_view head = part.substr(0, plus);
+    shown += head == "Alt" ? "Option" : head == "Ctrl" ? "Control" : std::string(head);
+    shown += '+';
+    part.remove_prefix(plus + 1);
+  }
+  if (part == "LMB") {
+    return shown + "Click";
+  }
+  if (part == "RMB") {
+    return shown + "Right click";
+  }
+  if (part == "Backspace") {
+    return shown + "Delete";
+  }
+  return shown + std::string(part);
+#else
+  return std::string(part);
+#endif
+}
+
+}  // namespace keybind_detail
+
 // "Semicolon,Space" -> "Semicolon or Space".
 inline std::string KeyboardBindingLabel(std::string_view binding) {
   if (binding.empty()) {
@@ -222,7 +271,7 @@ inline std::string KeyboardBindingLabel(std::string_view binding) {
     if (!label.empty()) {
       label += " or ";
     }
-    label += part;
+    label += keybind_detail::KeyWord(part);
     if (comma == std::string_view::npos) {
       break;
     }
@@ -248,6 +297,10 @@ inline bool NameIsBindable(std::string_view name) {
 }
 
 inline bool BindingPartIsValid(std::string_view part) {
+  // Escape can't be captured, since it cancels capture, but on its own it's the default for Pause.
+  if (part == "Escape") {
+    return true;
+  }
   for (;;) {
     const std::size_t plus = part.find('+');
     if (plus == std::string_view::npos || plus == 0) {
@@ -290,6 +343,9 @@ inline std::string SavedKeyboardBinding(const trg::SettingsStore& settings, cons
 
 inline void ResetKeyboardDefaults(trg::SettingsStore& settings) {
   for (const KeyboardAction& action : kKeyboardActions) {
+    settings.Set(action.key, action.default_binding);
+  }
+  for (const KeyboardAction& action : kCrackdownActions) {
     settings.Set(action.key, action.default_binding);
   }
 }

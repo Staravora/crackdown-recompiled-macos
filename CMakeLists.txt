@@ -234,6 +234,7 @@ set(CRACKDOWN_SOURCES
     src/main_menu_quit.cpp
     src/massive_server_guard.cpp
     src/mouse_look.cpp
+    src/action_keys.cpp
     src/nan_guards.cpp
     src/orb_map.cpp
     src/platform.cpp

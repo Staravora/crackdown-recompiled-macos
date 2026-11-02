@@ -23,3 +23,5 @@ After editing or adding an SVG (new glyphs also go in the lists at the top of th
 It needs Microsoft Edge or Chrome to rasterize the SVGs; the rest is the Python standard library. The outputs are
 committed, so building the port needs neither. Labels use Segoe UI Bold (Arial as fallback), so render on Windows
 to reproduce the committed sheet exactly.
+
+`key-shift`, `key-control`, `key-option` and `key-command` are Mac-style caps. They were drawn into the sheet with CoreText, in the same frame as the SVGs, because headless Chrome-family browsers can't start from every environment. Rerunning `make-button-glyphs.py` replaces them with the SVG renders in the same cells.

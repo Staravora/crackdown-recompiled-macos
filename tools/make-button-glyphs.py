@@ -64,7 +64,7 @@ KEYBIND_NAMES = frozenset(
     + ["NumpadEnter", "NumpadPlus", "NumpadMinus", "NumpadStar", "NumpadSlash", "PrintScreen", "Pause",
        "CapsLock", "NumLock", "ScrollLock", "LMB", "RMB", "MMB"])
 # Prompt-only glyphs with no keybind of their own.
-EXTRA_KEYS = frozenset(("WheelUp", "WheelDown", "MouseMove", "WASD", "Arrows"))
+EXTRA_KEYS = frozenset(("WheelUp", "WheelDown", "MouseMove", "WASD", "Arrows", "Option", "Command"))
 
 MOUSE_FILES = {"LMB": "mouse-lmb", "RMB": "mouse-rmb", "MMB": "mouse-mmb", "WheelUp": "mouse-wheelup",
                "WheelDown": "mouse-wheeldown", "MouseMove": "mouse-move"}
@@ -75,7 +75,7 @@ KEYS = tuple(
        "PageDown", "Left", "Right", "Up", "Down", "Shift", "Control", "Alt", "CapsLock"]
     + [f"Numpad{i}" for i in range(10)]
     + ["NumpadEnter", "NumpadPlus", "NumpadMinus", "NumpadStar", "NumpadSlash", "PrintScreen", "Pause", "NumLock",
-       "ScrollLock", "LMB", "RMB", "MMB", "WheelUp", "WheelDown", "MouseMove", "WASD", "Arrows"])
+       "ScrollLock", "LMB", "RMB", "MMB", "WheelUp", "WheelDown", "MouseMove", "WASD", "Arrows", "Option", "Command"])
 
 
 def key_file(name):
