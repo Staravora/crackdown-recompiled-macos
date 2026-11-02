@@ -299,7 +299,7 @@ def rewrite(source, elements):
     a = "\toutput.oPos.xy += g_HalfPixelOffset * output.oPos.w;\n"
     if source.count(a) != 1:
         raise ValueError("no position line")
-    source = source.replace(a, "#ifdef __air__\n\toutput.oPos.xy = output.oPos.xy * g_ScreenScale + g_ScreenOffset * output.oPos.w;\n\toutput.oPos.z += g_DepthOffset * output.oPos.w;\n#else\n" + a + "#endif\n")
+    source = source.replace(a, "#ifdef __air__\n\toutput.oPos.xy = output.oPos.xy * g_ScreenScale + g_ScreenOffset * output.oPos.w;\n\toutput.oPos.z += g_DepthOffset * output.oPos.w;\n#endif\n" + a)
     a = "\tfloat4 r0 = 0.0;\n"
     if source.count(a) != 1:
         raise ValueError("no r0")

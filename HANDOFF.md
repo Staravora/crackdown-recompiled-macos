@@ -1,5 +1,13 @@
 # Session handoff
 
+## 2026-11-01 (late) — Water grid fixed: half-pixel offset was never live
+- **Bruce's report:** a new grid on the water, and less movement than the emulator. Also dark shapes on the water that follow the camera.
+- **Cause:** `pull_vertices.py` put `output.oPos.xy += g_HalfPixelOffset` in the `#else` of its Metal block, so Metal never ran it, in any shader, and `shadow.cpp` never set it. The Xenos samples at whole pixels and Metal at centres, so every D3D-style full-screen quad, which is shifted half a pixel, missed its last row and column. On the FFT that starved the data as well, leaving a flat band beside a black line on every tile of the wave maps.
+- **Fix:** the line now runs on Metal, and `shadow.cpp` sets it to (1/width, -1/height) per viewport, 0 for screen-space draws, whose transform has it. **Rerun `pull_vertices.py` after pulling this.** Every non-screen-space draw moved half a pixel, so everything from bloom to shadows to text should line up better, but only sea level by day has been looked at.
+- **Verified:** the raw wave map has data in every row and column, the grid is gone at sea level, and there Metal is a close match to the emulator. **Not verified:** Bruce's river spots, his dark band, the moving glints, the camera-following shapes, and everything else after the half-pixel move.
+- **Camera-following shapes:** not looked at. Water reads its reflection by screen position, and that picture holds the world's silhouettes in alpha, so a shape moving with the view is plausible, in the game too. Needs a saved spot and a look at both windows.
+- **How the search went wrong, for next time:** the float `show=` path goes through the gamma ramp, so values above 1 read black, which gave me false readings on the FFT and its table. `no_clears show=<target>` on an 8-bit target is the honest view of a resolve target. Writing texture coordinates into a target gave the exact answer. And my shader listings filtered out `#` lines, which hid the `#else`.
+
 ## 2026-11-01 (late night) — Boss camera cause found
 - **Bruce on the controls:** "much much better and extremely viable with trackpad".
 - **Layout changes after his drive:** R was the pad's X, which swaps weapons, so Q is now X. Bruce recalls reload being LB, which no prompt names, so R is LB, to confirm in play. G is the grenade, F Enter/Exit/Use, V kick, and E the pick-up key, which prompts for B now show. He confirmed F, V and E tap to throw, hold to drop.

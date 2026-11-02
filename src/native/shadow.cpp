@@ -59,6 +59,7 @@ constexpr uint32_t kLoopConstants = 32;
 constexpr size_t kSharedBytes = kLoopTableOffset + kLoopConstants * 16;
 constexpr size_t kBooleansOffset = 256;
 constexpr size_t kAlphaThresholdOffset = 272;
+constexpr size_t kHalfPixelOffset = 264;
 constexpr size_t kScreenScaleOffset = 280;
 constexpr size_t kScreenOffsetOffset = 288;
 constexpr size_t kDepthOffsetOffset = 296;
@@ -734,6 +735,7 @@ uint32_t g_debug_stop_ps = 0;
 bool g_debug_stopped = false;
 bool g_debug_alpha = false;
 bool g_debug_no_stencil = false;
+bool g_debug_no_clears = false;
 std::ofstream* g_dump = nullptr;
 int g_debug_id = 0;
 
@@ -823,7 +825,7 @@ void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& draw
     ++g_totals.missed_resolves;
     g_textures->ForgetResolve(run.dest.data());
   }
-  if (clears) {
+  if (clears && !g_debug_no_clears) {
     ClearAfterResolve(run, device, target);
   }
   if (resolve >= 0 || clears) {
@@ -1024,6 +1026,12 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory) {
         const std::array<float, 4> screen =
             screen_space ? std::array<float, 4>{2.0f / viewport.width, -2.0f / viewport.height, 1.0f / viewport.width - 1.0f, 1.0f - 1.0f / viewport.height}
                          : std::array<float, 4>{1.0f, 1.0f, 0.0f, 0.0f};
+        // Pixel centres sit on whole numbers on the Xenos and half a pixel in on Metal, so everything moves over by that.
+        // Without it a full-screen pass misses its last row and column, which on the ocean's tiled wave maps is a grid.
+        // Screen-space draws have it built into their transform.
+        const std::array<float, 2> half_pixel =
+            screen_space ? std::array<float, 2>{0.0f, 0.0f} : std::array<float, 2>{1.0f / viewport.width, -1.0f / viewport.height};
+        std::memcpy(shared + kHalfPixelOffset, half_pixel.data(), sizeof(float) * 2);
         std::memcpy(shared + kScreenScaleOffset, screen.data(), sizeof(float) * 2);
         std::memcpy(shared + kScreenOffsetOffset, screen.data() + 2, sizeof(float) * 2);
         std::memcpy(shared + kDepthOffsetOffset, &depth_offset, sizeof(depth_offset));
@@ -1219,7 +1227,7 @@ void RenderThread() {
       std::string word;
       bool want_dump = false;
       std::string name = "live";
-      g_debug_skip_blended = g_debug_ids = g_debug_no_resolves = g_debug_alpha = g_debug_no_stencil = false;
+      g_debug_skip_blended = g_debug_ids = g_debug_no_resolves = g_debug_alpha = g_debug_no_stencil = g_debug_no_clears = false;
       g_debug_show = -1;
       g_debug_skip_ps.clear();
       g_debug_stop_ps = 0;
@@ -1229,6 +1237,7 @@ void RenderThread() {
         g_debug_no_resolves |= word == "no_resolves";
         g_debug_alpha |= word == "alpha";
         g_debug_no_stencil |= word == "no_stencil";
+        g_debug_no_clears |= word == "no_clears";
         if (word.rfind("stop_ps=", 0) == 0) {
           g_debug_stop_ps = uint32_t(std::stoul(word.substr(8), nullptr, 16));
         }
