@@ -562,7 +562,7 @@ class MetalDeviceImpl final : public MetalDevice {
 
   void CopyDepthToStack(int target, int stack, uint32_t slice) override {
     EndPass();
-    id<MTLTexture> from = targets_[size_t(target)].depth;
+    id<MTLTexture> from = ReadDepth(Resolved(target));
     id<MTLTexture> to = textures_[size_t(stack)];
     CopyDepth(from, MTLOriginMake(0, 0, 0), MTLSizeMake(std::min(from.width, to.width), std::min(from.height, to.height), 1), to, 0,
               MTLOriginMake(0, 0, slice));
@@ -588,7 +588,7 @@ class MetalDeviceImpl final : public MetalDevice {
       return;
     }
     BeginPass(clear.target, MetalClear{});
-    [encoder_ setRenderPipelineState:ClearPipeline(target.color != nil, color, target.color.pixelFormat == kFloatColorFormat)];
+    [encoder_ setRenderPipelineState:ClearPipeline(target.color != nil, color, target.color.pixelFormat == kFloatColorFormat, target.samples)];
     [encoder_ setDepthStencilState:clear.depth ? clear_writing_depth_ : clear_keeping_depth_];
     [encoder_ setStencilReferenceValue:clear.stencil_value];
     [encoder_ setCullMode:MTLCullModeNone];
@@ -602,8 +602,8 @@ class MetalDeviceImpl final : public MetalDevice {
 
   void CopyTarget(const MetalCopy& copy) override {
     EndPass();
-    const Target& target = targets_[size_t(copy.target)];
-    id<MTLTexture> from = copy.depth ? target.depth : target.color;
+    const Target& target = Resolved(copy.target);
+    id<MTLTexture> from = copy.depth ? ReadDepth(target) : ReadColor(target);
     id<MTLTexture> to = resolves_[size_t(copy.resolve)];
     const int32_t left = std::max(copy.left, 0), top = std::max(copy.top, 0);
     const int32_t dest_x = copy.dest_x + left - copy.left, dest_y = copy.dest_y + top - copy.top;
@@ -701,7 +701,7 @@ class MetalDeviceImpl final : public MetalDevice {
       EndPass();
       buffer_ = nil;
 
-      id<MTLTexture> shown = shown_target_ >= 0 ? targets_[size_t(shown_target_)].color : nil;
+      id<MTLTexture> shown = shown_target_ >= 0 ? ReadColor(Resolved(shown_target_)) : nil;
       if (shown && (shown_gamma_ || shown.pixelFormat == kFloatColorFormat) && gamma_ramp_set_) {
         shown = ThroughGammaRamp(buffer, shown);
       }
@@ -773,12 +773,20 @@ class MetalDeviceImpl final : public MetalDevice {
     return timing;
   }
 
-  int AddTarget(uint32_t width, uint32_t height, bool has_color, bool float_color) override {
+  int AddTarget(uint32_t width, uint32_t height, bool has_color, bool float_color, uint32_t samples) override {
     Target target;
+    target.samples = samples > 1 && [device_ supportsTextureSampleCount:samples] ? samples : 1;
+    const MTLPixelFormat color_format = float_color ? kFloatColorFormat : MTLPixelFormatBGRA8Unorm;
     if (has_color) {
-      target.color = NewTarget(float_color ? kFloatColorFormat : MTLPixelFormatBGRA8Unorm, width, height);
+      target.color = NewTarget(color_format, width, height, target.samples);
     }
-    target.depth = NewTarget(kDepthFormat, width, height);
+    target.depth = NewTarget(kDepthFormat, width, height, target.samples);
+    if (target.samples > 1) {
+      if (has_color) {
+        target.color_resolved = NewTarget(color_format, width, height);
+      }
+      target.depth_resolved = NewTarget(kDepthFormat, width, height);
+    }
     targets_.push_back(target);
     return int(targets_.size()) - 1;
   }
@@ -816,6 +824,8 @@ class MetalDeviceImpl final : public MetalDevice {
     ++pass_number_;
     pass_has_color_ = target.color != nil;
     pass_float_ = target.color.pixelFormat == kFloatColorFormat;
+    pass_samples_ = target.samples;
+    pass_target_ = target_index;
     pass_width_ = target.depth.width;
     pass_height_ = uint32_t(target.depth.height);
     current_scissor_ = {0, pass_height_};
@@ -853,7 +863,7 @@ class MetalDeviceImpl final : public MetalDevice {
 
   void Draw(const MetalDraw& draw) override {
     const Pipeline& pipeline = pipelines_[size_t(draw.vertex_shader)];
-    id<MTLRenderPipelineState> state = pass_has_color_ ? pipeline.state : pipeline.depth_only;
+    id<MTLRenderPipelineState> state = pass_samples_ > 1 ? GreyPipeline(draw.vertex_shader) : pass_has_color_ ? pipeline.state : pipeline.depth_only;
     if (draw.colorless && pass_has_color_ && !pass_float_) {
       state = ColorlessPipeline(draw.vertex_shader) ?: state;
     } else if (draw.pixel_shader >= 0) {
@@ -976,11 +986,12 @@ class MetalDeviceImpl final : public MetalDevice {
     std::array<id<MTLFunction>, 2> functions;
   };
 
-  using ShadedKey = std::tuple<int, int, uint32_t, uint32_t, bool, bool, bool>;
+  using ShadedKey = std::tuple<int, int, uint32_t, uint32_t, bool, bool, bool, uint32_t, bool>;
   using DepthKey = std::array<uint32_t, 3>;
 
   id<MTLRenderPipelineState> ColorlessPipeline(int vertex_shader) {
-    const auto found = colorless_pipelines_.find(vertex_shader);
+    const std::pair key = {vertex_shader, pass_samples_};
+    const auto found = colorless_pipelines_.find(key);
     if (found != colorless_pipelines_.end()) {
       return found->second;
     }
@@ -991,14 +1002,39 @@ class MetalDeviceImpl final : public MetalDevice {
     descriptor.stencilAttachmentPixelFormat = kDepthFormat;
     descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
     descriptor.colorAttachments[0].writeMask = MTLColorWriteMaskNone;
+    descriptor.rasterSampleCount = pass_samples_;
     NSError* failure = nil;
     id<MTLRenderPipelineState> state = [device_ newRenderPipelineStateWithDescriptor:descriptor error:&failure];
-    colorless_pipelines_[vertex_shader] = state;
+    colorless_pipelines_[key] = state;
+    return state;
+  }
+
+  // The grey pipelines for a multisampled pass. AddVertexShader builds the single-sample ones up front.
+  id<MTLRenderPipelineState> GreyPipeline(int vertex_shader) {
+    const std::tuple key = {vertex_shader, pass_samples_, pass_has_color_};
+    const auto found = grey_pipelines_.find(key);
+    if (found != grey_pipelines_.end()) {
+      return found->second;
+    }
+    MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
+    descriptor.vertexFunction = pipelines_[size_t(vertex_shader)].vertex;
+    descriptor.depthAttachmentPixelFormat = kDepthFormat;
+    descriptor.stencilAttachmentPixelFormat = kDepthFormat;
+    if (pass_has_color_) {
+      descriptor.fragmentFunction = clay_;
+      descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    }
+    descriptor.rasterSampleCount = pass_samples_;
+    NSError* failure = nil;
+    id<MTLRenderPipelineState> state = [device_ newRenderPipelineStateWithDescriptor:descriptor error:&failure];
+    grey_pipelines_[key] = state;
     return state;
   }
 
   id<MTLRenderPipelineState> ShadedPipeline(const MetalDraw& draw) {
-    const ShadedKey key = {draw.vertex_shader, draw.pixel_shader, draw.blend_control, draw.color_mask & 0xF, draw.alpha_test, pass_has_color_, pass_float_};
+    const bool alpha_to_coverage = draw.alpha_to_coverage && pass_samples_ > 1;
+    const ShadedKey key = {draw.vertex_shader, draw.pixel_shader, draw.blend_control, draw.color_mask & 0xF, draw.alpha_test, pass_has_color_,
+                           pass_float_, pass_samples_, alpha_to_coverage};
     const auto found = shaded_pipelines_.find(key);
     if (found != shaded_pipelines_.end()) {
       return found->second;
@@ -1008,6 +1044,8 @@ class MetalDeviceImpl final : public MetalDevice {
     descriptor.fragmentFunction = pixel_shaders_[size_t(draw.pixel_shader)].functions[draw.alpha_test];
     descriptor.depthAttachmentPixelFormat = kDepthFormat;
     descriptor.stencilAttachmentPixelFormat = kDepthFormat;
+    descriptor.rasterSampleCount = pass_samples_;
+    descriptor.alphaToCoverageEnabled = alpha_to_coverage;
     // A shadow map has no colour, but a cut-out's pixel shader still decides which pixels cast.
     MTLRenderPipelineColorAttachmentDescriptor* color = descriptor.colorAttachments[0];
     if (pass_has_color_) {
@@ -1034,25 +1072,67 @@ class MetalDeviceImpl final : public MetalDevice {
     return state;
   }
 
+  // A multisampled target draws into color and depth, and keeps a single-sample copy of each for anything that reads it,
+  // brought up to date only when something does.
   struct Target {
     id<MTLTexture> color;
     id<MTLTexture> depth;
+    id<MTLTexture> color_resolved;
+    id<MTLTexture> depth_resolved;
+    uint32_t samples = 1;
+    bool unresolved = false;
   };
 
-  id<MTLTexture> NewTarget(MTLPixelFormat format, uint32_t width, uint32_t height) {
+  id<MTLTexture> NewTarget(MTLPixelFormat format, uint32_t width, uint32_t height, uint32_t samples = 1) {
     MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
                                                                                           width:width
                                                                                          height:height
                                                                                       mipmapped:NO];
     descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     descriptor.storageMode = MTLStorageModePrivate;
+    if (samples > 1) {
+      descriptor.textureType = MTLTextureType2DMultisample;
+      descriptor.sampleCount = samples;
+      descriptor.usage = MTLTextureUsageRenderTarget;
+    }
     return [device_ newTextureWithDescriptor:descriptor];
   }
 
   void EndPass() {
+    if (encoder_ && pass_target_ >= 0 && targets_[size_t(pass_target_)].samples > 1) {
+      targets_[size_t(pass_target_)].unresolved = true;
+    }
     [encoder_ endEncoding];
     encoder_ = nil;
+    pass_target_ = -1;
   }
+
+  // Brings a multisampled target's single-sample copies up to date: a pass that loads it, draws nothing and resolves.
+  // Colour averages its samples and depth takes the first, as the Xenos's resolve does.
+  const Target& Resolved(int index) {
+    Target& target = targets_[size_t(index)];
+    if (target.samples > 1 && target.unresolved) {
+      EndPass();
+      MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+      if (target.color) {
+        pass.colorAttachments[0].texture = target.color;
+        pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStoreAndMultisampleResolve;
+        pass.colorAttachments[0].resolveTexture = target.color_resolved;
+      }
+      pass.depthAttachment.texture = target.depth;
+      pass.depthAttachment.loadAction = MTLLoadActionLoad;
+      pass.depthAttachment.storeAction = MTLStoreActionStoreAndMultisampleResolve;
+      pass.depthAttachment.resolveTexture = target.depth_resolved;
+      pass.depthAttachment.depthResolveFilter = MTLMultisampleDepthResolveFilterSample0;
+      [[buffer_ renderCommandEncoderWithDescriptor:pass] endEncoding];
+      target.unresolved = false;
+    }
+    return target;
+  }
+
+  static id<MTLTexture> ReadColor(const Target& target) { return target.samples > 1 ? target.color_resolved : target.color; }
+  static id<MTLTexture> ReadDepth(const Target& target) { return target.samples > 1 ? target.depth_resolved : target.depth; }
 
   id<MTLTexture> ThroughGammaRamp(id<MTLCommandBuffer> buffer, id<MTLTexture> source) {
     if (display_.width != source.width || display_.height != source.height) {
@@ -1071,8 +1151,8 @@ class MetalDeviceImpl final : public MetalDevice {
     return display_;
   }
 
-  id<MTLRenderPipelineState> ClearPipeline(bool has_color, bool write_color, bool float_color) {
-    const size_t index = has_color ? (write_color ? 2 : 1) + (float_color ? 2 : 0) : 0;
+  id<MTLRenderPipelineState> ClearPipeline(bool has_color, bool write_color, bool float_color, uint32_t samples) {
+    const size_t index = (has_color ? (write_color ? 2 : 1) + (float_color ? 2 : 0) : 0) + (samples > 1 ? kClearPipelineKinds : 0);
     if (!clear_pipelines_[index]) {
       MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
       descriptor.vertexFunction = clear_vertex_;
@@ -1083,6 +1163,7 @@ class MetalDeviceImpl final : public MetalDevice {
         descriptor.colorAttachments[0].pixelFormat = float_color ? kFloatColorFormat : MTLPixelFormatBGRA8Unorm;
         descriptor.colorAttachments[0].writeMask = write_color ? MTLColorWriteMaskAll : MTLColorWriteMaskNone;
       }
+      descriptor.rasterSampleCount = samples;
       clear_pipelines_[index] = [device_ newRenderPipelineStateWithDescriptor:descriptor error:nil];
     }
     return clear_pipelines_[index];
@@ -1194,7 +1275,8 @@ class MetalDeviceImpl final : public MetalDevice {
   id<MTLFunction> clear_fragment_ = nil;
   id<MTLDepthStencilState> clear_keeping_depth_ = nil;
   id<MTLDepthStencilState> clear_writing_depth_ = nil;
-  std::array<id<MTLRenderPipelineState>, 5> clear_pipelines_{};
+  static constexpr size_t kClearPipelineKinds = 5;
+  std::array<id<MTLRenderPipelineState>, kClearPipelineKinds * 2> clear_pipelines_{};
   id<MTLTexture> gamma_ramp_ = nil;
   id<MTLTexture> display_ = nil;
   id<MTLCommandBuffer> buffer_ = nil;
@@ -1214,7 +1296,8 @@ class MetalDeviceImpl final : public MetalDevice {
   std::vector<Pipeline> pipelines_;
   std::vector<PixelShader> pixel_shaders_;
   std::map<ShadedKey, id<MTLRenderPipelineState>> shaded_pipelines_;
-  std::map<int, id<MTLRenderPipelineState>> colorless_pipelines_;
+  std::map<std::pair<int, uint32_t>, id<MTLRenderPipelineState>> colorless_pipelines_;
+  std::map<std::tuple<int, uint32_t, bool>, id<MTLRenderPipelineState>> grey_pipelines_;
   std::vector<id<MTLTexture>> textures_;
   std::vector<id<MTLTexture>> resolves_;
   std::vector<id<MTLSamplerState>> samplers_;
@@ -1240,6 +1323,8 @@ class MetalDeviceImpl final : public MetalDevice {
   bool gamma_ramp_set_ = false;
   bool pass_has_color_ = false;
   bool pass_float_ = false;
+  uint32_t pass_samples_ = 1;
+  int pass_target_ = -1;
   NSUInteger pass_width_ = 0;
   uint32_t pass_height_ = 0;
   std::pair<uint32_t, uint32_t> current_scissor_{};

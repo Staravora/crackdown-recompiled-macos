@@ -51,6 +51,7 @@ constexpr uint32_t kDeviceTileRects = 12472;
 constexpr uint32_t kMaxTiles = 16;
 constexpr uint32_t kSurfaceSize = 36;
 constexpr uint32_t kSurfaceColorInfo = 28;
+constexpr uint32_t kSurfaceInfo = 24;  // RB_SURFACE_INFO: the pitch, and the MSAA sample count in bits 16 and 17.
 constexpr uint32_t kColorFormat1616Float = 6;
 constexpr uint32_t kColorFormat16161616Float = 7;
 constexpr uint32_t kConstantsPerStage = 256;
@@ -183,6 +184,7 @@ shadow::Targets TargetsOf(uint32_t device, const uint8_t* base) {
     const uint32_t format = (Load32(base, targets.color + kSurfaceColorInfo) >> 16) & 0xF;
     targets.float_color = format == kColorFormat1616Float || format == kColorFormat16161616Float;
   }
+  targets.samples = 1u << ((Load32(base, surface + kSurfaceInfo) >> 16) & 3);
   const uint32_t size = Load32(base, surface + kSurfaceSize);
   targets.width = ((size >> 18) & 0x1FFF) + 1;
   targets.height = ((size >> 3) & 0x1FFF) + 1;

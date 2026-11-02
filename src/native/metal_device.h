@@ -139,6 +139,7 @@ struct MetalDraw {
   float blend_constant[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   uint32_t color_mask = 0;
   bool alpha_test = false;
+  bool alpha_to_coverage = false;  // Used on a multisampled target only.
   bool colorless = false;  // Runs no pixel shader and leaves colour alone, as the Xenos's depth-only mode does.
   int query = -1;  // The slot of the frame's query results that counts the samples this passes.
   const int* textures = nullptr;  // Descriptors the pixel shader reads.
@@ -202,8 +203,9 @@ class MetalDevice {
   // Opens a window that shows every frame from here on.
   virtual void ShowWindow() = 0;
 
-  // A render target, with a colour part only if asked for: shadow maps are depth alone. Returns a handle.
-  virtual int AddTarget(uint32_t width, uint32_t height, bool has_color, bool float_color) = 0;
+  // A render target, with a colour part only if asked for: shadow maps are depth alone. With samples above 1 it's
+  // multisampled, and reads of it see the samples resolved. Returns a handle.
+  virtual int AddTarget(uint32_t width, uint32_t height, bool has_color, bool float_color, uint32_t samples) = 0;
 
   // Records and submits one frame. encode gets that frame's memory and calls BeginPass, Draw and ShowTarget. If capture
   // isn't empty, waits for the GPU and writes the shown target there as a PNG. finished runs on a Metal thread when the GPU

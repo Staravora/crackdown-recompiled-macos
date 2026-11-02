@@ -1,5 +1,14 @@
 # Session handoff
 
+## 2026-11-02 — Metal gets texture filtering and the game's MSAA
+- **Bruce's direction:** the emulator is "at least a little bit wrong" with the water, so it's no reference there. Next: anti-aliasing and other graphics options, then MetalFX, including frame interpolation.
+- **What reaches Metal:** the M1 supports MetalFX spatial and temporal scaling and frame interpolation (`supportsDevice` checked). FXAA already applies in Metal mode, through the emulator's swap. Render resolution and internal resolution don't yet: Metal draws at 1280x720 and hands the picture over at that size through the guest front buffer.
+- **Texture filtering:** Metal's samplers now take anisotropy as the emulator does: the fetch's `aniso_filter`, unless `anisotropic_override` applies (mipmapped, linear min and mag, point or linear mip). Side by side at the street, the oblique road shows the lane lines the emulator does, where it blurred before.
+- **MSAA:** targets take the game's sample count from the surface's `RB_SURFACE_INFO` (D3D surface `+24`, bits 16 and 17). At the street that's 2x for the main scene and 4x for the 320x180 reflection. Each multisampled target keeps single-sample copies of colour and depth, brought up to date by an empty resolving pass only when something reads it: a resolve copy, a shadow-map copy, or the shown picture. Colour averages and depth takes sample 0. Pipelines get the pass's sample count, and alpha-to-coverage turns on where `RB_COLORCONTROL` bit 4 asks.
+- **Cost:** 27.9 FPS against 29.0, 1% low 23.6 against 26.4, at the 30 setting. Edges are smoother in a full-size capture. Not yet compared with the emulator at full size.
+- **Side effect:** occlusion queries now count samples, two a pixel on the main scene, as the Xbox does.
+- **Next:** Metal handing a full-size picture to the window, which render resolution, MetalFX and frame interpolation all need.
+
 ## 2026-11-02 — Picture gaps: side by side at three spots
 - **Method:** separate timed runs, one emulator-only and one Metal-only, at a saved pose with the 30 setting, and an `app_screenshot` of the main window 62 s after launch. `solo.sh` in the scratchpad does it. Running both renderers at once fell to 10 FPS and lost the benchmark's menu presses, so it's no good for this.
 - **Benchmark gotcha:** `bench-macos.sh` retries a run with no result, so a stuck run keeps launching copies. Bruce saw three running at once. The session's safety check won't let me stop processes, so a stuck run has to time out.

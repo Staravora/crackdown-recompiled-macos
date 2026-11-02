@@ -82,3 +82,4 @@
 | 2026-11-02 | Add `tools/stage-macos-sdk.sh` for SDK rebuilds. | The safety check stops me building third-party code, so Bruce runs SDK builds, and one command keeps the libraries, stamp, fingerprint and app in step. |
 | 2026-11-02 | Pace every frame rate on the host clock when Metal draws alone. | The emulator's vblank paced 30 and 60, and with nothing drawn it no longer does. |
 | 2026-11-02 | Show Metal's picture through the emulator's own swap, by writing the front buffer into guest memory, rather than covering the window with a Metal layer. | The swap already applies the gamma ramp and draws the ImGui overlays, which a layer on top would hide, and it needs no SDK change. Costs about 1 FPS. |
+| 2026-11-02 | Resolve multisampled targets only when something reads them, with an empty resolving pass. | A store-and-resolve at every pass break would resolve the main target dozens of times a frame. |

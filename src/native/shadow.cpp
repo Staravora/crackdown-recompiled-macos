@@ -142,6 +142,7 @@ constexpr uint32_t kBlendFactorZero = 0;
 constexpr uint32_t kBlendFactorOne = 1;
 constexpr uint32_t kColorMaskFirstTarget = 0xF;
 constexpr uint32_t kAlphaTestEnable = 1 << 3;
+constexpr uint32_t kAlphaToCoverage = 1 << 4;
 constexpr uint32_t kCullBothFaces = 3;
 constexpr uint32_t kViewportScaleX = 1;
 constexpr uint32_t kPolygonOffsetFront = 1 << 11;
@@ -831,6 +832,7 @@ struct TargetKey {
   uint32_t height;
   int tile;
   bool float_color;
+  uint32_t samples;
   auto operator<=>(const TargetKey&) const = default;
 };
 std::map<TargetKey, int> g_targets;
@@ -855,7 +857,8 @@ int TileOf(const BakedDraw& draw) {
 
 int TargetOf(MetalDevice& device, const Run& run, int tile) {
   const Targets& targets = run.targets;
-  const TargetKey key = {targets.color, targets.depth, targets.width, targets.height, HalfSizeTiles(targets) ? std::max(tile, 0) : -1, targets.float_color};
+  const TargetKey key = {targets.color, targets.depth, targets.width, targets.height, HalfSizeTiles(targets) ? std::max(tile, 0) : -1, targets.float_color,
+                         targets.samples};
   if (!key.width || !key.height || key.width > kMaxTargetSize || key.height > kMaxTargetSize) {
     return -1;
   }
@@ -863,8 +866,9 @@ int TargetOf(MetalDevice& device, const Run& run, int tile) {
   if (found != g_targets.end()) {
     return found->second;
   }
-  const int target = device.AddTarget(key.width, key.height, key.color != 0, key.float_color);
-  REXLOG_INFO("Native shadow: target {}x{}, colour {:08X}, depth {:08X}, float {}", key.width, key.height, key.color, key.depth, key.float_color);
+  const int target = device.AddTarget(key.width, key.height, key.color != 0, key.float_color, key.samples);
+  REXLOG_INFO("Native shadow: target {}x{}, colour {:08X}, depth {:08X}, float {}, samples {}", key.width, key.height, key.color, key.depth,
+              key.float_color, key.samples);
   g_targets[key] = target;
   return target;
 }
@@ -1160,7 +1164,8 @@ void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& draw
   const uint32_t source = copy.flags & kResolveSourceMask;
   const bool depth = source == kResolveDepth;
   const int tile = HalfSizeTiles(run.targets) ? (copy.has_rect && copy.rect[3] <= kHalfSecondTileHeight ? 1 : 0) : -1;
-  const auto found = g_targets.find({run.targets.color, run.targets.depth, run.targets.width, run.targets.height, tile, run.targets.float_color});
+  const auto found = g_targets.find({run.targets.color, run.targets.depth, run.targets.width, run.targets.height, tile, run.targets.float_color,
+                                     run.targets.samples});
   const int target = found == g_targets.end() ? -1 : found->second;
   const int resolve = copy.texture && !g_debug_no_resolves && target >= 0 && drawn.contains(target) && (depth || (source == 0 && run.targets.color))
                           ? g_textures->ResolveInto(run.dest.data())
@@ -1403,6 +1408,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
         std::memcpy(out.blend_constant, draw.blend_constant, sizeof(out.blend_constant));
         out.color_mask = WritesNoColor(draw) ? 0 : draw.color_mask;
         out.alpha_test = alpha_test;
+        out.alpha_to_coverage = (draw.color_control & kAlphaToCoverage) != 0;
         out.colorless = counting;
         out.query = open_query;
         if (counting && g_debug_mark_queries && g_debug_marked.contains(query_slots[size_t(open_query)].query)) {
