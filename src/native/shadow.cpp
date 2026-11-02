@@ -457,6 +457,7 @@ struct Totals {
   uint64_t queries_no_room = 0;
   uint64_t front_buffers_missed = 0;
   uint64_t frames_generated = 0;
+  uint64_t motion_draws = 0;
 };
 
 // Each query's answers until both have arrived. Metal's come when its frame finishes and the emulator's when the game asks.
@@ -1556,8 +1557,49 @@ std::optional<std::array<float, 16>> BusiestViewProjection(const ViewProjections
   return busiest->first;
 }
 
+// Frame generation's motion for things that move on their own. A scene draw is known again next frame by its geometry
+// and how many times that geometry has been drawn so far this frame, which keeps a crowd's shared meshes apart as long as
+// they're drawn in the same order. One whose vertex constants past the camera's (c0–c8) changed moves on its own.
+struct MotionSeen {
+  uint64_t constants;
+  size_t offset;  // Of its vertex constants in its frame's memory.
+};
+std::unordered_map<uint64_t, MotionSeen> g_motion_now;
+std::unordered_map<uint64_t, MotionSeen> g_motion_before;
+std::unordered_map<uint64_t, uint32_t> g_motion_repeats;
+constexpr uint32_t kFirstObjectConstantDword = 9 * 4;
+constexpr uint32_t kVertexConstantDwords = uint32_t(kPixelConstantsOffset / 4);
+
+uint64_t Mix(uint64_t hash, uint64_t value) {
+  hash ^= value + 0x9E3779B97F4A7C15ull + (hash << 6) + (hash >> 2);
+  return hash * 0xBF58476D1CE4E5B9ull;
+}
+
+void NoteMotionDraw(MetalDevice& device, const BakedDraw& draw, const MetalDraw& out) {
+  uint64_t key = Mix(Mix(Mix(Mix(0, draw.vertex_shader), draw.index_buffer), draw.index_offset), draw.initiator);
+  key = Mix(key, g_motion_repeats[key]++);
+  std::array<uint64_t, 4> lanes = {1, 2, 3, 4};
+  for (uint32_t i = kFirstObjectConstantDword; i + 8 <= kVertexConstantDwords; i += 8) {
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+      lanes[lane] = Mix(lanes[lane], uint64_t(g_constants[i + lane * 2]) | uint64_t(g_constants[i + lane * 2 + 1]) << 32);
+    }
+  }
+  const uint64_t constants = Mix(Mix(Mix(lanes[0], lanes[1]), lanes[2]), lanes[3]);
+  g_motion_now[key] = {constants, out.vertex_constants};
+  const auto before = g_motion_before.find(key);
+  if (before != g_motion_before.end() && before->second.constants != constants) {
+    device.AddMotionDraw(out, before->second.offset);
+    ++g_totals.motion_draws;
+  }
+}
+
 void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswers& answers) {
   std::vector<QuerySlot>& query_slots = answers.queries;
+  if (g_frame_generation) {
+    g_motion_before.swap(g_motion_now);
+    g_motion_now.clear();
+    g_motion_repeats.clear();
+  }
   // Frame generation: the camera, and the front buffer's scene as it stands before the HUD, which is the first draw on
   // it after the 3D ones that tests no depth.
   ViewProjections view_projections;
@@ -1865,6 +1907,9 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
         out.index_count = indices.count;
         out.wide_indices = indices.wide;
         out.base_vertex = int32_t(draw.index_offset);
+        if (g_frame_generation && target == g_front_target && !snapshot_taken && (draw.depth_control & kDepthEnable)) {
+          NoteMotionDraw(device, draw, out);
+        }
         device.Draw(out);
         used += kDrawBytes;
         ++g_totals.recorded_draws;
@@ -1968,7 +2013,7 @@ void Report(const MetalDevice& device) {
       R"("shaders_found":{},"shaders_missing":{},"shaders_failed":{},"index_copy_ms_per_frame":{:.3f},)"
       R"("capture_ms_per_frame":{:.4f},"wait_ms_per_frame":{:.3f},"encode_ms_p50":{:.3f},"encode_ms_p95":{:.3f},"encode_ms_max":{:.3f},)"
       R"("gpu_frames":{},"gpu_errors":{},"gpu_ms_per_frame":{:.3f},"gpu_ms_worst":{:.3f},)"
-      R"("guest_memory_wrapped":{},"guest_checks":{},"guest_matches":{},"front_buffers_missed":{},"frames_generated_per_frame":{:.2f},"picture":[{},{}],)"
+      R"("guest_memory_wrapped":{},"guest_checks":{},"guest_matches":{},"front_buffers_missed":{},"frames_generated_per_frame":{:.2f},"motion_draws_per_frame":{:.1f},"picture":[{},{}],)"
       R"("render_scale":{:.2f},"resampled_copies":{},"dropped_copies":{},"dropped_stack_copies":{},"dropped_reads":{},"gpu_queued_ms_per_frame":{:.3f},"generation_ms_per_frame":{:.3f},)",
       guest_frames, g_totals.frames, dropped, g_totals.draws / frames, g_totals.skipped_draws / frames, g_totals.no_room,
       g_totals.recorded_draws / frames, g_totals.recorded_indices / frames, g_totals.no_shader_draws / frames,
@@ -1982,7 +2027,7 @@ void Report(const MetalDevice& device) {
       Percentile(sorted, 0.5) / 1e3, Percentile(sorted, 0.95) / 1e3, Percentile(sorted, 1.0) / 1e3, gpu.frames, gpu.errors,
       gpu.gpu_ns / 1e6 / double(std::max<uint64_t>(gpu.frames, 1)), gpu.worst_gpu_ns / 1e6,
       device.guest_memory_wrapped() ? "true" : "false", g_totals.guest_checks, g_totals.guest_matches, g_totals.front_buffers_missed,
-      g_totals.frames_generated / frames, PictureWidth(), PictureHeight(), g_render_scale, gpu.resampled_copies, gpu.dropped_copies, gpu.dropped_stack_copies, gpu.dropped_reads,
+      g_totals.frames_generated / frames, g_totals.motion_draws / frames, PictureWidth(), PictureHeight(), g_render_scale, gpu.resampled_copies, gpu.dropped_copies, gpu.dropped_stack_copies, gpu.dropped_reads,
       gpu.queued_ns / 1e6 / double(std::max<uint64_t>(gpu.frames, 1)), gpu.generation_ns / 1e6 / double(std::max<uint64_t>(gpu.frames, 1)));
   QueryTotals queries;
   {

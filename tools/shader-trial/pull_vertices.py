@@ -24,6 +24,10 @@ A shipped shader can fetch a lane as a constant, or nothing but constants, and b
 really has. The road's vertex colour says how far a surface is indoors, and it comes that way. The translator writes
 those as plain numbers, so unfreeze_constants puts the fetch back.
 
+Frame generation needs each pixel's motion, and the game keeps none. So each shader's body becomes a plain function: shaderMain
+calls it as before, and motionMain calls it twice, with this frame's constants and with last frame's, and gives both
+positions. A shader the rewrite can't handle, or whose rewrite won't compile, is built without motionMain.
+
 Vertex shaders read textures too, from fetch constants 16 to 19, and the constant table numbers those
 from 0, the same as a pixel shader's. Both stages share one table, so vertex textures move to a table
 of their own, and vertex-textures.txt says which each shader reads.
@@ -395,12 +399,76 @@ def use_texel_fetches(source, slots):
     return source.replace(a, TEXEL_FETCH + a, 1)
 
 
+ENTRY_PARAMETERS = """#ifdef __air__
+	constant Texture2DDescriptorHeap* g_Texture2DDescriptorHeap [[buffer(0)]],
+	constant Texture3DDescriptorHeap* g_Texture3DDescriptorHeap [[buffer(1)]],
+	constant TextureCubeDescriptorHeap* g_TextureCubeDescriptorHeap [[buffer(2)]],
+	constant SamplerDescriptorHeap* g_SamplerDescriptorHeap [[buffer(3)]],
+	constant PushConstants& g_PushConstants [[buffer(8)]],
+	uint vertex_id [[vertex_id]],
+	const device uint* g_Guest [[buffer(9)]],
+	constant uint* g_Fetch [[buffer(10)]],
+	constant PullElement* g_Elements [[buffer(11)]]
+#else"""
+BODY_ARGUMENTS = ("g_Texture2DDescriptorHeap, g_Texture3DDescriptorHeap, g_TextureCubeDescriptorHeap, g_SamplerDescriptorHeap, push, "
+                  "vertex_id, g_Guest, g_Fetch, g_Elements")
+MOTION_ENTRIES = f"""
+#ifdef __air__
+[[vertex]]
+Interpolators shaderMain(
+{ENTRY_PARAMETERS.split(chr(10), 1)[1].rsplit(chr(10), 1)[0]})
+{{
+	const PushConstants push = g_PushConstants;
+	return shaderBody({BODY_ARGUMENTS});
+}}
+
+struct MotionInterpolators
+{{
+	float4 position [[position]];
+	float4 now [[user(MOTION_NOW)]];
+	float4 before [[user(MOTION_BEFORE)]];
+}};
+
+// Where the vertex is now and where the same draw had it a frame ago, from the constants it had then: frame generation's
+// motion for things that move on their own.
+[[vertex]]
+MotionInterpolators motionMain(
+{ENTRY_PARAMETERS.split(chr(10), 1)[1].rsplit(chr(10), 1)[0]},
+	constant ulong& g_PreviousVertexConstants [[buffer(12)]])
+{{
+	PushConstants push = g_PushConstants;
+	const Interpolators now = shaderBody({BODY_ARGUMENTS});
+	push.VertexShaderConstants = g_PreviousVertexConstants;
+	const Interpolators before = shaderBody({BODY_ARGUMENTS});
+	return MotionInterpolators{{now.oPos, now.oPos, before.oPos}};
+}}
+#endif
+"""
+
+
+def with_motion(source):
+    """Makes the shader's body a plain function, called by shaderMain as before and twice by motionMain."""
+    a = "#ifdef __air__\n[[vertex]]\n#elif !defined(__spirv__)\n[shader(\"vertex\")]\n#endif\nInterpolators shaderMain(\n" + ENTRY_PARAMETERS
+    if source.count(a) != 1 or not source.rstrip().endswith("return output;\n}"):
+        raise ValueError("no entry point")
+    plain = ENTRY_PARAMETERS.replace("constant PushConstants& g_PushConstants", "thread const PushConstants& g_PushConstants")
+    plain = re.sub(r" \[\[\w+(\(\d+\))?\]\]", "", plain)
+    b = "#ifdef __air__\nstatic\n#elif !defined(__spirv__)\n[shader(\"vertex\")]\n#endif\nInterpolators shaderBody(\n" + plain
+    return source.replace(a, b) + MOTION_ENTRIES
+
+
 def compile_one(job):
-    source, target, log = job
-    done = subprocess.run(["xcrun", "-sdk", "macosx", "metal", "-D__air__=1", source, "-o", target],
-                          capture_output=True, text=True)
-    open(log, "w").write(done.stderr)
-    return done.returncode
+    """Compiles with motionMain, or plain if that version won't. Returns the exit code and whether it has motionMain."""
+    source, plain, target, log = job
+    for path, motion in ((source, True), (plain, False)):
+        if path is None:
+            continue
+        done = subprocess.run(["xcrun", "-sdk", "macosx", "metal", "-D__air__=1", path, "-o", target],
+                              capture_output=True, text=True)
+        open(log, "w").write(done.stderr)
+        if done.returncode == 0:
+            return 0, motion
+    return done.returncode, False
 
 
 def main():
@@ -433,9 +501,14 @@ def main():
         texture_slots[key] = vertex_texture_slots(original)
         source = use_texel_fetches(source, texel_fetch_slots(list(struct.unpack(f">{len(code) // 4}I", code))))
         source = move_vertex_textures(source)
+        plain = os.path.join(work, f"vs_{key}.plain.metal")
+        open(plain, "w").write(source)
         target = os.path.join(work, f"vs_{key}.metal")
-        open(target, "w").write(source)
-        jobs.append((target, os.path.join(output, f"vs_{key}.metallib"), os.path.join(work, f"vs_{key}.log")))
+        try:
+            open(target, "w").write(with_motion(source))
+        except ValueError:
+            target = None
+        jobs.append((target, plain, os.path.join(output, f"vs_{key}.metallib"), os.path.join(work, f"vs_{key}.log")))
     with open(os.path.join(output, "manifest.txt"), "w") as out:
         for key, addresses in sorted(manifest.items()):
             out.write(" ".join([key] + [str(value) for value in addresses]) + "\n")
@@ -446,9 +519,11 @@ def main():
         for loose, key in sorted(loose_keys.items()):
             out.write(f"{loose} {key}\n")
     with ThreadPoolExecutor(6) as pool:
-        codes = list(pool.map(compile_one, jobs))
+        results = list(pool.map(compile_one, jobs))
+    codes = [code for code, _ in results]
     report["compiled"] = codes.count(0)
-    report["failed"] = [os.path.basename(job[0]) for job, code in zip(jobs, codes) if code]
+    report["with_motion"] = sum(motion for _, motion in results)
+    report["failed"] = [os.path.basename(job[1]) for job, code in zip(jobs, codes) if code]
     json.dump(report, open(os.path.join(output, "report.json"), "w"), indent=1)
     print(json.dumps({k: (v if not isinstance(v, (list, dict)) or len(v) < 12 else len(v)) for k, v in report.items()}))
 

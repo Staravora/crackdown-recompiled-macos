@@ -265,6 +265,9 @@ class MetalDevice {
   // InterpolatePicture has MetalFX make the frame halfway between the last snapshot and this one, with the HUD from the
   // finished picture in resolve, and queues it as a picture ahead of the real one. False if it couldn't.
   virtual bool SnapshotScene(int target) = 0;
+  // A scene draw that moves on its own, drawn again into the motion with its vertex constants from a frame ago, at
+  // previous_vertex_constants in that frame's memory.
+  virtual void AddMotionDraw(const MetalDraw& draw, size_t previous_vertex_constants) = 0;
   virtual bool InterpolatePicture(int resolve, const MetalCamera& camera, uint32_t scale) = 0;
 
   // Writes a resolve into guest memory at byte offset at, as the Xenos lays out a 32-bit texture: by 32x32 tiles if

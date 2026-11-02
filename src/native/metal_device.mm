@@ -45,6 +45,7 @@ constexpr NSUInteger kPushConstants = 8;
 constexpr NSUInteger kGuestBuffer = 9;
 constexpr NSUInteger kFetchBuffer = 10;
 constexpr NSUInteger kElementsBuffer = 11;
+constexpr NSUInteger kPreviousConstants = 12;  // motionMain's g_PreviousVertexConstants.
 constexpr NSUInteger kDisplayWidth = 1280;
 constexpr NSUInteger kDisplayHeight = 720;
 constexpr size_t kElementsBytes = 1 << 20;
@@ -165,6 +166,28 @@ kernel void camera_motion(depth2d<float, access::read> depth [[texture(0)]], tex
     moved = float2((ndc.x + 1.0) * 0.5 * camera.size.x, (1.0 - ndc.y) * 0.5 * camera.size.y) - pixel;
   }
   motion.write(float4(clamp(moved, -2048.0, 2048.0), 0.0, 0.0), at);
+}
+// Frame generation's motion for things that move on their own: a draw again, at where its vertices are now and where they
+// were a frame ago (pull_vertices.py's motionMain). It writes only where it's the surface the scene kept, by the scene's
+// depth, which is reversed; past that it leaves the camera's motion. A draw matched with the wrong one a frame ago gives
+// a jump no frame would have, and that's left to the camera too.
+struct MotionInterpolators {
+  float4 position [[position]];
+  float4 now [[user(MOTION_NOW)]];
+  float4 before [[user(MOTION_BEFORE)]];
+};
+fragment float4 object_motion(MotionInterpolators in [[stage_in]], depth2d<float, access::read> depth [[texture(0)]],
+                              constant float2& size [[buffer(0)]]) {
+  const float scene = depth.read(uint2(in.position.xy));
+  if (in.position.z < scene * 0.998 - 1e-7) {
+    discard_fragment();
+  }
+  const float2 now = in.now.xy / in.now.w, before = in.before.xy / in.before.w;
+  const float2 moved = (before - now) * float2(0.5, -0.5) * size;
+  if (!all(isfinite(moved)) || any(abs(moved) > 0.25 * size)) {
+    discard_fragment();
+  }
+  return float4(moved, 0.0, 0.0);
 }
 fragment float4 clay_fragment(float4 position [[position]], constant float4& tint [[buffer(4)]]) {
   if (tint.a > 0.5) {
@@ -357,6 +380,7 @@ class MetalDeviceImpl final : public MetalDevice {
       return false;
     }
     clay_ = [library newFunctionWithName:@"clay_fragment"];
+    object_motion_ = [library newFunctionWithName:@"object_motion"];
     clear_vertex_ = [library newFunctionWithName:@"clear_vertex"];
     clear_fragment_ = [library newFunctionWithName:@"clear_fragment"];
     MTLDepthStencilDescriptor* keep_depth = [MTLDepthStencilDescriptor new];
@@ -455,7 +479,9 @@ class MetalDeviceImpl final : public MetalDevice {
         return -1;
       }
       std::memcpy(static_cast<uint8_t*>(elements_.contents) + elements_used_, elements, bytes);
-      pipelines_.push_back({pipeline, depth_only, elements_used_, vertex});
+      // Shaders built before pull_vertices.py made motionMain don't have it, and their draws keep the camera's motion.
+      id<MTLFunction> motion = [library newFunctionWithName:@"motionMain" constantValues:values error:nil];
+      pipelines_.push_back({pipeline, depth_only, elements_used_, vertex, motion});
       elements_used_ += bytes;
       return int(pipelines_.size()) - 1;
     }
@@ -852,7 +878,15 @@ class MetalDeviceImpl final : public MetalDevice {
     [blit endEncoding];
     CopyDepth(depth, MTLOriginMake(0, 0, 0), MTLSizeMake(color.width, color.height, 1), scene_depth_, 0, MTLOriginMake(0, 0, 0));
     snapshot_this_frame_ = true;
+    snapshot_scale_ = target.scale;
     return true;
+  }
+
+  void AddMotionDraw(const MetalDraw& draw, size_t previous_vertex_constants) override {
+    MotionDraw& motion = motion_draws_.emplace_back(MotionDraw{draw, previous_vertex_constants, {}});
+    motion.textures.assign(draw.textures, draw.textures + draw.texture_count);
+    motion.draw.textures = nullptr;
+    motion.draw.texture_count = 0;
   }
 
   bool InterpolatePicture(int resolve, const MetalCamera& camera, uint32_t scale) override {
@@ -897,6 +931,7 @@ class MetalDeviceImpl final : public MetalDevice {
     [compute setBytes:&motion length:sizeof(motion) atIndex:0];
     [compute dispatchThreads:MTLSizeMake(ui.width, ui.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     [compute endEncoding];
+    EncodeObjectMotion();
     interpolator_.colorTexture = scene_[scene_index_];
     interpolator_.prevColorTexture = scene_[scene_index_ ^ 1];
     interpolator_.depthTexture = scene_depth_;
@@ -1013,6 +1048,9 @@ class MetalDeviceImpl final : public MetalDevice {
       CAMetalLayer* layer = layer_ready_.load(std::memory_order_acquire) ? layer_ : nil;
       id<MTLCommandBuffer> buffer = layer ? [queue_ commandBuffer] : [queue_ commandBufferWithUnretainedReferences];
       buffer_ = buffer;
+      previous_frame_ = frame_;
+      previous_frame_address_ = frame_ ? frame_.gpuAddress : 0;
+      motion_draws_.clear();
       frame_ = frames_[slot_];
       id<MTLBuffer> query_samples = query_samples_[slot_];
       frame_query_samples_ = query_samples;
@@ -1347,7 +1385,89 @@ class MetalDeviceImpl final : public MetalDevice {
     id<MTLRenderPipelineState> depth_only;
     size_t elements;
     id<MTLFunction> vertex;
+    id<MTLFunction> motion;  // Nil if the shader has no motionMain.
+    id<MTLRenderPipelineState> motion_state = nil;
   };
+
+  // A draw for frame generation's motion pass, and where its vertex constants were a frame ago.
+  struct MotionDraw {
+    MetalDraw draw;
+    size_t previous_vertex_constants;
+    std::vector<int> textures;
+  };
+
+  id<MTLRenderPipelineState> MotionPipeline(int vertex_shader) {
+    Pipeline& pipeline = pipelines_[size_t(vertex_shader)];
+    if (!pipeline.motion_state && pipeline.motion && object_motion_) {
+      MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
+      descriptor.vertexFunction = pipeline.motion;
+      descriptor.fragmentFunction = object_motion_;
+      descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRG16Float;
+      pipeline.motion_state = [device_ newRenderPipelineStateWithDescriptor:descriptor error:nil];
+      if (!pipeline.motion_state) {
+        pipeline.motion = nil;
+      }
+    }
+    return pipeline.motion_state;
+  }
+
+  // Draws this frame's moving things into motion_, over the camera's motion, with the scene's depth as it was snapshot.
+  void EncodeObjectMotion() {
+    if (motion_draws_.empty() || !previous_frame_ || !scene_depth_) {
+      return;
+    }
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = motion_;
+    pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> encoder = [buffer_ renderCommandEncoderWithDescriptor:pass];
+    for (int i = 0; i < kDescriptorHeaps; ++i) {
+      [encoder setVertexBuffer:heaps_[i] offset:0 atIndex:i];
+    }
+    [encoder setVertexBuffer:guest_ offset:0 atIndex:kGuestBuffer];
+    [encoder setVertexBuffer:frame_ offset:0 atIndex:kFetchBuffer];
+    [encoder setVertexBuffer:elements_ offset:0 atIndex:kElementsBuffer];
+    [encoder useResource:previous_frame_ usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
+    [encoder useResource:dummy_ usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
+    [encoder setFragmentTexture:scene_depth_ atIndex:0];
+    const float size[2] = {float(motion_.width), float(motion_.height)};
+    [encoder setFragmentBytes:size length:sizeof(size) atIndex:0];
+    for (const MotionDraw& motion : motion_draws_) {
+      const MetalDraw& draw = motion.draw;
+      id<MTLRenderPipelineState> state = MotionPipeline(draw.vertex_shader);
+      if (!state) {
+        continue;
+      }
+      [encoder setRenderPipelineState:state];
+      [encoder setVertexBufferOffset:pipelines_[size_t(draw.vertex_shader)].elements atIndex:kElementsBuffer];
+      for (const int texture : motion.textures) {
+        if (texture > 0 && size_t(texture) < textures_.size()) {
+          [encoder useResource:textures_[size_t(texture)] usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
+        }
+      }
+      const double scale = snapshot_scale_;
+      [encoder setViewport:{draw.viewport.x * scale, draw.viewport.y * scale, draw.viewport.width * scale, draw.viewport.height * scale,
+                            draw.viewport.near_depth, draw.viewport.far_depth}];
+      const uint32_t mode = draw.mode_control & (kCullFront | kCullBack | kFrontClockwise);
+      [encoder setCullMode:(mode & kCullFront) ? MTLCullModeFront : (mode & kCullBack) ? MTLCullModeBack : MTLCullModeNone];
+      [encoder setFrontFacingWinding:(mode & kFrontClockwise) ? MTLWindingClockwise : MTLWindingCounterClockwise];
+      const PushConstants push = {frame_address_ + draw.vertex_constants, frame_address_ + draw.pixel_constants,
+                                  frame_address_ + draw.shared_constants};
+      [encoder setVertexBytes:&push length:sizeof(push) atIndex:kPushConstants];
+      const uint64_t before = previous_frame_address_ + motion.previous_vertex_constants;
+      [encoder setVertexBytes:&before length:sizeof(before) atIndex:kPreviousConstants];
+      [encoder setVertexBufferOffset:draw.fetch_constants atIndex:kFetchBuffer];
+      [encoder drawIndexedPrimitives:draw.primitive == MetalPrimitive::kTriangleStrip ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle
+                          indexCount:draw.index_count
+                           indexType:draw.wide_indices ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16
+                         indexBuffer:frame_
+                   indexBufferOffset:draw.indices
+                       instanceCount:1
+                          baseVertex:draw.base_vertex
+                        baseInstance:0];
+    }
+    [encoder endEncoding];
+  }
 
   struct PixelShader {
     std::array<id<MTLFunction>, 2> functions;
@@ -1699,6 +1819,11 @@ class MetalDeviceImpl final : public MetalDevice {
   id<MTLTexture> interpolated_ = nil;
   id<MTLFXFrameInterpolator> interpolator_ = nil;
   id<MTLComputePipelineState> motion_pipeline_ = nil;
+  id<MTLFunction> object_motion_ = nil;
+  std::vector<MotionDraw> motion_draws_;  // This frame's.
+  id<MTLBuffer> previous_frame_ = nil;    // The frame memory before this frame's.
+  uint64_t previous_frame_address_ = 0;
+  float snapshot_scale_ = 1.0f;
   bool snapshot_this_frame_ = false;
   bool have_scene_ = false;
   id<MTLFXSpatialScaler> spatial_scaler_ = nil;
