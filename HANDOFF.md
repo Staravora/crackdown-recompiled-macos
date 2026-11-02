@@ -15,6 +15,8 @@
 - **Queries:** with the emulator writing nothing, Metal's answers and what the game read matched on all of them, with none Metal-only or emulator-only.
 - **Short of 30:** frames spread from 33 to 37 ms, peaking just over 33.3. A precise macOS wait (`mach_wait_until`) changed nothing, so it isn't the sleep. Something in the frame runs late. Not found yet.
 - **Not watched by eye:** the speed at 30 is right by the clock, but nobody has played it. Uncapped and above 30, Bruce saw things move too fast in the first run, which was uncapped. That's the high-frame-rate timing, not Metal, and is a separate job.
+- **Bruce's play-test, 5.5 min, 30 setting:** "plays very well and at a stable framerate". Median 29.2 FPS, 3 seconds under 27, no GPU errors, no dropped frames.
+- **Flicker:** two or three times, one frame long, across the whole screen (Bruce). Cause unknown, and nothing in the log at those moments. Candidates to rule out: a frame shown before Metal finished it, a target shown out of turn, or the pacing hold timing out (250 ms).
 - **Green flash:** at least once before the main menu (Bruce). Not looked at.
 - **Main window:** black, and it still takes the input.
 - **Benchmark gotchas:**
