@@ -181,6 +181,10 @@ bool IsDepth(xenos::TextureFormat format) {
   return format == xenos::TextureFormat::k_24_8 || format == xenos::TextureFormat::k_24_8_FLOAT;
 }
 
+bool IsFloatColor(xenos::TextureFormat format) {
+  return format == xenos::TextureFormat::k_16_16_FLOAT || format == xenos::TextureFormat::k_16_16_16_16_FLOAT;
+}
+
 bool DecodedHoldsOneTile(const xenos::xe_gpu_texture_fetch_t& fetch) {
   return uint32_t(fetch.size_2d.width) + 1 == kPictureWidth && uint32_t(fetch.size_2d.height) + 1 == kTileHeight &&
          !IsDepth(xenos::TextureFormat(uint32_t(fetch.format)));
@@ -293,7 +297,7 @@ int TextureCache::ResolveInto(const uint32_t* fetch_dwords, int tile) {
   std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
   const xenos::TextureFormat format = xenos::TextureFormat(uint32_t(fetch.format));
   if (fetch.type != xenos::FetchConstantType::kTexture || fetch.dimension != xenos::DataDimension::k2DOrStacked ||
-      (format != xenos::TextureFormat::k_8_8_8_8 && !IsDepth(format))) {
+      (format != xenos::TextureFormat::k_8_8_8_8 && !IsFloatColor(format) && !IsDepth(format))) {
     return -1;
   }
   Resolved& resolved = resolved_[ResolveKeyOf(fetch, tile)];
@@ -301,7 +305,8 @@ int TextureCache::ResolveInto(const uint32_t* fetch_dwords, int tile) {
     const uint32_t width = uint32_t(fetch.size_2d.width) + 1, height = uint32_t(fetch.size_2d.height) + 1;
     const uint32_t mip_address = uint32_t(fetch.mip_address) << 12;
     const uint32_t levels = mip_address ? std::min(uint32_t(fetch.mip_max_level) + 1, uint32_t(std::bit_width(std::max(width, height)))) : 1;
-    resolved.resolve = device_.AddResolve(width, tile < 0 && DecodedHoldsOneTile(fetch) ? kPictureHeight : height, levels, IsDepth(format));
+    resolved.resolve = device_.AddResolve(width, tile < 0 && DecodedHoldsOneTile(fetch) ? kPictureHeight : height, levels,
+                                          IsDepth(format) ? MetalResolveFormat::kDepth : IsFloatColor(format) ? MetalResolveFormat::kFloat : MetalResolveFormat::kColor);
   }
   resolved.live = resolved.resolve >= 0;
   return resolved.resolve;

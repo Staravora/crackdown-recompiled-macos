@@ -61,3 +61,6 @@
 | 2026-11-01 | Give vertex textures their own table in the shared constants. | The translator numbers them from 0 like pixel textures, and both stages read one table. Moving them in the generator needs no translator change. | active |
 | 2026-11-01 | Fix instruction ordering in the translator patch, not by rewriting its output. | Whether two lines share an instruction is only known to the translator. Text alone can't tell. | active |
 | 2026-11-01 | Handle texel-coordinate fetches in the generator, from the ucode. | It needed no translator rerun, and the flag is per sampler in practice, which `texel_fetch_slots` checks. | active |
+| 2026-11-01 | Draw no-colour draws that write stencil, and keep skipping the rest. | Tunnels keep the sea out that way. The rest are occlusion queries, whose answers the emulator already gives the game. | active |
+| 2026-11-01 | Use `RGBA16Float` for both 16-bit float colour formats. | Two formats means two sets of pipelines and clears for one 128x128 pass. The fetch swizzle already ignores the channels `16_16_FLOAT` doesn't have. | active |
+| 2026-11-01 | Read a target's format from its surface, not from the resolves that copy it. | It's known before the first draw, so pipelines are right from the start, and a reused surface pointer can't carry a stale guess. | active |

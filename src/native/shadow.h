@@ -26,6 +26,7 @@ struct Targets {
   uint32_t width = 0;
   uint32_t height = 0;
   uint32_t surface_height = 0;  // What the surface holds at once: one tile, on a tiled one.
+  bool float_color = false;
 };
 
 // A copy the game asks for, out of its current surfaces and into a texture object.

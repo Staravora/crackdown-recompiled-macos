@@ -630,6 +630,7 @@ struct TargetKey {
   uint32_t width;
   uint32_t height;
   int tile;
+  bool float_color;
   auto operator<=>(const TargetKey&) const = default;
 };
 std::map<TargetKey, int> g_targets;
@@ -654,7 +655,7 @@ int TileOf(const BakedDraw& draw) {
 
 int TargetOf(MetalDevice& device, const Run& run, int tile) {
   const Targets& targets = run.targets;
-  const TargetKey key = {targets.color, targets.depth, targets.width, targets.height, HalfSizeTiles(targets) ? std::max(tile, 0) : -1};
+  const TargetKey key = {targets.color, targets.depth, targets.width, targets.height, HalfSizeTiles(targets) ? std::max(tile, 0) : -1, targets.float_color};
   if (!key.width || !key.height || key.width > kMaxTargetSize || key.height > kMaxTargetSize) {
     return -1;
   }
@@ -662,8 +663,8 @@ int TargetOf(MetalDevice& device, const Run& run, int tile) {
   if (found != g_targets.end()) {
     return found->second;
   }
-  const int target = device.AddTarget(key.width, key.height, key.color != 0);
-  REXLOG_INFO("Native shadow: target {}x{}, colour {:08X}, depth {:08X}", key.width, key.height, key.color, key.depth);
+  const int target = device.AddTarget(key.width, key.height, key.color != 0, key.float_color);
+  REXLOG_INFO("Native shadow: target {}x{}, colour {:08X}, depth {:08X}, float {}", key.width, key.height, key.color, key.depth, key.float_color);
   g_targets[key] = target;
   return target;
 }
@@ -784,7 +785,7 @@ void ApplyResolve(const Run& run, MetalDevice& device, const std::set<int>& draw
   const uint32_t source = copy.flags & kResolveSourceMask;
   const bool depth = source == kResolveDepth;
   const int tile = HalfSizeTiles(run.targets) ? (copy.has_rect && copy.rect[3] <= kHalfSecondTileHeight ? 1 : 0) : -1;
-  const auto found = g_targets.find({run.targets.color, run.targets.depth, run.targets.width, run.targets.height, tile});
+  const auto found = g_targets.find({run.targets.color, run.targets.depth, run.targets.width, run.targets.height, tile, run.targets.float_color});
   const int target = found == g_targets.end() ? -1 : found->second;
   const int resolve = copy.texture && !g_debug_no_resolves && target >= 0 && drawn.contains(target) && (depth || (source == 0 && run.targets.color))
                           ? g_textures->ResolveInto(run.dest.data())

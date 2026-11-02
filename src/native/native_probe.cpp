@@ -50,6 +50,9 @@ constexpr uint32_t kDeviceTileCount = 12468;
 constexpr uint32_t kDeviceTileRects = 12472;
 constexpr uint32_t kMaxTiles = 16;
 constexpr uint32_t kSurfaceSize = 36;
+constexpr uint32_t kSurfaceColorInfo = 28;
+constexpr uint32_t kColorFormat1616Float = 6;
+constexpr uint32_t kColorFormat16161616Float = 7;
 constexpr uint32_t kConstantsPerStage = 256;
 constexpr uint32_t kDwordsPerConstant = 4;
 constexpr uint32_t kCameraConstants = 12;
@@ -175,6 +178,10 @@ shadow::Targets TargetsOf(uint32_t device, const uint8_t* base) {
   const uint32_t surface = targets.color ? targets.color : targets.depth;
   if (!surface) {
     return targets;
+  }
+  if (targets.color) {
+    const uint32_t format = (Load32(base, targets.color + kSurfaceColorInfo) >> 16) & 0xF;
+    targets.float_color = format == kColorFormat1616Float || format == kColorFormat16161616Float;
   }
   const uint32_t size = Load32(base, surface + kSurfaceSize);
   targets.width = ((size >> 18) & 0x1FFF) + 1;

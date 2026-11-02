@@ -66,6 +66,7 @@ constexpr uint32_t kCullFront = 1 << 0;
 constexpr uint32_t kCullBack = 1 << 1;
 constexpr uint32_t kFrontClockwise = 1 << 2;
 constexpr MTLPixelFormat kDepthFormat = MTLPixelFormatDepth32Float_Stencil8;
+constexpr MTLPixelFormat kFloatColorFormat = MTLPixelFormatRGBA16Float;
 constexpr uint32_t kOpaqueBlend = 0x00010001;
 
 // Grey clay: light from the slope of the depth, since there are no normals or textures to go on yet.
@@ -457,9 +458,12 @@ class MetalDeviceImpl final : public MetalDevice {
     return index;
   }
 
-  int AddResolve(uint32_t width, uint32_t height, uint32_t levels, bool depth) override {
+  int AddResolve(uint32_t width, uint32_t height, uint32_t levels, MetalResolveFormat format) override {
+    const bool depth = format == MetalResolveFormat::kDepth;
     MTLTextureDescriptor* descriptor =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:depth ? MTLPixelFormatR32Float : MTLPixelFormatBGRA8Unorm
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:depth ? MTLPixelFormatR32Float
+                                                                 : format == MetalResolveFormat::kFloat ? kFloatColorFormat
+                                                                                                        : MTLPixelFormatBGRA8Unorm
                                                            width:width
                                                           height:height
                                                        mipmapped:NO];
@@ -482,9 +486,9 @@ class MetalDeviceImpl final : public MetalDevice {
       return 0;
     }
     id<MTLTexture> storage = resolves_[size_t(resolve)];
-    const MTLPixelFormat format = storage.pixelFormat == MTLPixelFormatR32Float ? MTLPixelFormatR32Float
-                                  : gamma                                       ? MTLPixelFormatRGBA8Unorm_sRGB
-                                                                                : MTLPixelFormatRGBA8Unorm;
+    const MTLPixelFormat format = storage.pixelFormat != MTLPixelFormatBGRA8Unorm ? storage.pixelFormat
+                                  : gamma                                         ? MTLPixelFormatRGBA8Unorm_sRGB
+                                                                                  : MTLPixelFormatRGBA8Unorm;
     id<MTLTexture> view = [storage newTextureViewWithPixelFormat:format
                                                      textureType:MTLTextureType2D
                                                           levels:NSMakeRange(0, storage.mipmapLevelCount)
@@ -553,7 +557,7 @@ class MetalDeviceImpl final : public MetalDevice {
       return;
     }
     BeginPass(clear.target, MetalClear{});
-    [encoder_ setRenderPipelineState:ClearPipeline(target.color != nil, color)];
+    [encoder_ setRenderPipelineState:ClearPipeline(target.color != nil, color, target.color.pixelFormat == kFloatColorFormat)];
     [encoder_ setDepthStencilState:clear.depth ? clear_writing_depth_ : clear_keeping_depth_];
     [encoder_ setStencilReferenceValue:clear.stencil_value];
     [encoder_ setCullMode:MTLCullModeNone];
@@ -579,6 +583,9 @@ class MetalDeviceImpl final : public MetalDevice {
     }
     if (copy.depth) {
       CopyDepth(from, MTLOriginMake(left, top, 0), MTLSizeMake(width, height, 1), to, copy.level, MTLOriginMake(dest_x, dest_y, 0));
+      return;
+    }
+    if (from.pixelFormat != to.pixelFormat) {
       return;
     }
     id<MTLBlitCommandEncoder> blit = [buffer_ blitCommandEncoder];
@@ -616,7 +623,7 @@ class MetalDeviceImpl final : public MetalDevice {
       buffer_ = nil;
 
       id<MTLTexture> shown = shown_target_ >= 0 ? targets_[size_t(shown_target_)].color : nil;
-      if (shown && shown_gamma_ && gamma_ramp_set_) {
+      if (shown && (shown_gamma_ || shown.pixelFormat == kFloatColorFormat) && gamma_ramp_set_) {
         shown = ThroughGammaRamp(buffer, shown);
       }
       const MTLSize size = MTLSizeMake(shown.width, shown.height, 1);
@@ -683,10 +690,10 @@ class MetalDeviceImpl final : public MetalDevice {
     return timing;
   }
 
-  int AddTarget(uint32_t width, uint32_t height, bool has_color) override {
+  int AddTarget(uint32_t width, uint32_t height, bool has_color, bool float_color) override {
     Target target;
     if (has_color) {
-      target.color = NewTarget(MTLPixelFormatBGRA8Unorm, width, height);
+      target.color = NewTarget(float_color ? kFloatColorFormat : MTLPixelFormatBGRA8Unorm, width, height);
     }
     target.depth = NewTarget(kDepthFormat, width, height);
     targets_.push_back(target);
@@ -724,6 +731,7 @@ class MetalDeviceImpl final : public MetalDevice {
     [encoder_ useResource:dummy_cube_ usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
     ++pass_number_;
     pass_has_color_ = target.color != nil;
+    pass_float_ = target.color.pixelFormat == kFloatColorFormat;
     pass_width_ = target.depth.width;
     pass_height_ = uint32_t(target.depth.height);
     current_scissor_ = {0, pass_height_};
@@ -763,6 +771,8 @@ class MetalDeviceImpl final : public MetalDevice {
     id<MTLRenderPipelineState> state = pass_has_color_ ? pipeline.state : pipeline.depth_only;
     if (draw.pixel_shader >= 0) {
       state = ShadedPipeline(draw) ?: state;
+    } else if (pass_float_) {
+      return;  // The grey pipelines are built for 8-bit colour.
     }
     if (state != current_pipeline_) {
       [encoder_ setRenderPipelineState:state];
@@ -874,11 +884,11 @@ class MetalDeviceImpl final : public MetalDevice {
     std::array<id<MTLFunction>, 2> functions;
   };
 
-  using ShadedKey = std::tuple<int, int, uint32_t, uint32_t, bool, bool>;
+  using ShadedKey = std::tuple<int, int, uint32_t, uint32_t, bool, bool, bool>;
   using DepthKey = std::array<uint32_t, 3>;
 
   id<MTLRenderPipelineState> ShadedPipeline(const MetalDraw& draw) {
-    const ShadedKey key = {draw.vertex_shader, draw.pixel_shader, draw.blend_control, draw.color_mask & 0xF, draw.alpha_test, pass_has_color_};
+    const ShadedKey key = {draw.vertex_shader, draw.pixel_shader, draw.blend_control, draw.color_mask & 0xF, draw.alpha_test, pass_has_color_, pass_float_};
     const auto found = shaded_pipelines_.find(key);
     if (found != shaded_pipelines_.end()) {
       return found->second;
@@ -891,7 +901,7 @@ class MetalDeviceImpl final : public MetalDevice {
     // A shadow map has no colour, but a cut-out's pixel shader still decides which pixels cast.
     MTLRenderPipelineColorAttachmentDescriptor* color = descriptor.colorAttachments[0];
     if (pass_has_color_) {
-      color.pixelFormat = MTLPixelFormatBGRA8Unorm;
+      color.pixelFormat = pass_float_ ? kFloatColorFormat : MTLPixelFormatBGRA8Unorm;
       color.writeMask = ((draw.color_mask & 1) ? MTLColorWriteMaskRed : 0) | ((draw.color_mask & 2) ? MTLColorWriteMaskGreen : 0) |
                         ((draw.color_mask & 4) ? MTLColorWriteMaskBlue : 0) | ((draw.color_mask & 8) ? MTLColorWriteMaskAlpha : 0);
     }
@@ -951,8 +961,8 @@ class MetalDeviceImpl final : public MetalDevice {
     return display_;
   }
 
-  id<MTLRenderPipelineState> ClearPipeline(bool has_color, bool write_color) {
-    const size_t index = has_color ? (write_color ? 2 : 1) : 0;
+  id<MTLRenderPipelineState> ClearPipeline(bool has_color, bool write_color, bool float_color) {
+    const size_t index = has_color ? (write_color ? 2 : 1) + (float_color ? 2 : 0) : 0;
     if (!clear_pipelines_[index]) {
       MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
       descriptor.vertexFunction = clear_vertex_;
@@ -960,7 +970,7 @@ class MetalDeviceImpl final : public MetalDevice {
       descriptor.stencilAttachmentPixelFormat = kDepthFormat;
       if (has_color) {
         descriptor.fragmentFunction = clear_fragment_;
-        descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        descriptor.colorAttachments[0].pixelFormat = float_color ? kFloatColorFormat : MTLPixelFormatBGRA8Unorm;
         descriptor.colorAttachments[0].writeMask = write_color ? MTLColorWriteMaskAll : MTLColorWriteMaskNone;
       }
       clear_pipelines_[index] = [device_ newRenderPipelineStateWithDescriptor:descriptor error:nil];
@@ -1074,7 +1084,7 @@ class MetalDeviceImpl final : public MetalDevice {
   id<MTLFunction> clear_fragment_ = nil;
   id<MTLDepthStencilState> clear_keeping_depth_ = nil;
   id<MTLDepthStencilState> clear_writing_depth_ = nil;
-  std::array<id<MTLRenderPipelineState>, 3> clear_pipelines_{};
+  std::array<id<MTLRenderPipelineState>, 5> clear_pipelines_{};
   id<MTLTexture> gamma_ramp_ = nil;
   id<MTLTexture> display_ = nil;
   id<MTLCommandBuffer> buffer_ = nil;
@@ -1111,6 +1121,7 @@ class MetalDeviceImpl final : public MetalDevice {
   bool shown_gamma_ = false;
   bool gamma_ramp_set_ = false;
   bool pass_has_color_ = false;
+  bool pass_float_ = false;
   NSUInteger pass_width_ = 0;
   uint32_t pass_height_ = 0;
   std::pair<uint32_t, uint32_t> current_scissor_{};

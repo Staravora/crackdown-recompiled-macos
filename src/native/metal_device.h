@@ -22,6 +22,9 @@ struct MetalGpuTotals {
   uint64_t worst_gpu_ns = 0;
 };
 
+// What a resolve texture holds. Float is for the targets the water's FFT runs on.
+enum class MetalResolveFormat { kColor, kFloat, kDepth };
+
 // One vertex fetch of a shader, as pullElement reads it. See tools/shader-trial/pull_vertices.py.
 struct MetalPullElement {
   uint32_t packed;
@@ -179,7 +182,7 @@ class MetalDevice {
 
   // A texture render targets get copied into, and a descriptor for reading one. It reads colour bytes in the order guest
   // memory would hold them, so a fetch constant's swizzle means what it did there.
-  virtual int AddResolve(uint32_t width, uint32_t height, uint32_t levels, bool depth) = 0;
+  virtual int AddResolve(uint32_t width, uint32_t height, uint32_t levels, MetalResolveFormat format) = 0;
   virtual int ViewResolve(int resolve, bool gamma, const uint8_t* swizzle) = 0;
 
   // A stack of depth maps, read as a 3D texture, and a descriptor for it.
@@ -189,7 +192,7 @@ class MetalDevice {
   virtual void ShowWindow() = 0;
 
   // A render target, with a colour part only if asked for: shadow maps are depth alone. Returns a handle.
-  virtual int AddTarget(uint32_t width, uint32_t height, bool has_color) = 0;
+  virtual int AddTarget(uint32_t width, uint32_t height, bool has_color, bool float_color) = 0;
 
   // Records and submits one frame. encode gets that frame's memory and calls BeginPass, Draw and ShowTarget. If capture
   // isn't empty, waits for the GPU and writes the shown target there as a PNG.

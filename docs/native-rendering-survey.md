@@ -444,7 +444,9 @@ Results, rooftop, Metal beside the emulator. Encode and GPU are the render threa
 | GPU per frame | 3 ms | 8.6 ms |
 | Shader code copy per frame | 1 to 2.3 ms | not measured |
 
-Still missing: scissor, stencil-only draws, MSAA. Water isn't traced. Every shader on the rooftop run is matched.
+Still missing: scissor and MSAA. Every shader on the rooftop run is matched.
+
+Water, near sea level only, comes first in the frame: a 128x128 FFT on 16-bit float targets (a spectrum pass, 13 butterflies and two normal map passes, resolving 15 times), then a 320x180 reflection, which is sky in colour with the world written into alpha by MIN blending. In the scene pass, fans stamp stencil `0xFF` over tunnels, and each water patch is drawn with stencil `GEQUAL 0xC0`, then followed by a stencil pass of its own.
 
 Things about the Xenos that the translated shaders didn't carry, and that took the longest to see:
 
