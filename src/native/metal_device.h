@@ -75,6 +75,7 @@ struct MetalSamplerDesc {
   MetalAddressMode address_u = MetalAddressMode::kRepeat;
   MetalAddressMode address_v = MetalAddressMode::kRepeat;
   bool nearest = false;
+  uint32_t max_anisotropy = 1;
 };
 
 struct MetalViewport {

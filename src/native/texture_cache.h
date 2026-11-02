@@ -50,10 +50,7 @@ class TextureCache {
   int FindSampler(const uint32_t* fetch);
 
   // Call at the start of each frame. Uploads are limited per frame so a burst of streaming can't stall the render thread.
-  void BeginFrame() {
-    upload_budget_ = kUploadBytesPerFrame;
-    ++frame_;
-  }
+  void BeginFrame();
 
   uint64_t textures_loaded() const { return textures_loaded_; }
   uint64_t textures_skipped() const { return textures_skipped_; }
@@ -97,6 +94,7 @@ class TextureCache {
   std::map<uint32_t, Stack> stacks_;  // By first page.
   size_t upload_budget_ = 0;
   uint64_t frame_ = 0;
+  int anisotropic_override_ = -1;  // The launcher's texture filtering: -1 leaves it to the game, else an AnisoFilter.
   uint64_t textures_loaded_ = 0;
   uint64_t textures_skipped_ = 0;
   uint64_t textures_reloaded_ = 0;

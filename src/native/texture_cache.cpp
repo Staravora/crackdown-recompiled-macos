@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
 
+#include <rex/cvar.h>
 #include <rex/graphics/pipeline/texture/info.h>
 #include <rex/graphics/pipeline/texture/util.h>
 #include <rex/graphics/xenos.h>
@@ -26,6 +28,7 @@ constexpr uint32_t kDummyDescriptor = 0;
 constexpr uint32_t kPageShift = 12;
 constexpr uint32_t kPages = 1 << 17;
 constexpr uint32_t kPhysicalMask = 0x1FFFFFFF;
+constexpr uint32_t kMaxAnisoFilter = 5;  // Sixteen to one.
 constexpr uint32_t kMirrorFirstPage = 0xE0000;
 constexpr uint32_t kPictureWidth = 1280;
 constexpr uint32_t kPictureHeight = 720;
@@ -545,6 +548,30 @@ int TextureCache::Load(const uint32_t* fetch_dwords, int existing) {
   return descriptor;
 }
 
+void TextureCache::BeginFrame() {
+  upload_budget_ = kUploadBytesPerFrame;
+  ++frame_;
+  anisotropic_override_ = std::atoi(rex::cvar::GetFlagByName("anisotropic_override").c_str());
+}
+
+namespace {
+
+// As the emulator picks it: the game's own setting, unless the launcher's overrides it on a mipmapped texture that filters
+// linearly.
+uint32_t AnisotropyOf(const xenos::xe_gpu_texture_fetch_t& fetch, int anisotropic_override) {
+  const bool linear = fetch.mag_filter == xenos::TextureFilter::kLinear && fetch.min_filter == xenos::TextureFilter::kLinear;
+  const bool mip_filtered = fetch.mip_filter == xenos::TextureFilter::kPoint || fetch.mip_filter == xenos::TextureFilter::kLinear;
+  uint32_t filter = uint32_t(fetch.aniso_filter);
+  if (anisotropic_override >= 0 && anisotropic_override <= int(kMaxAnisoFilter) && fetch.mip_max_level > fetch.mip_min_level && linear &&
+      mip_filtered) {
+    filter = uint32_t(anisotropic_override);
+  }
+  // 1 is one to one, 2 two to one, up to 5, sixteen to one. Anything else is off.
+  return linear && filter >= 1 && filter <= kMaxAnisoFilter ? 1u << (filter - 1) : 1u;
+}
+
+}  // namespace
+
 int TextureCache::FindSampler(const uint32_t* fetch_dwords) {
   xenos::xe_gpu_texture_fetch_t fetch;
   std::memcpy(&fetch, fetch_dwords, sizeof(fetch));
@@ -552,7 +579,8 @@ int TextureCache::FindSampler(const uint32_t* fetch_dwords) {
   desc.address_u = AddressModeOf(fetch.clamp_x);
   desc.address_v = AddressModeOf(fetch.clamp_y);
   desc.nearest = fetch.mag_filter == xenos::TextureFilter::kPoint && fetch.min_filter == xenos::TextureFilter::kPoint;
-  const uint32_t key = uint32_t(desc.address_u) | uint32_t(desc.address_v) << 4 | uint32_t(desc.nearest) << 8;
+  desc.max_anisotropy = AnisotropyOf(fetch, anisotropic_override_);
+  const uint32_t key = uint32_t(desc.address_u) | uint32_t(desc.address_v) << 4 | uint32_t(desc.nearest) << 8 | desc.max_anisotropy << 9;
   const auto found = samplers_.find(key);
   if (found != samplers_.end()) {
     return found->second;

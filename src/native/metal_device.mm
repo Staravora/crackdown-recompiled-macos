@@ -481,6 +481,7 @@ class MetalDeviceImpl final : public MetalDevice {
     descriptor.minFilter = desc.nearest ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear;
     descriptor.magFilter = descriptor.minFilter;
     descriptor.mipFilter = desc.nearest ? MTLSamplerMipFilterNearest : MTLSamplerMipFilterLinear;
+    descriptor.maxAnisotropy = std::clamp<NSUInteger>(desc.max_anisotropy, 1, 16);
     id<MTLSamplerState> sampler = [device_ newSamplerStateWithDescriptor:descriptor];
     const int index = int(next_sampler_++);
     samplers_.push_back(sampler);
