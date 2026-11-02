@@ -317,7 +317,7 @@ rexglue_setup_host_target(crackdown GPU_PLUGINS xenos)
 target_link_libraries(crackdown PRIVATE trg::launcher)
 if(APPLE)
     target_link_libraries(crackdown PRIVATE "-framework Metal" "-framework Foundation" "-framework CoreGraphics"
-        "-framework ImageIO" "-framework UniformTypeIdentifiers" "-framework AppKit" "-framework QuartzCore")
+        "-framework ImageIO" "-framework UniformTypeIdentifiers" "-framework AppKit" "-framework QuartzCore" "-framework MetalFX")
 endif()
 target_compile_definitions(crackdown PRIVATE
     CRACKDOWN_PORT_VERSION="${PROJECT_VERSION}"

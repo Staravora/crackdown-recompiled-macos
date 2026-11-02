@@ -1,5 +1,11 @@
 # Session handoff
 
+## 2026-11-02 — MetalFX upscaling option
+- **What:** Graphics, Upscaling: Off or MetalFX 2×, saved as `crackdown_metalfx_upscale` (1 or 2), macOS only and Metal renderer only. The front buffer goes through MetalFX's spatial scaler in perceptual mode, from 1280x720 to 2560x1440, before it's handed to the swap. The swap's gamma, FXAA and window scaling then work on the larger picture. The game links `MetalFX.framework`.
+- **Checked:** the report's new `picture` field read `[2560, 1440]`, with no front buffers missed and no GPU errors. Street, 30 setting: 28.95 FPS against 29.03 off, 1% low 24.9 against 26.7.
+- **Not checked:** how it looks. The test window was small, and a fullscreen test would have taken over Bruce's screen. He needs to look at it in fullscreen.
+- **Next:** internal render resolution, which means scaling every target, viewport, scissor, resolve and screen-space shader. Then frame interpolation.
+
 ## 2026-11-02 — The swap presents Metal's picture directly (SDK patch 0016)
 - **How:** the GPU plugin exports `rex_gpu_set_external_frame_source(size, fill, context)`. At each swap, `UploadExternalFrame` asks for the newest picture's size, has `fill` copy it as BGRA8 into a staging buffer (one per frame in flight), copies that into a `B8G8R8A8_UNORM` image and swaps from it in place of the front buffer. The front buffer's size counts as unscaled and the picture's as scaled, so the swap keeps it at full size. Gamma, FXAA, overlays, letterbox and fullscreen are untouched.
 - **Game side:** in Metal-only mode the render thread finds the function with `dlopen("@executable_path/librexgpu-xenos.dylib", RTLD_NOLOAD)` and `dlsym`, since the plugin is opened locally. Each frame, `CopyPicture` blits the front buffer's resolve into a shared buffer per frame slot, and the completion handler publishes it for `FillPicture` to copy. Without the function, it falls back to writing guest memory.

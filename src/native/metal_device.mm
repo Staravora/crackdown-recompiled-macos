@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #import <ImageIO/ImageIO.h>
 #import <Metal/Metal.h>
+#import <MetalFX/MetalFX.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <dispatch/dispatch.h>
@@ -632,10 +633,52 @@ class MetalDeviceImpl final : public MetalDevice {
     [blit endEncoding];
   }
 
-  bool CopyPicture(int resolve) override {
+  // MetalFX's spatial scaler, from the picture's size to scale times it. Null if the Mac can't.
+  id<MTLTexture> Upscaled(id<MTLTexture> source, uint32_t scale) {
+    const NSUInteger width = source.width * scale, height = source.height * scale;
+    if (!spatial_scaler_ || spatial_scaler_.inputWidth != source.width || spatial_scaler_.inputHeight != source.height ||
+        spatial_scaler_.outputWidth != width || spatial_scaler_.outputHeight != height) {
+      spatial_scaler_ = nil;
+      if (![MTLFXSpatialScalerDescriptor supportsDevice:device_]) {
+        return nil;
+      }
+      MTLFXSpatialScalerDescriptor* descriptor = [MTLFXSpatialScalerDescriptor new];
+      descriptor.inputWidth = source.width;
+      descriptor.inputHeight = source.height;
+      descriptor.outputWidth = width;
+      descriptor.outputHeight = height;
+      descriptor.colorTextureFormat = source.pixelFormat;
+      descriptor.outputTextureFormat = source.pixelFormat;
+      // The front buffer is in display terms, before the gamma ramp.
+      descriptor.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+      spatial_scaler_ = [descriptor newSpatialScalerWithDevice:device_];
+      MTLTextureDescriptor* output = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.pixelFormat
+                                                                                         width:width
+                                                                                        height:height
+                                                                                     mipmapped:NO];
+      output.usage = spatial_scaler_.outputTextureUsage;
+      output.storageMode = MTLStorageModePrivate;
+      upscaled_ = spatial_scaler_ ? [device_ newTextureWithDescriptor:output] : nil;
+    }
+    if (!spatial_scaler_ || !upscaled_) {
+      return nil;
+    }
+    spatial_scaler_.colorTexture = source;
+    spatial_scaler_.outputTexture = upscaled_;
+    [spatial_scaler_ encodeToCommandBuffer:buffer_];
+    return upscaled_;
+  }
+
+  bool CopyPicture(int resolve, uint32_t scale) override {
     id<MTLTexture> texture = resolves_[size_t(resolve)];
     if (texture.pixelFormat != MTLPixelFormatBGRA8Unorm) {
       return false;
+    }
+    if (scale > 1) {
+      EndPass();
+      if (id<MTLTexture> upscaled = Upscaled(texture, scale)) {
+        texture = upscaled;
+      }
     }
     const size_t row = texture.width * 4, bytes = row * texture.height;
     if (pictures_[picture_slot_].length < bytes) {
@@ -1326,6 +1369,8 @@ class MetalDeviceImpl final : public MetalDevice {
   id<MTLBuffer> frame_query_samples_ = nil;
   id<MTLComputePipelineState> write_guest_ = nil;
   std::array<id<MTLBuffer>, kFramesInFlight> pictures_{};
+  id<MTLFXSpatialScaler> spatial_scaler_ = nil;
+  id<MTLTexture> upscaled_ = nil;
   uint32_t picture_slot_ = 0;
   uint32_t picture_width_ = 0;
   uint32_t picture_height_ = 0;

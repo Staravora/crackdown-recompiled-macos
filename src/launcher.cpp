@@ -867,6 +867,10 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
               "Metal draws the game natively instead of the emulated GPU. A preview: faster, and still missing a few "
               "effects. Render resolution, internal resolution and multisampling don't apply to it yet.",
               "crackdown_native_only", false, "Emulated", "Metal (preview)");
+    ui.Choice("Upscaling",
+              "With the Metal renderer, MetalFX sharpens the picture as it doubles its size, before it's scaled to the "
+              "window. Worth it in fullscreen or a large window. Costs a little GPU time.",
+              "crackdown_metalfx_upscale", "1", {{"1", "Off"}, {"2", "MetalFX 2\xC3\x97"}});
 #endif
     if (const std::optional<int> adapter = ResolveGraphicsAdapter(
             settings_.Get("crackdown_graphics_adapter"), graphics_adapters_)) {

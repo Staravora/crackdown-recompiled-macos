@@ -231,9 +231,9 @@ class MetalDevice {
   // pass.
   virtual size_t ReadResolve(int resolve) = 0;
 
-  // Queues a resolve's pixels for MetalFrameResults::picture, for showing outside Metal. They stay put until the frame slot
-  // comes round again, kFramesInFlight frames on. Ends any open pass.
-  virtual bool CopyPicture(int resolve) = 0;
+  // Queues a resolve's pixels for MetalFrameResults::picture, for showing outside Metal, upscaled scale times by MetalFX if
+  // scale is above 1. They stay put until the frame slot comes round again, kFramesInFlight frames on. Ends any open pass.
+  virtual bool CopyPicture(int resolve, uint32_t scale) = 0;
 
   // Writes a resolve into guest memory at byte offset at, as the Xenos lays out a 32-bit texture: by 32x32 tiles if
   // tiled, and with each pixel's bytes reversed if swap. Pitch is in pixels. Ends any open pass.

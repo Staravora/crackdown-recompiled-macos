@@ -53,6 +53,9 @@ REXCVAR_DEFINE_BOOL(crackdown_native_only, false, "Crackdown",
                     "Preview: Metal draws the game in its own window and the emulator draws nothing. Turns on shadow mode, "
                     "its window, pacing and exposure, and Metal answers occlusion queries");
 
+REXCVAR_DEFINE_INT32(crackdown_metalfx_upscale, 1, "Crackdown",
+                     "With the Metal renderer, MetalFX upscales the picture this many times before the window scales it: 1 or 2");
+
 REXCVAR_DEFINE_BOOL(crackdown_native_shadow_debug, false, "Crackdown",
                     "Poll metal-debug.txt in the logs folder, so a running game can be examined from outside");
 
@@ -102,6 +105,7 @@ constexpr size_t kMaxPendingQueries = 8192;
 constexpr size_t kMaxQueryDisagreements = 32;
 constexpr uint64_t kSmallQuerySamples = 8;
 constexpr uint64_t kLargeQuerySamples = 64;
+constexpr int kMaxUpscale = 2;
 constexpr uint32_t kQueryBlocks = 24;  // On a query object: a pointer per tile to where its counts go.
 constexpr uint32_t kQueryTileCount = 144;
 constexpr uint32_t kMaxQueryTiles = 30;
@@ -221,6 +225,16 @@ const uint8_t* g_picture = nullptr;
 uint32_t g_picture_width = 0;
 uint32_t g_picture_height = 0;
 bool g_external_present = false;  // Render thread only after it's set.
+
+uint32_t PictureWidth() {
+  std::lock_guard lock(g_picture_mutex);
+  return g_picture_width;
+}
+
+uint32_t PictureHeight() {
+  std::lock_guard lock(g_picture_mutex);
+  return g_picture_height;
+}
 
 bool PictureSize(void*, uint32_t* width, uint32_t* height) {
   std::lock_guard lock(g_picture_mutex);
@@ -1270,7 +1284,8 @@ void WriteFrontBuffer(const FetchConstant& front_buffer, MetalDevice& device, Fr
 // The front buffer's own resolve, at whatever size Metal drew it, for the swap to present.
 void CopyFrontBuffer(const FetchConstant& front_buffer, MetalDevice& device) {
   const int resolve = g_textures->HasResolve(front_buffer.data()) ? g_textures->ResolveInto(front_buffer.data()) : -1;
-  if (resolve < 0 || !device.CopyPicture(resolve)) {
+  const uint32_t scale = uint32_t(std::clamp(REXCVAR_GET(crackdown_metalfx_upscale), 1, kMaxUpscale));
+  if (resolve < 0 || !device.CopyPicture(resolve, scale)) {
     ++g_totals.front_buffers_missed;
   }
 }
@@ -1645,7 +1660,7 @@ void Report(const MetalDevice& device) {
       R"("shaders_found":{},"shaders_missing":{},"shaders_failed":{},"index_copy_ms_per_frame":{:.3f},)"
       R"("capture_ms_per_frame":{:.4f},"wait_ms_per_frame":{:.3f},"encode_ms_p50":{:.3f},"encode_ms_p95":{:.3f},"encode_ms_max":{:.3f},)"
       R"("gpu_frames":{},"gpu_errors":{},"gpu_ms_per_frame":{:.3f},"gpu_ms_worst":{:.3f},)"
-      R"("guest_memory_wrapped":{},"guest_checks":{},"guest_matches":{},"front_buffers_missed":{},)",
+      R"("guest_memory_wrapped":{},"guest_checks":{},"guest_matches":{},"front_buffers_missed":{},"picture":[{},{}],)",
       guest_frames, g_totals.frames, dropped, g_totals.draws / frames, g_totals.skipped_draws / frames, g_totals.no_room,
       g_totals.recorded_draws / frames, g_totals.recorded_indices / frames, g_totals.no_shader_draws / frames,
       g_totals.no_target_draws / frames, g_totals.other_primitive_draws / frames, g_totals.other_index_order_draws / frames,
@@ -1657,7 +1672,8 @@ void Report(const MetalDevice& device) {
       capture_ns / 1e6 / double(std::max<uint64_t>(guest_frames, 1)), g_totals.wait_ns / 1e6 / frames,
       Percentile(sorted, 0.5) / 1e3, Percentile(sorted, 0.95) / 1e3, Percentile(sorted, 1.0) / 1e3, gpu.frames, gpu.errors,
       gpu.gpu_ns / 1e6 / double(std::max<uint64_t>(gpu.frames, 1)), gpu.worst_gpu_ns / 1e6,
-      device.guest_memory_wrapped() ? "true" : "false", g_totals.guest_checks, g_totals.guest_matches, g_totals.front_buffers_missed);
+      device.guest_memory_wrapped() ? "true" : "false", g_totals.guest_checks, g_totals.guest_matches, g_totals.front_buffers_missed,
+      PictureWidth(), PictureHeight());
   QueryTotals queries;
   {
     std::lock_guard lock(g_query_mutex);
