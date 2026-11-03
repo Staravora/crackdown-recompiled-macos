@@ -105,6 +105,20 @@ void TestVersions() {
   CHECK(*v040 == *v040_plain);
   CHECK(*v040 < *v049);
   CHECK(*v049 < *v0410);
+  // Mac builds of the same version order by their build number; other build metadata still compares equal.
+  const auto mac1 = ParseVersion("v0.6.2+macos.1");
+  const auto mac2 = ParseVersion("v0.6.2+macos.2");
+  const auto mac10 = ParseVersion("v0.6.2+macos.10");
+  const auto plain062 = ParseVersion("0.6.2");
+  const auto mac063 = ParseVersion("v0.6.3+macos.1");
+  CHECK(mac1 && mac2 && mac10 && plain062 && mac063);
+  CHECK(mac1->stable());
+  CHECK(CompareRelease(*mac2, *mac1) > 0);
+  CHECK(CompareRelease(*mac10, *mac2) > 0);
+  CHECK(CompareRelease(*mac1, *mac1) == 0);
+  CHECK(CompareRelease(*mac1, *plain062) == 0);
+  CHECK(CompareRelease(*mac063, *mac10) > 0);
+  CHECK(CompareRelease(*ParseVersion("0.6.2+abc"), *ParseVersion("0.6.2+def")) == 0);
   CHECK(*v040 < *v0410);
   CHECK(*v0410 < *v050);
   CHECK(*v050 < *v100);

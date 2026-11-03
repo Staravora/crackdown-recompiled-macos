@@ -200,7 +200,7 @@ void UpdateController::StartCheck(bool manual) {
       outcome->ignored = true;
       return std::string();
     }
-    if (SemanticVersion::Compare(release->version, current) <= 0) {
+    if (CompareRelease(release->version, current) <= 0) {
       outcome->up_to_date = true;
       return std::string();
     }

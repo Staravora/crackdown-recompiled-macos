@@ -110,6 +110,7 @@ trg::update::UpdateConfig MakeUpdateConfig(const std::filesystem::path& install_
     config.releases_url = "https://api.github.com/repos/" + repository + "/releases/latest";
     config.download_url_prefix = "https://github.com/" + repository + "/releases/download/";
   }
+  config.current_version = std::string(CRACKDOWN_PORT_VERSION) + "+macos." + CRACKDOWN_MAC_BUILD;
   config.package_kind = UpdatePackageKind::kMacApp;
   config.asset_name = [](const SemanticVersion& version) {
     return "Crackdown-v" + version.CoreString() + "-macos-arm64.zip";

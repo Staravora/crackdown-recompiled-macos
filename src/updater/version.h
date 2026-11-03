@@ -28,4 +28,8 @@ struct SemanticVersion {
 
 std::optional<SemanticVersion> ParseVersion(std::string_view text);
 
+// Compare, then the Mac build number: the Mac app is released as <version>+macos.<n>, so a Mac-only fix is newer than
+// the build it replaces. Semantic versioning ignores build metadata, and so does every other release.
+int CompareRelease(const SemanticVersion& left, const SemanticVersion& right);
+
 }  // namespace trg::update

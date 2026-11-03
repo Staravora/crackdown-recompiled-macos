@@ -46,8 +46,9 @@ if [ ! -f "$RES/Crackdown.icns" ]; then
   iconutil -c icns "$ICONS" -o "$RES/Crackdown.icns"
 fi
 VERSION=$(sed -n 's/^project(crackdown VERSION \([0-9.]*\).*/\1/p' "$R/CMakeLists.txt")
+MAC_BUILD=$(sed -n 's/^set(CRACKDOWN_MAC_BUILD \([0-9]*\)).*/\1/p' "$R/CMakeLists.txt")
 MINIMUM=$(otool -l "$G/crackdown" | awk '/LC_BUILD_VERSION/ {found = 1} found && /minos/ {print $2; exit}')
-sed -e "s/@VERSION@/$VERSION/" -e "s/@MINIMUM_MACOS@/$MINIMUM/" "$R/packaging/macos/Info.plist" > "$APP/Contents/Info.plist"
+sed -e "s/@VERSION@/$VERSION/" -e "s/@MAC_BUILD@/$MAC_BUILD/" -e "s/@MINIMUM_MACOS@/$MINIMUM/" "$R/packaging/macos/Info.plist" > "$APP/Contents/Info.plist"
 # Earlier layouts kept data beside the executable, which a signature doesn't allow.
 rm -rf "$G/crackdown.toml" "$G/glyphs" "$G/assets" "$G/vulkan/share" "$G/logs"
 if ! (cd "$G/vulkan/lib" && shasum -a 256 -c -s "$R/packaging/macos/vulkan-libs.sha256"); then

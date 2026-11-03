@@ -321,9 +321,13 @@ if(APPLE)
 endif()
 # owner/name of the GitHub repository the signed Mac app updates itself from; empty leaves the Mac build without updates.
 set(CRACKDOWN_MAC_UPDATE_REPOSITORY "" CACHE STRING "GitHub owner/name the Mac app's releases come from")
+# The Mac release's build number on top of the game's version: the release is tagged v<version>+macos.<build>, and a
+# higher build of the same version is offered as an update. Raise it for every Mac release.
+set(CRACKDOWN_MAC_BUILD 1)
 target_compile_definitions(crackdown PRIVATE
     CRACKDOWN_PORT_VERSION="${PROJECT_VERSION}"
     CRACKDOWN_MAC_UPDATE_REPOSITORY="${CRACKDOWN_MAC_UPDATE_REPOSITORY}"
+    CRACKDOWN_MAC_BUILD="${CRACKDOWN_MAC_BUILD}"
     CRACKDOWN_TRG_VERSION="${CRACKDOWN_TRG_VERSION}"
     # CD_UPDATE_TEST* environment overrides for manual updater testing; release packages are built as Release.
     $<$<NOT:$<CONFIG:Release>>:CRACKDOWN_UPDATE_TEST_OVERRIDES>)

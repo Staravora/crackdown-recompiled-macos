@@ -132,6 +132,39 @@ int SemanticVersion::Compare(const SemanticVersion& left, const SemanticVersion&
   return ComparePrerelease(left, right);
 }
 
+namespace {
+
+std::optional<std::uint64_t> MacBuild(const SemanticVersion& version) {
+  constexpr std::string_view kPrefix = "macos.";
+  const std::string_view build = version.build;
+  if (build.substr(0, kPrefix.size()) != kPrefix || build.size() == kPrefix.size() || build.size() > kPrefix.size() + 9) {
+    return std::nullopt;
+  }
+  std::uint64_t number = 0;
+  for (const char c : build.substr(kPrefix.size())) {
+    if (c < '0' || c > '9') {
+      return std::nullopt;
+    }
+    number = number * 10 + std::uint64_t(c - '0');
+  }
+  return number;
+}
+
+}  // namespace
+
+int CompareRelease(const SemanticVersion& left, const SemanticVersion& right) {
+  const int result = SemanticVersion::Compare(left, right);
+  if (result != 0) {
+    return result;
+  }
+  const std::optional<std::uint64_t> left_build = MacBuild(left);
+  const std::optional<std::uint64_t> right_build = MacBuild(right);
+  if (!left_build || !right_build || *left_build == *right_build) {
+    return 0;
+  }
+  return *left_build < *right_build ? -1 : 1;
+}
+
 std::optional<SemanticVersion> ParseVersion(std::string_view text) {
   text = Trim(text);
   if (!text.empty() && (text.front() == 'v' || text.front() == 'V')) {
