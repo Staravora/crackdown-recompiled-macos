@@ -66,7 +66,9 @@ REXCVAR_DEFINE_BOOL(crackdown_frame_generation_preview, false, "Crackdown",
                     "Experimental, command line only: with the Metal renderer, MetalFX makes a frame between each two the game "
                     "draws and shows it halfway. Not good enough to play with yet");
 
-REXCVAR_DEFINE_BOOL(crackdown_native_shadow_debug, false, "Crackdown",
+// On by default: a problem seen in play can then be examined while it's still on screen. Opening a missing file once a
+// second costs nothing, and the file is removed at start so words left from an earlier run never apply.
+REXCVAR_DEFINE_BOOL(crackdown_native_shadow_debug, true, "Crackdown",
                     "Poll metal-debug.txt in the logs folder, so a running game can be examined from outside");
 
 namespace crackdown::native::shadow {
@@ -1092,7 +1094,8 @@ double ClearDepthFor(const BakedDraw& draw) {
 // Live switches for examining a running game, set from metal-debug.txt: skip_blended, ids (each draw flat, in a colour
 // that gives its number), no_resolves, show=<target>, skip_ps=<address>, stop_ps=<address>, which ends the frame at that
 // shader's first draw, alpha, which puts alpha in a capture's colours, mark_queries, which paints the draws of queries
-// the two sides disagreed on, and dump=<name>, which writes live-<name>.png and .txt beside it.
+// the two sides disagreed on, dump=<name>, which writes live-<name>.png and .txt beside it, and report, which saves a
+// problem report as ⌘⇧R does. dump and report happen once and are taken out of the file.
 bool g_debug_skip_blended = false;
 bool g_debug_ids = false;
 bool g_debug_no_resolves = false;
@@ -1108,6 +1111,9 @@ bool g_debug_vertex_constants = false;  // vconst: a capture also lists each dra
 std::set<uint32_t> g_debug_marked;  // Queries the two sides last disagreed on.
 std::ofstream* g_dump = nullptr;
 int g_debug_id = 0;
+std::mutex g_report_mutex;
+std::filesystem::path g_report_folder;  // A report asked for, saved from the next frame.
+std::function<void()> g_report_handler;  // Saves a whole problem report, for the report word.
 
 // Takes g_query_mutex. Files a query once both sides have answered, and gives up on the oldest if the game never asks.
 void SettleQuery(std::map<uint64_t, QueryAnswers>::iterator entry, uint32_t query) {
@@ -2148,6 +2154,7 @@ void RenderThread() {
       std::ifstream in(control);
       std::string word;
       bool want_dump = false;
+      bool want_report = false;
       std::string name = "live";
       g_debug_skip_blended = g_debug_ids = g_debug_no_resolves = g_debug_alpha = g_debug_no_stencil = g_debug_no_clears = g_debug_mark_queries = g_debug_vertex_constants = false;
       g_debug_show = -1;
@@ -2162,6 +2169,7 @@ void RenderThread() {
         g_debug_no_clears |= word == "no_clears";
         g_debug_mark_queries |= word == "mark_queries";
         g_debug_vertex_constants |= word == "vconst";
+        want_report |= word == "report";
         if (word.rfind("stop_ps=", 0) == 0) {
           g_debug_stop_ps = uint32_t(std::stoul(word.substr(8), nullptr, 16));
         }
@@ -2177,7 +2185,7 @@ void RenderThread() {
         }
       }
       in.close();
-      if (want_dump) {
+      if (want_dump || want_report) {
         std::error_code ignored;
         std::filesystem::remove(control, ignored);
         std::ofstream(control) << (g_debug_skip_blended ? "skip_blended " : "") << (g_debug_ids ? "ids " : "")
@@ -2188,9 +2196,28 @@ void RenderThread() {
         for (const uint32_t skip : g_debug_skip_ps) {
           std::ofstream(control, std::ios::app) << fmt::format("skip_ps={:X} ", skip);
         }
-        capture = g_path.parent_path() / ("live-" + name + ".png");
-        dump = std::make_unique<std::ofstream>(g_path.parent_path() / ("live-" + name + ".txt"));
+        if (want_dump) {
+          capture = g_path.parent_path() / ("live-" + name + ".png");
+          dump = std::make_unique<std::ofstream>(g_path.parent_path() / ("live-" + name + ".txt"));
+          g_dump = dump.get();
+        }
+      }
+      // The handler only hands the work to the UI thread, which asks for the next frame.
+      if (want_report && g_report_handler) {
+        g_report_handler();
+      }
+    }
+    {
+      std::lock_guard lock(g_report_mutex);
+      if (!g_report_folder.empty()) {
+        capture = g_report_folder / "metal-frame.png";
+        dump = std::make_unique<std::ofstream>(g_report_folder / "draws.txt");
         g_dump = dump.get();
+        std::error_code ignored;
+        std::filesystem::copy_file(g_path, g_report_folder / "renderer.json", std::filesystem::copy_options::overwrite_existing,
+                                   ignored);
+        REXLOG_INFO("Native shadow: report frame {} saved to {}", g_frame_number, g_report_folder.string());
+        g_report_folder.clear();
       }
     }
     auto answers = std::make_shared<FrameAnswers>();
@@ -2258,6 +2285,19 @@ bool Enabled() {
   return g_on.load(std::memory_order_relaxed);
 }
 
+void SetReportHandler(std::function<void()> handler) {
+  g_report_handler = std::move(handler);
+}
+
+bool RequestReport(const std::filesystem::path& folder) {
+  if (!Enabled()) {
+    return false;
+  }
+  std::lock_guard lock(g_report_mutex);
+  g_report_folder = folder;
+  return true;
+}
+
 bool DrawsAlone() {
   return REXCVAR_GET(crackdown_native_only);
 }
@@ -2287,6 +2327,9 @@ void Install(rex::memory::Memory* memory, const std::filesystem::path& shader_di
   g_memory = memory;
   g_shader_dir = shader_dir;
   g_path = output_dir / fmt::format("native-shadow-{}.json", uint64_t(std::time(nullptr)));
+  if (REXCVAR_GET(crackdown_native_shadow_debug)) {
+    std::filesystem::remove(output_dir / "metal-debug.txt", ec);
+  }
   g_current = std::make_unique<Frame>();
   g_current->runs.reserve(kRunsPerFrame);
   for (size_t i = 0; i < kPooledFrames; ++i) {

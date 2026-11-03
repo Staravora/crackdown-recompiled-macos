@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -78,6 +79,11 @@ void OnFenceWaitStarting();
 void OnFenceWait(uint32_t caller, uint32_t fence, uint64_t waited_ns);
 void SetRingDesyncs(uint64_t desyncs);
 void SetGammaRamp(const uint32_t* ramp);
+// The next frame Metal draws is saved to folder as metal-frame.png, with its draw list in draws.txt and the renderer's
+// latest counters in renderer.json. False when Metal isn't running, so there's nothing to save.
+bool RequestReport(const std::filesystem::path& folder);
+// Called from the render thread when metal-debug.txt says report. Set before Install; it should only queue the work.
+void SetReportHandler(std::function<void()> handler);
 #else
 inline bool Enabled() {
   return false;
@@ -101,6 +107,10 @@ inline void OnFenceWaitStarting() {}
 inline void OnFenceWait(uint32_t, uint32_t, uint64_t) {}
 inline void SetRingDesyncs(uint64_t) {}
 inline void SetGammaRamp(const uint32_t*) {}
+inline bool RequestReport(const std::filesystem::path&) {
+  return false;
+}
+inline void SetReportHandler(std::function<void()>) {}
 #endif
 
 }  // namespace crackdown::native::shadow

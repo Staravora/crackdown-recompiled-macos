@@ -106,7 +106,7 @@ If the system cannot mount AppImages with FUSE, the AppImage unpacks itself into
 
 ### macOS
 
-**Preview.** A native Apple silicon build. Its Metal renderer is the default: faster than the emulated one, sharp at 1920×1080 on an M1, with water that can look a little different from the Xbox (see Known issues). The emulated renderer is one switch away on the **Graphics** page.
+**Preview.** A native Apple silicon build. Its Metal renderer is the default: faster than the emulated one and sharp at 1920×1080 on an M1. Crackdown was made for the Xbox 360's graphics chip, never for Metal, and the Metal renderer redraws everything the game asks for in its own way, so **expect visual glitches**: missing or flat-coloured surfaces, water that looks different (see Known issues). If something looks wrong, the emulated renderer is one switch away on the **Graphics** page: slower, but it draws the game as the PC versions do.
 
 1. Download **Crackdown-v0.6.2-macos-arm64.zip** from the [Mac releases](https://github.com/Staravora/crackdown-recompiled-macos/releases/latest), open it, and drag **Crackdown Recompiled** to **Applications**.
 2. Open it. The launcher opens.
@@ -114,6 +114,8 @@ If the system cannot mount AppImages with FUSE, the AppImage unpacks itself into
 4. Wait until **Ready to play** appears, then press **PLAY**.
 
 The game files, settings, saves and logs go in `~/Library/Application Support/Crackdown Recompiled`. When a new release comes out the launcher offers it; **Install and restart** downloads it, checks it's signed by the same developer, and swaps it in. Updates need the app in **Applications** (or another folder your account can write to), opened from there. **Metal resolution** on the **Graphics** page draws the game at 1280×720, 1920×1080 or 2560×1440; the M1 MacBook Air holds 30 FPS at 1920×1080.
+
+**Seen a glitch?** Press **⌘⇧R** while it's on screen. You'll hear a chime, and the game saves a report in the `logs/reports` folder: what the Metal renderer drew, every draw in that frame, and the end of the log. Zip that report's folder and attach it to an [issue](https://github.com/Staravora/crackdown-recompiled-macos/issues). It's the quickest way to get a glitch fixed.
 
 **No game files are included** in any download.
 
@@ -211,7 +213,7 @@ The launcher's **Achievements** page shows the same list without starting the ga
 ## Known issues
 
 - Background music may occasionally stop during gameplay while sound effects and voices continue.
-- **Mac, Metal renderer:** some water can look a little different from the Xbox, and a rare one-frame flicker has been seen. The emulated renderer on the **Graphics** page has neither.
+- **Mac, Metal renderer:** after a long session, roads, pavements and building windows can stop drawing, so the sea, the sky or a flat colour shows where they should be. Some water can look different from the Xbox, and a rare one-frame flicker has been seen. The emulated renderer on the **Graphics** page has none of these. Press **⌘⇧R** when you see one.
 
 ## Screenshots
 
@@ -221,7 +223,7 @@ The launcher's **Achievements** page shows the same list without starting the ga
 
 ## Reporting problems
 
-If the game does not start or crashes, please open an [issue](https://github.com/saulob/crackdown-xbox360-recompiled/issues). Attach the newest `crackdown_*.log` file from the `logs` folder next to the program (next to the AppImage on Linux), and say what you were doing when the problem happened. The launcher's **About** page opens that folder. **Detailed logging** is on by default; turned off, a normal session still writes a shorter log but discards it on exit, while a crash keeps it. After a crash on Windows the same log ends with a `CRASH REPORT` section; no separate crash file or minidump is written. For Linux reports, please also say your distribution and graphics card, and whether you start the AppImage from Steam. Problems with the Mac version go to its own [issues](https://github.com/Staravora/crackdown-recompiled-macos/issues); its logs are in `~/Library/Application Support/Crackdown Recompiled/logs`, and please say which Mac you have and whether the Metal or emulated renderer was on.
+If the game does not start or crashes, please open an [issue](https://github.com/saulob/crackdown-xbox360-recompiled/issues). Attach the newest `crackdown_*.log` file from the `logs` folder next to the program (next to the AppImage on Linux), and say what you were doing when the problem happened. The launcher's **About** page opens that folder. **Detailed logging** is on by default; turned off, a normal session still writes a shorter log but discards it on exit, while a crash keeps it. After a crash on Windows the same log ends with a `CRASH REPORT` section; no separate crash file or minidump is written. For Linux reports, please also say your distribution and graphics card, and whether you start the AppImage from Steam. Problems with the Mac version go to its own [issues](https://github.com/Staravora/crackdown-recompiled-macos/issues); its logs are in `~/Library/Application Support/Crackdown Recompiled/logs`, and please say which Mac you have and whether the Metal or emulated renderer was on. For anything that looks wrong, press **⌘⇧R** in the game and attach the report it saves in `logs/reports`.
 
 ## Building it yourself
 

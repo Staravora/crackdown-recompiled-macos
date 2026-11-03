@@ -53,6 +53,8 @@
 #include "mouse_look.h"
 #include "orb_map.h"
 #include "platform.h"
+#include "problem_report.h"
+#include "report_key.h"
 #include "session_log.h"
 #include "settings.h"
 #include "skip_intro.h"
@@ -293,6 +295,11 @@ class CrackdownApp : public rex::ReXApp {
         const std::filesystem::path shaders = std::filesystem::exists(local_shaders / "manifest.txt")
                                                   ? local_shaders
                                                   : crackdown::ResourceFolder() / "native-shaders";
+#if defined(__APPLE__)
+        crackdown::native::shadow::SetReportHandler([this] {
+          app_context().CallInUIThreadDeferred([this] { crackdown::problem_report::Save(LogsDir(user_data_root())); });
+        });
+#endif
         crackdown::native::shadow::Install(runtime()->memory(), shaders, LogsDir(user_data_root()));
       }
     }
@@ -329,6 +336,11 @@ class CrackdownApp : public rex::ReXApp {
     if (window()) {
       cheat_menu_key_ = std::make_unique<crackdown::CheatMenuKey>(
           window(), [this] { app_context().CallInUIThreadDeferred([this] { ToggleCheatMenu(); }); });
+#if defined(__APPLE__)
+      report_key_ = std::make_unique<crackdown::ReportKey>(window(), [this] {
+        app_context().CallInUIThreadDeferred([this] { crackdown::problem_report::Save(LogsDir(user_data_root())); });
+      });
+#endif
     }
   }
 
@@ -337,6 +349,7 @@ class CrackdownApp : public rex::ReXApp {
   void OnShutdown() override {
     CloseAchievements();
     cheat_menu_key_.reset();
+    report_key_.reset();
     CloseCheatMenu();
     crackdown::mouse_look::Uninstall();
     DetachWindowHost();
@@ -559,6 +572,7 @@ class CrackdownApp : public rex::ReXApp {
   std::unique_ptr<crackdown::AchievementsOverlay> achievements_;
   std::unique_ptr<crackdown::CheatMenuOverlay> cheat_menu_;
   std::unique_ptr<crackdown::CheatMenuKey> cheat_menu_key_;
+  std::unique_ptr<crackdown::ReportKey> report_key_;
   bool show_launcher_ = false;
   bool show_launcher_after_runtime_ = false;
   bool launcher_open_ = false;
