@@ -405,6 +405,10 @@ struct PacingTotals {
   int64_t emulator_lead = 0;  // Fences the emulator had passed beyond Metal's when Metal finished a frame, summed.
   uint64_t held_frames = 0;
   uint64_t held_ns = 0;
+  // Fences let through because nothing of Metal's was pending. open: draws of the frame in progress had already been
+  // captured, so the game could write over memory Metal hasn't read yet.
+  uint64_t idle_releases = 0;
+  uint64_t idle_releases_open = 0;
   std::map<uint32_t, FenceWaits> waits;
 };
 
@@ -1166,14 +1170,17 @@ uint32_t LoadGuestWord(uint32_t address) {
 
 // Under g_pacing_mutex. Never goes back: a frame reports the fence its present writes next, which the idle release, at
 // every fence issued so far, can be one behind.
-void SetFenceDone(uint32_t done) {
+// True when it moved the game's fence on.
+bool SetFenceDone(uint32_t done) {
   static bool reported = false;
   static uint32_t last = 0;
   if (g_set_fence_done && (!reported || int32_t(done - last) > 0)) {
     g_set_fence_done(done);
     reported = true;
     last = done;
+    return true;
   }
+  return false;
 }
 
 // Under g_pacing_mutex. Tells the emulator how far Metal has got, as far as every earlier frame is done too.
@@ -1190,13 +1197,15 @@ void ReportFences() {
   }
 }
 
-// Nothing of Metal's is pending, so every fence issued so far can pass.
-void ReleaseIdleFences() {
+// Nothing of Metal's is pending, so every fence issued so far can pass. open_draws: the frame in progress already has
+// draws, which Metal hasn't read yet.
+void ReleaseIdleFences(bool open_draws) {
   const uint32_t device = g_device.load(std::memory_order_relaxed);
   const uint32_t fence = device ? LoadGuestWord(device + kDeviceFence) : 0;
   std::lock_guard lock(g_pacing_mutex);
-  if (g_frame_fences.empty() && fence) {
-    SetFenceDone(fence - 1);
+  if (g_frame_fences.empty() && fence && SetFenceDone(fence - 1)) {
+    ++g_pacing_totals.idle_releases;
+    g_pacing_totals.idle_releases_open += open_draws;
   }
 }
 
@@ -2069,8 +2078,12 @@ void Report(const MetalDevice& device) {
                          wait.ns / 1e6, wait.worst_ns / 1e6, wait.metal_done, wait.in_flight, wait.open_frame);
   }
   const double paced_frames = double(std::max<uint64_t>(pacing.frames, 1));
-  out << fmt::format(R"("pacing":{{"frames":{},"fences_per_frame":{:.2f},"metal_ms":{:.2f},"worst_metal_ms":{:.2f},"emulator_lead":{:.2f},"held_frames":{},"held_ms":{:.1f},"waits":{{{}}}}},)", pacing.frames,
-                     double(pacing.fences) / paced_frames, pacing.metal_ns / 1e6 / paced_frames, pacing.worst_metal_ns / 1e6, double(pacing.emulator_lead) / paced_frames, pacing.held_frames, pacing.held_ns / 1e6, waits);
+  if (pacing.idle_releases_open) {
+    REXLOG_INFO("Native shadow: fences let through early {} times in {} frames, {} with draws not yet drawn", pacing.idle_releases,
+                pacing.frames, pacing.idle_releases_open);
+  }
+  out << fmt::format(R"("pacing":{{"frames":{},"idle_releases":{},"idle_releases_open":{},"fences_per_frame":{:.2f},"metal_ms":{:.2f},"worst_metal_ms":{:.2f},"emulator_lead":{:.2f},"held_frames":{},"held_ms":{:.1f},"waits":{{{}}}}},)", pacing.frames,
+                     pacing.idle_releases, pacing.idle_releases_open, double(pacing.fences) / paced_frames, pacing.metal_ns / 1e6 / paced_frames, pacing.worst_metal_ns / 1e6, double(pacing.emulator_lead) / paced_frames, pacing.held_frames, pacing.held_ns / 1e6, waits);
   ReadbackTotals readbacks;
   {
     std::lock_guard lock(g_readback_mutex);
@@ -2133,7 +2146,7 @@ void RenderThread() {
       // The game can wait for the GPU to go idle with no frame to show, on loading. With nothing of Metal's pending,
       // fences up to the newest issued are let through, or that wait would never end.
       while (!g_wake.wait_for(lock, kIdleFenceRelease, [] { return !g_ready.empty(); })) {
-        ReleaseIdleFences();
+        ReleaseIdleFences(!g_current->runs.empty());
       }
       frame = std::move(g_ready.front());
       g_ready.pop_front();
@@ -2536,7 +2549,7 @@ void OnFenceWaitStarting() {
       return;
     }
   }
-  ReleaseIdleFences();
+  ReleaseIdleFences(false);
 }
 
 void OnFenceWait(uint32_t caller, uint32_t fence, uint64_t waited_ns) {
