@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 
 namespace rex::ui {
 class Window;
@@ -22,5 +23,8 @@ void AttachFrameRate(rex::ui::Window* window, rex::ui::WindowedAppContext& app_c
 void DetachFrameRate();
 
 GuestFrameStats GetGuestFrameStats();
+
+// Told each one-second sample, on the game's thread, so it should only queue work.
+void SetFrameRateListener(std::function<void(double fps)> listener);
 
 }  // namespace crackdown

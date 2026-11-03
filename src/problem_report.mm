@@ -18,6 +18,10 @@
 #include "native/shadow.h"
 #include "native/thermal_state.h"
 
+REXCVAR_DEFINE_BOOL(crackdown_auto_report, true, "Crackdown",
+                    "With the Metal renderer, save a problem report by itself when a steady frame rate suddenly falls, as "
+                    "it does when the Metal glitch starts");
+
 namespace crackdown::problem_report {
 namespace {
 
@@ -66,15 +70,14 @@ bool WriteLogTail(const std::filesystem::path& from, const std::filesystem::path
   return bool(out);
 }
 
-}  // namespace
-
-std::filesystem::path Save(const std::filesystem::path& logs_folder) {
+// prefix names the folder; reason, when given, says why the game saved it by itself, and leaves out the chime.
+std::filesystem::path SaveReport(const std::filesystem::path& logs_folder, const char* prefix, const std::string& reason) {
   const std::time_t now = std::time(nullptr);
   std::tm local{};
   localtime_r(&now, &local);
   char stamp[32];
   std::strftime(stamp, sizeof(stamp), "%Y-%m-%d-%H%M%S", &local);
-  const std::filesystem::path folder = logs_folder / "reports" / fmt::format("report-{}", stamp);
+  const std::filesystem::path folder = logs_folder / "reports" / fmt::format("{}-{}", prefix, stamp);
   std::error_code ec;
   std::filesystem::create_directories(folder, ec);
   if (ec) {
@@ -90,7 +93,7 @@ std::filesystem::path Save(const std::filesystem::path& logs_folder) {
   char saved[64];
   std::strftime(saved, sizeof(saved), "%Y-%m-%d %H:%M:%S", &local);
   about << fmt::format("Crackdown Recompiled {}+macos.{}\n", CRACKDOWN_PORT_VERSION, CRACKDOWN_MAC_BUILD)
-        << fmt::format("Saved: {}\n", saved)
+        << fmt::format("Saved: {}{}\n", saved, reason.empty() ? "" : ", automatically: " + reason)
         << fmt::format("Mac: {}, macOS {}, {} GB\n", SystemString("hw.model"), SystemString("kern.osproductversion"),
                        MemoryBytes() >> 30)
         << fmt::format("Thermal state: {}\n", native::ThermalState())
@@ -104,11 +107,37 @@ std::filesystem::path Save(const std::filesystem::path& logs_folder) {
         << (log ? "log-tail.txt is the end of this session's log.\n" : "This session's log couldn't be read.\n");
   about.close();
 
-  REXLOG_INFO("Problem report saved to {}", folder.string());
-  @autoreleasepool {
-    [[NSSound soundNamed:@"Glass"] play];
+  if (reason.empty()) {
+    REXLOG_INFO("Problem report saved to {}", folder.string());
+    @autoreleasepool {
+      [[NSSound soundNamed:@"Glass"] play];
+    }
+  } else {
+    REXLOG_INFO("Problem report saved by itself, as {}, to {}", reason, folder.string());
   }
   return folder;
+}
+
+}  // namespace
+
+std::filesystem::path Save(const std::filesystem::path& logs_folder) {
+  return SaveReport(logs_folder, "report", {});
+}
+
+std::filesystem::path SaveAutomatic(const std::filesystem::path& logs_folder, const std::string& reason) {
+  if (!REXCVAR_GET(crackdown_auto_report)) {
+    return {};
+  }
+  size_t existing = 0;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator(logs_folder / "reports", ec)) {
+    existing += entry.path().filename().string().starts_with("auto-report-");
+  }
+  if (existing >= kMaxAutomaticReports) {
+    REXLOG_INFO("Problem report: not saving one by itself ({}), {} are already in the reports folder", reason, existing);
+    return {};
+  }
+  return SaveReport(logs_folder, "auto-report", reason);
 }
 
 }  // namespace crackdown::problem_report

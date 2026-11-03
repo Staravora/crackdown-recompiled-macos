@@ -31,6 +31,7 @@
 #include "cheat_menu_key.h"
 #include "cheat_menu_overlay.h"
 #include "frame_counter.h"
+#include "frame_drop_watch.h"
 #include "frame_rate.h"
 #include "content_state.h"
 #include "game_files.h"
@@ -298,6 +299,13 @@ class CrackdownApp : public rex::ReXApp {
                                                   : crackdown::ResourceFolder() / "native-shaders";
 #if defined(__APPLE__)
         crackdown::native::WatchThermalState();
+        crackdown::SetFrameRateListener([this, watch = std::make_shared<crackdown::FrameDropWatch>()](double fps) {
+          std::string reason;
+          if (watch->Sample(fps, reason)) {
+            app_context().CallInUIThreadDeferred(
+                [this, reason] { crackdown::problem_report::SaveAutomatic(LogsDir(user_data_root()), reason); });
+          }
+        });
         crackdown::native::shadow::SetReportHandler([this] {
           app_context().CallInUIThreadDeferred([this] { crackdown::problem_report::Save(LogsDir(user_data_root())); });
         });
@@ -352,6 +360,7 @@ class CrackdownApp : public rex::ReXApp {
     CloseAchievements();
     cheat_menu_key_.reset();
     report_key_.reset();
+    crackdown::SetFrameRateListener(nullptr);
     CloseCheatMenu();
     crackdown::mouse_look::Uninstall();
     DetachWindowHost();

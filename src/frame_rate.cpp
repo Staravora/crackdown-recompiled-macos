@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -50,6 +51,7 @@ std::optional<Clock::time_point> g_sample_start;
 uint64_t g_sample_frames = 0;
 uint64_t g_total_frames = 0;
 GuestFrameStats g_stats;
+std::function<void(double)> g_listener;  // Under g_sample_mutex.
 
 // UI thread only.
 std::optional<double> g_shown_frame_rate;
@@ -112,6 +114,9 @@ void CountGuestFrame() {
   g_sample_start = now;
   g_sample_frames = 0;
   g_app_context->CallInUIThread([fps] { ShowFps(fps); });
+  if (g_listener) {
+    g_listener(fps);
+  }
 }
 
 }  // namespace
@@ -125,6 +130,11 @@ void AttachFrameRate(rex::ui::Window* window, rex::ui::WindowedAppContext& app_c
 
 void DetachFrameRate() {
   g_active.store(false, std::memory_order_relaxed);
+}
+
+void SetFrameRateListener(std::function<void(double fps)> listener) {
+  std::lock_guard lock(g_sample_mutex);
+  g_listener = std::move(listener);
 }
 
 GuestFrameStats GetGuestFrameStats() {
