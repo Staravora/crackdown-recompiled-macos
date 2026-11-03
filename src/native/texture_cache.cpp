@@ -8,9 +8,11 @@
 #include <cstring>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <rex/cvar.h>
 #include <rex/graphics/pipeline/texture/info.h>
 #include <rex/graphics/pipeline/texture/util.h>
@@ -683,6 +685,39 @@ int TextureCache::Load(const uint32_t* fetch_dwords, int existing) {
   upload_budget_ -= needed;
   textures_loaded_ += existing < 0;
   return descriptor;
+}
+
+void TextureCache::CheckStale(std::ostream& out) const {
+  size_t checked = 0, missed = 0, pending = 0;
+  std::string lines;
+  for (const auto& [key, entry] : textures_) {
+    if (entry.descriptor == int(kDummyDescriptor)) {
+      continue;
+    }
+    xenos::xe_gpu_texture_fetch_t fetch;
+    std::memcpy(&fetch, entry.fetch.data(), sizeof(fetch));
+    const std::array<Range, 2> ranges = RangesOf(fetch);
+    size_t index = 0, changed = 0;
+    ForEachPage(ranges, [&](uint32_t, const Range& part) {
+      if (index < entry.pages.size() && ContentOf(guest_memory_, guest_bytes_, part) != entry.pages[index].content) {
+        ++changed;
+      }
+      ++index;
+    });
+    ++checked;
+    if (!changed) {
+      continue;
+    }
+    const bool noticed = VersionOf(ranges[0]) + VersionOf(ranges[1]) != entry.version;
+    ++(noticed ? pending : missed);
+    lines += fmt::format("{} descriptor {} f{} {}x{} base {:05X} mips {:05X} levels {}-{} pages {}/{} last checked frame {}\n",
+                         noticed ? "pending" : "missed", entry.descriptor, uint32_t(fetch.format), uint32_t(fetch.size_2d.width) + 1,
+                         uint32_t(fetch.size_2d.height) + 1, uint32_t(fetch.base_address), uint32_t(fetch.mip_address),
+                         uint32_t(fetch.mip_min_level), uint32_t(fetch.mip_max_level), changed, index, entry.checked_frame);
+  }
+  out << fmt::format("{} textures checked at frame {}: {} missed (memory changed, no change reported), {} pending (reported, not reloaded yet)\n",
+                     checked, frame_, missed, pending)
+      << lines;
 }
 
 void TextureCache::BeginFrame() {

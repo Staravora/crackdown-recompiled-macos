@@ -96,7 +96,8 @@ std::filesystem::path Save(const std::filesystem::path& logs_folder) {
         << fmt::format("Metal resolution (crackdown_render_scale): {}\n", Setting("crackdown_render_scale"))
         << fmt::format("Texture filtering (anisotropic_override): {}\n", Setting("anisotropic_override")) << '\n'
         << (metal ? "metal-frame.png and draws.txt are the frame Metal drew next and its draw list. renderer.json holds the "
-                    "renderer's counters for the last ten seconds, once the game has run that long.\n"
+                    "renderer's counters for the last ten seconds, once the game has run that long. textures.txt lists the textures "
+                    "whose memory has changed since Metal loaded them.\n"
                   : "The Metal renderer wasn't drawing, so there's no frame or draw list.\n")
         << (log ? "log-tail.txt is the end of this session's log.\n" : "This session's log couldn't be read.\n");
   about.close();

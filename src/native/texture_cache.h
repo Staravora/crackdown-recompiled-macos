@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <ostream>
 #include <unordered_map>
 
 #include <rex/system/xmemory.h>
@@ -63,6 +64,9 @@ class TextureCache {
   uint64_t textures_reloaded() const { return textures_reloaded_; }
   uint64_t reloaded_bytes() const { return reloaded_bytes_; }
   uint64_t textures_unchanged() const { return textures_unchanged_; }
+  // For a problem report: every loaded texture whose guest memory no longer holds what was uploaded. "missed" means no
+  // page change was reported, so it will never reload; "pending" means one was, and the reload hasn't happened yet.
+  void CheckStale(std::ostream& out) const;
 
  private:
   static constexpr size_t kUploadBytesPerFrame = 32 << 20;

@@ -2216,6 +2216,10 @@ void RenderThread() {
         std::error_code ignored;
         std::filesystem::copy_file(g_path, g_report_folder / "renderer.json", std::filesystem::copy_options::overwrite_existing,
                                    ignored);
+        {
+          std::ofstream textures(g_report_folder / "textures.txt");
+          g_textures->CheckStale(textures);
+        }
         REXLOG_INFO("Native shadow: report frame {} saved to {}", g_frame_number, g_report_folder.string());
         g_report_folder.clear();
       }
