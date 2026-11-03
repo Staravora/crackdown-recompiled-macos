@@ -40,6 +40,7 @@ if $NOTARIZE && ! xcrun notarytool history --keychain-profile "$PROFILE" > /dev/
 fi
 
 VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$SOURCE_APP/Contents/Info.plist")
+MAC_BUILD=$(/usr/libexec/PlistBuddy -c "Print CFBundleVersion" "$SOURCE_APP/Contents/Info.plist")
 NAME="Crackdown-v$VERSION-macos-arm64"
 OUT="$R/out/dist-macos"
 APP="$OUT/Crackdown Recompiled.app"
@@ -79,3 +80,4 @@ ditto -c -k --keepParent "$APP" "$ZIP"
 (cd "$OUT" && shasum -a 256 "$NAME.zip" > "$NAME.sha256")
 echo "Made $ZIP"
 cat "$OUT/$NAME.sha256"
+echo "Release tag: v$VERSION+macos.$MAC_BUILD (a full release, not a pre-release, so the in-app updater sees it)"
