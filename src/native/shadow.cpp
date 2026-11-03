@@ -1,4 +1,5 @@
 #include "shadow.h"
+#include "thermal_state.h"
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -2023,9 +2024,19 @@ void Report(const MetalDevice& device) {
     REXLOG_ERROR("Native shadow: GPU error: {}", gpu.last_error);
   }
   const double frames = double(std::max<uint64_t>(g_totals.frames, 1));
+  // The device's GPU totals run from the start, so the last window's GPU time comes from the difference. On the same
+  // scene, it climbing is the Mac slowing its GPU, which it can do before the thermal state moves.
+  static uint64_t last_gpu_ns = 0, last_gpu_frames = 0;
+  const uint64_t window_gpu_frames = gpu.frames - last_gpu_frames;
+  const double window_gpu_ms = (gpu.gpu_ns - last_gpu_ns) / 1e6 / double(std::max<uint64_t>(window_gpu_frames, 1));
+  last_gpu_ns = gpu.gpu_ns;
+  last_gpu_frames = gpu.frames;
+  const char* thermal = ThermalState();
+  REXLOG_INFO("Native shadow: GPU {:.1f} ms a frame over the last {} frames, thermal {}", window_gpu_ms, window_gpu_frames, thermal);
   std::ofstream out(g_path);
+  out << fmt::format(R"({{"thermal":"{}","gpu_ms_recent":{:.3f},)", thermal, window_gpu_ms);
   out << fmt::format(
-      R"({{"guest_frames":{},"frames":{},"dropped":{},"draws_per_frame":{:.1f},"skipped_draws_per_frame":{:.1f},"no_room":{},)"
+      R"("guest_frames":{},"frames":{},"dropped":{},"draws_per_frame":{:.1f},"skipped_draws_per_frame":{:.1f},"no_room":{},)"
       R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"no_target_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},"other_index_order_draws_per_frame":{:.1f},"transparent_draws_per_frame":{:.1f},"no_color_draws_per_frame":{:.1f},"alpha_tested_draws_per_frame":{:.1f},"shaded_draws_per_frame":{:.1f},"needs_resolve_draws_per_frame":{:.1f},"native_resolves_per_frame":{:.1f},"missed_resolves_per_frame":{:.1f},"pixel_shaders_found":{},"pixel_shaders_missing":{},"textures_loaded":{},"textures_skipped":{},"textures_reloaded":{},"reloaded_mb":{:.1f},"textures_unchanged":{},"direct_draws_per_frame":{:.1f},"ring_desyncs":{},"passes_per_frame":{:.1f},"targets":{},)"
       R"("shaders_found":{},"shaders_missing":{},"shaders_failed":{},"index_copy_ms_per_frame":{:.3f},)"
       R"("capture_ms_per_frame":{:.4f},"wait_ms_per_frame":{:.3f},"encode_ms_p50":{:.3f},"encode_ms_p95":{:.3f},"encode_ms_max":{:.3f},)"

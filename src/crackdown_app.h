@@ -42,6 +42,7 @@
 #include "benchmark.h"
 #include "free_camera.h"
 #include "native/shadow.h"
+#include "native/thermal_state.h"
 #include "native/texture_probe.h"
 #include "internal_render_scale.h"
 #include "language_setting.h"
@@ -296,6 +297,7 @@ class CrackdownApp : public rex::ReXApp {
                                                   ? local_shaders
                                                   : crackdown::ResourceFolder() / "native-shaders";
 #if defined(__APPLE__)
+        crackdown::native::WatchThermalState();
         crackdown::native::shadow::SetReportHandler([this] {
           app_context().CallInUIThreadDeferred([this] { crackdown::problem_report::Save(LogsDir(user_data_root())); });
         });

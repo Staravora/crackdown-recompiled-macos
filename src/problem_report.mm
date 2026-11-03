@@ -16,6 +16,7 @@
 
 #include "active_log.h"
 #include "native/shadow.h"
+#include "native/thermal_state.h"
 
 namespace crackdown::problem_report {
 namespace {
@@ -92,6 +93,7 @@ std::filesystem::path Save(const std::filesystem::path& logs_folder) {
         << fmt::format("Saved: {}\n", saved)
         << fmt::format("Mac: {}, macOS {}, {} GB\n", SystemString("hw.model"), SystemString("kern.osproductversion"),
                        MemoryBytes() >> 30)
+        << fmt::format("Thermal state: {}\n", native::ThermalState())
         << fmt::format("Renderer: {}\n", native::shadow::DrawsAlone() ? "Metal" : "emulated")
         << fmt::format("Metal resolution (crackdown_render_scale): {}\n", Setting("crackdown_render_scale"))
         << fmt::format("Texture filtering (anisotropic_override): {}\n", Setting("anisotropic_override")) << '\n'

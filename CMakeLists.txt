@@ -272,8 +272,8 @@ if(APPLE)
     enable_language(OBJCXX)
     set(CMAKE_OBJCXX_STANDARD 23)
     list(APPEND CRACKDOWN_SOURCES src/native/shadow.cpp
-        src/native/texture_cache.cpp src/native/metal_device.mm src/updater/mac_app_signature.cpp src/problem_report.mm)
-    set_source_files_properties(src/native/metal_device.mm src/problem_report.mm PROPERTIES
+        src/native/texture_cache.cpp src/native/metal_device.mm src/updater/mac_app_signature.cpp src/problem_report.mm src/native/thermal_state.mm)
+    set_source_files_properties(src/native/metal_device.mm src/problem_report.mm src/native/thermal_state.mm PROPERTIES
         COMPILE_OPTIONS "-fobjc-arc" SKIP_PRECOMPILE_HEADERS ON)
 endif()
 set_source_files_properties(src/updater/third_party/miniz/miniz.c PROPERTIES COMPILE_OPTIONS "-w")
