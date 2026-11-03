@@ -1118,6 +1118,11 @@ std::ofstream* g_dump = nullptr;
 int g_debug_id = 0;
 std::mutex g_report_mutex;
 std::filesystem::path g_report_folder;  // A report asked for, saved from the next frame.
+// The frame after a report's is saved again with the sea's surface left out, the 2026-11-03 suspect for the colour wash:
+// the glitch rarely lasts long enough to test by hand, but it does last a frame. These addresses held across sessions.
+constexpr std::array<uint32_t, 2> kWaterPixelShaders = {0x1B150780, 0x1B153400};
+std::filesystem::path g_report_followup;  // Render thread only: the report whose water-free frame is next.
+bool g_skip_water = false;                // Render thread only: this frame.
 std::function<void()> g_report_handler;  // Saves a whole problem report, for the report word.
 
 // Takes g_query_mutex. Files a query once both sides have answered, and gives up on the oldest if the game never asks.
@@ -1686,7 +1691,8 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
         if (g_debug_skip_blended && run.targets.color && IsBlended(draw)) {
           continue;
         }
-        if (g_debug_skip_ps.contains(draw.pixel_shader)) {
+        if (g_debug_skip_ps.contains(draw.pixel_shader) ||
+            (g_skip_water && std::ranges::find(kWaterPixelShaders, draw.pixel_shader) != kWaterPixelShaders.end())) {
           continue;
         }
         g_debug_stopped |= g_debug_stop_ps && draw.pixel_shader == g_debug_stop_ps;
@@ -2231,8 +2237,15 @@ void RenderThread() {
         g_report_handler();
       }
     }
+    g_skip_water = false;
     {
       std::lock_guard lock(g_report_mutex);
+      if (g_report_folder.empty() && !g_report_followup.empty()) {
+        capture = g_report_followup / "metal-frame-nowater.png";
+        g_skip_water = true;
+        REXLOG_INFO("Native shadow: report frame {} without the water saved to {}", g_frame_number, g_report_followup.string());
+        g_report_followup.clear();
+      }
       if (!g_report_folder.empty()) {
         capture = g_report_folder / "metal-frame.png";
         dump = std::make_unique<std::ofstream>(g_report_folder / "draws.txt");
@@ -2245,6 +2258,7 @@ void RenderThread() {
           g_textures->CheckStale(textures);
         }
         REXLOG_INFO("Native shadow: report frame {} saved to {}", g_frame_number, g_report_folder.string());
+        g_report_followup = std::move(g_report_folder);
         g_report_folder.clear();
       }
     }
