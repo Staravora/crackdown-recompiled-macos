@@ -16,7 +16,7 @@
 - **Mac build number:** `CRACKDOWN_MAC_BUILD` in CMakeLists.txt (1 for the first release; raise it for every Mac release, never reset). The app reports `<version>+macos.<build>`, `CFBundleVersion` is the build, releases are tagged `v<version>+macos.<build>` as full releases (the updater skips pre-releases), and `CompareRelease` offers a higher build of the same version.
 - **First release (draft, not published):** `v0.6.2+macos.1` on the fork, targeting `macos-arm64` (86a7627). Notarized (Accepted) and stapled; zip 35 MB, SHA-256 `aad8f4e3…feddf`; notes in `out/release-notes-0.6.2-macos.1.md`. The fork has issues off and `main` (Saulo's README) as its default branch; both need Bruce's OK to change. GitLab still holds the pre-rewrite branch until Bruce force-pushes (the classifier blocked it for me).
 - **Notarization:** already set up. The `zuhl-notary` keychain profile from Oculorum Studio works for any app of team 2PDAUA4SU2 (checked with `notarytool history`), and `package-macos.sh` now uses it by default.
-- **Still open:** creating the fork and its first release; Metal gaps (green flash, water, supply beam).
+- **Still open:** publishing the first release; Metal water away from sea level differs a little. Bruce (2026-11-02): the green flash hasn't shown in a while and the supply beam is fixed, so both are off the known issues.
 
 ## 2026-11-02 — Mac release groundwork, and the launcher in the game's menu look
 - **App layout, signable:**

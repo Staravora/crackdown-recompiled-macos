@@ -106,7 +106,7 @@ If the system cannot mount AppImages with FUSE, the AppImage unpacks itself into
 
 ### macOS
 
-**Preview.** A native Apple silicon build. Its Metal renderer is the default: faster than the emulated one, sharp at 1920×1080 on an M1, with a few effects still missing (see Known issues). The emulated renderer is one switch away on the **Graphics** page.
+**Preview.** A native Apple silicon build. Its Metal renderer is the default: faster than the emulated one, sharp at 1920×1080 on an M1, with water that can look a little different from the Xbox (see Known issues). The emulated renderer is one switch away on the **Graphics** page.
 
 1. Download **Crackdown-v0.6.2-macos-arm64.zip** from the [Mac releases](https://github.com/Staravora/crackdown-xbox360-recompiled/releases/latest), open it, and drag **Crackdown Recompiled** to **Applications**.
 2. Open it. The launcher opens.
@@ -211,7 +211,7 @@ The launcher's **Achievements** page shows the same list without starting the ga
 ## Known issues
 
 - Background music may occasionally stop during gameplay while sound effects and voices continue.
-- **Mac, Metal renderer:** a green flash can show once before the main menu, some water differs from the Xbox, and a supply point's beam can be missing. A rare one-frame flicker has been seen. The emulated renderer on the **Graphics** page has none of these.
+- **Mac, Metal renderer:** some water can look a little different from the Xbox, and a rare one-frame flicker has been seen. The emulated renderer on the **Graphics** page has neither.
 
 ## Screenshots
 
