@@ -1,5 +1,11 @@
 # Session handoff
 
+## 2026-11-02 (night) — the fork renamed to Staravora/crackdown-recompiled-macos
+- **Why:** the fork list showed four other forks with the same kind of name; the new one says "Mac" and matches the GitLab project. Renamed before anyone had downloaded the release (one download, our own check).
+- **The trap it had:** the app checks that the download addresses in a release start with `https://github.com/<repository>/releases/download/`, with the repository built in. GitHub redirects the old API address, so a copy built with the old name would still find an update, then refuse the download as "not secure". So build 1 was rebuilt with the new name and its zip and `.sha256` replaced on the same `v0.6.2+macos.1` release. **Never rename the release repository again once a release has real downloads**; if it must happen, the last release under the old name has to stay installable from there.
+- **The replaced build:** notarized (Accepted) and stapled; zip 35081310 bytes, SHA-256 `831bcf51…9500f`. Downloaded back from the live release: checksum matches, the signature passes the updater's team and identifier requirement, Gatekeeper says Notarized Developer ID, and the binary carries the new name. The old API address answers 301 to the repo, which the updater follows.
+- README links, `package-macos.sh`'s default, the release notes and the `github` remote all use the new name. Old addresses redirect.
+
 ## 2026-11-02 (evening) — Mac in-app updater; release to-dos closed
 - **Updater (`UpdatePackageKind::kMacApp`):**
   - **Check:** `releases/latest` of the repository set at configure time with `-DCRACKDOWN_MAC_UPDATE_REPOSITORY=owner/name`. **Empty by default, and an empty one never checks**, so the Mac build doesn't look at Saulo's Windows/Linux releases. Bruce's GitHub owner/name still has to be chosen.

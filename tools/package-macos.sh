@@ -10,7 +10,7 @@
 #                            Made once per Mac with
 #                            xcrun notarytool store-credentials zuhl-notary --apple-id <you> --team-id <team>
 #                            which asks for an app-specific password and keeps it in the keychain, never in a file.
-#   CRACKDOWN_RELEASE_REPOSITORY the GitHub owner/name the release goes to; default Staravora/crackdown-xbox360-recompiled.
+#   CRACKDOWN_RELEASE_REPOSITORY the GitHub owner/name the release goes to; default Staravora/crackdown-recompiled-macos.
 #                            The game must be built with -DCRACKDOWN_MAC_UPDATE_REPOSITORY set to it, or the release
 #                            would never update itself, so the script refuses otherwise.
 #   CRACKDOWN_SHADERS        the native-shaders folder to bundle; default Crackdown Data/user_data/native-shaders
@@ -22,7 +22,7 @@ NOTARIZE=true
 [ "${1:-}" = "--no-notarize" ] && NOTARIZE=false
 SHADERS=${CRACKDOWN_SHADERS:-"$W/Crackdown Data/user_data/native-shaders"}
 PROFILE=${CRACKDOWN_NOTARY_PROFILE:-zuhl-notary}
-REPOSITORY=${CRACKDOWN_RELEASE_REPOSITORY:-Staravora/crackdown-xbox360-recompiled}
+REPOSITORY=${CRACKDOWN_RELEASE_REPOSITORY:-Staravora/crackdown-recompiled-macos}
 IDENTITY=${CRACKDOWN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)}
 [ -n "$IDENTITY" ] || { echo "No Developer ID Application identity in the keychain." >&2; exit 1; }
 grep -qaF "$REPOSITORY" "$SOURCE_APP/Contents/MacOS/crackdown" || {
