@@ -26,6 +26,9 @@
 #include "shadow.h"
 #include "texture_probe.h"
 
+REXCVAR_DEFINE_BOOL(crackdown_full_buffer_check, true, "Crackdown",
+                    "With the Metal renderer, check each command buffer's whole content every time it runs, not only its "
+                    "first words, and decode it again if the game has changed it, so Metal never draws from an old decode");
 REXCVAR_DEFINE_BOOL(crackdown_native_probe, false, "Crackdown",
                     "During a benchmark, decode the baked command buffers live, time it and write native-probe-<label>.json");
 
@@ -83,6 +86,7 @@ struct Buffer {
   const uint8_t* sample_host = nullptr;
   uint32_t sample_dwords = 0;
   uint32_t sample = 0;
+  uint64_t content = 0;  // Every list's words and the segment table, as of the last decode.
   uint64_t runs = 0;
   uint32_t changes = 0;
 };
@@ -162,6 +166,54 @@ const uint8_t* HostOfList(uint32_t list, uint32_t dwords) {
   }
   return rex::system::kernel_state()->memory()->TranslatePhysical<const uint8_t*>(list);
 }
+
+// Walks the buffer's segments as ReadLists does, hashing each list's address, length and words, so a change anywhere in
+// it shows, not only in the first words of its first list.
+uint64_t ContentOf(uint32_t buffer, const uint8_t* base) {
+  uint64_t hash = 0xCBF29CE484222325ull;
+  const auto mix = [&](uint64_t value) { hash = (hash ^ value) * 0x100000001B3ull; };
+  if (!Readable(buffer, kCommandBufferSegments + 4)) {
+    return 0;
+  }
+  const uint32_t flags = Load32(base, buffer + kCommandBufferFlags);
+  uint32_t segment = (flags & kCommandBufferNoLists) ? 0 : Load32(base, buffer + kCommandBufferSegments);
+  for (uint32_t i = 0; segment && i < kMaxSegments; ++i) {
+    if (!Readable(segment, 8)) {
+      return hash;
+    }
+    const uint32_t lists = Load32(base, segment + 4);
+    if (lists > kMaxListsPerSegment || !Readable(segment, (lists + 1) * 8)) {
+      return hash;
+    }
+    for (uint32_t list = 0; list < lists; ++list) {
+      const uint32_t entry_address = segment + (list + 1) * 8;
+      const uint32_t address = Load32(base, entry_address);
+      const uint32_t dwords = std::min(Load32(base, entry_address + 4) & 0xFFFFF, kMaxListDwords);
+      mix(uint64_t(address) << 32 | dwords);
+      const uint8_t* host = HostOfList(address, dwords);
+      if (!host) {
+        continue;
+      }
+      size_t at = 0;
+      for (; at + 8 <= size_t(dwords) * 4; at += 8) {
+        uint64_t word;
+        std::memcpy(&word, host + at, sizeof(word));
+        mix(word);
+      }
+      if (at < size_t(dwords) * 4) {
+        uint32_t word;
+        std::memcpy(&word, host + at, sizeof(word));
+        mix(word);
+      }
+    }
+    segment = Load32(base, segment);
+  }
+  return hash;
+}
+
+// What the full check has found and cost since it last logged.
+uint64_t g_stale_buffers = 0, g_full_check_ns = 0, g_full_checks = 0;
+Clock::time_point g_full_check_logged = Clock::now();
 
 uint32_t SampleOf(const Buffer& entry) {
   uint32_t hash = 2166136261u;
@@ -421,17 +473,46 @@ void OnRunCommandBuffer(uint32_t device, uint32_t buffer, uint32_t predication, 
 
   auto [it, added] = g_buffers.try_emplace(buffer);
   Buffer& entry = it->second;
+  const bool full_check = shadow::Enabled() && REXCVAR_GET(crackdown_full_buffer_check);
   if (added) {
     DecodeBuffer(entry, buffer, base);
+    if (full_check) {
+      entry.content = ContentOf(buffer, base);
+    }
     g_totals.decode_ns += Since(run_start);
   } else if (entry.sample_host) {
-    if (SampleOf(entry) != entry.sample) {
+    bool changed = SampleOf(entry) != entry.sample;
+    uint64_t content = 0;
+    if (full_check) {
+      const Clock::time_point check_start = Clock::now();
+      content = ContentOf(buffer, base);
+      g_full_check_ns += Since(check_start);
+      ++g_full_checks;
+      if (!changed && content != entry.content) {
+        // The game changed the buffer past the sampled words: without this, Metal would go on drawing the old decode.
+        ++g_stale_buffers;
+        changed = true;
+      }
+    }
+    if (changed) {
       const Clock::time_point again = Clock::now();
       ++entry.changes;
       ++g_totals.redecodes;
       DecodeBuffer(entry, buffer, base);
+      entry.content = full_check ? content : 0;
       g_totals.decode_ns += Since(again);
     }
+  }
+  if (full_check && Clock::now() - g_full_check_logged >= std::chrono::seconds(10)) {
+    const double seconds = std::chrono::duration<double>(Clock::now() - g_full_check_logged).count();
+    if (g_stale_buffers) {
+      REXLOG_INFO("Native probe: {} command buffers changed past their sampled words and were decoded again; full checks "
+                  "took {:.2f} ms a second over {} runs",
+                  g_stale_buffers, g_full_check_ns / 1e6 / seconds, g_full_checks);
+    }
+    shadow::SetBufferChecks(g_stale_buffers, g_full_check_ns / 1e6 / seconds);
+    g_stale_buffers = g_full_check_ns = g_full_checks = 0;
+    g_full_check_logged = Clock::now();
   }
 
   if (shadow::Enabled()) {

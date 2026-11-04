@@ -78,6 +78,8 @@ void SetDevice(uint32_t device, const uint8_t* base);
 void OnFenceWaitStarting();
 void OnFenceWait(uint32_t caller, uint32_t fence, uint64_t waited_ns);
 void SetRingDesyncs(uint64_t desyncs);
+// The command buffer full check's last ten seconds: buffers it caught changed past their sample, and its cost.
+void SetBufferChecks(uint64_t stale, double ms_per_second);
 void SetGammaRamp(const uint32_t* ramp);
 // The next frame Metal draws is saved to folder as metal-frame.png, with its draw list in draws.txt and the renderer's
 // latest counters in renderer.json. False when Metal isn't running, so there's nothing to save.
@@ -106,6 +108,7 @@ inline void SetDevice(uint32_t, const uint8_t*) {}
 inline void OnFenceWaitStarting() {}
 inline void OnFenceWait(uint32_t, uint32_t, uint64_t) {}
 inline void SetRingDesyncs(uint64_t) {}
+inline void SetBufferChecks(uint64_t, double) {}
 inline void SetGammaRamp(const uint32_t*) {}
 inline bool RequestReport(const std::filesystem::path&) {
   return false;

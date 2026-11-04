@@ -563,7 +563,9 @@ ReadbackTotals g_readback_totals;
 
 // Render thread only from here down.
 uint8_t* g_guest = nullptr;
-uint64_t g_vertex_code_copied = 0;  // Under g_mutex: vertex shaders copied at capture that a command buffer's copies missed.
+uint64_t g_vertex_code_copied = 0;
+uint64_t g_stale_buffers = 0;   // Under g_mutex: from the command buffer full check's last ten seconds.
+double g_buffer_check_ms = 0;  // Under g_mutex: vertex shaders copied at capture that a command buffer's copies missed.
 rex::memory::Memory* g_memory = nullptr;
 std::filesystem::path g_path;
 std::filesystem::path g_shader_dir;
@@ -2127,6 +2129,10 @@ void Report(const MetalDevice& device) {
   out << fmt::format(R"({{"thermal":"{}","gpu_ms_recent":{:.3f},"opening_pass_frames":{},)", thermal, window_gpu_ms,
                      g_totals.opening_pass_frames);
   out << fmt::format(R"("vertex_code_changed":{},"vertex_code_copied":{},)", g_totals.vertex_code_changed, vertex_code_copied);
+  {
+    std::lock_guard lock(g_mutex);
+    out << fmt::format(R"("stale_buffers":{},"buffer_check_ms_per_second":{:.3f},)", g_stale_buffers, g_buffer_check_ms);
+  }
   out << fmt::format(R"("texture_sweep":{{"repairs":{},"checked":{},"mb_per_frame":{:.2f},"ms_per_frame":{:.3f},"rounds":{}}},)",
                      sweep_repairs, sweep_checked, sweep_mb, sweep_ms, sweep.rounds);
   out << fmt::format(
@@ -2740,6 +2746,12 @@ void SetGammaRamp(const uint32_t* ramp) {
 void SetRingDesyncs(uint64_t desyncs) {
   std::lock_guard lock(g_mutex);
   g_ring_desyncs = desyncs;
+}
+
+void SetBufferChecks(uint64_t stale, double ms_per_second) {
+  std::lock_guard lock(g_mutex);
+  g_stale_buffers = stale;
+  g_buffer_check_ms = ms_per_second;
 }
 
 void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_select, const uint32_t* float_constants,
