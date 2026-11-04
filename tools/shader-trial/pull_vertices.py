@@ -463,7 +463,10 @@ def compile_one(job):
     for path, motion in ((source, True), (plain, False)):
         if path is None:
             continue
-        done = subprocess.run(["xcrun", "-sdk", "macosx", "metal", "-D__air__=1", path, "-o", target],
+        # Positions are marked [[invariant]], which Metal only honours with -fpreserve-invariance. Without it, the depth
+        # pre-pass and the textured pass, different shaders doing the same sums, reach slightly different depths, and the
+        # pre-pass's flat colour shows through wherever the textured pass loses its depth test: green and blue slabs.
+        done = subprocess.run(["xcrun", "-sdk", "macosx", "metal", "-D__air__=1", "-fpreserve-invariance", path, "-o", target],
                               capture_output=True, text=True)
         open(log, "w").write(done.stderr)
         if done.returncode == 0:
