@@ -472,6 +472,7 @@ struct Totals {
   uint64_t frames_generated = 0;
   uint64_t motion_draws = 0;
   uint64_t opening_pass_frames = 0;
+  uint64_t vertex_code_changed = 0;  // Draws whose vertex shader the game rewrote between issuing and Metal drawing them.
 };
 
 // Each query's answers until both have arrived. Metal's come when its frame finishes and the emulator's when the game asks.
@@ -562,6 +563,7 @@ ReadbackTotals g_readback_totals;
 
 // Render thread only from here down.
 uint8_t* g_guest = nullptr;
+uint64_t g_vertex_code_copied = 0;  // Under g_mutex: vertex shaders copied at capture that a command buffer's copies missed.
 rex::memory::Memory* g_memory = nullptr;
 std::filesystem::path g_path;
 std::filesystem::path g_shader_dir;
@@ -864,6 +866,7 @@ int FindVertexShader(MetalDevice& device, const BakedDraw& draw, const Run& run)
     const auto copied = run.list_code->find(uint64_t(draw.vertex_shader) << 32 | draw.vertex_shader_dwords);
     if (copied != run.list_code->end()) {
       code = copied->second.data();
+      g_totals.vertex_code_changed += std::memcmp(code, g_guest + address, copied->second.size()) != 0;
     }
   }
   uint64_t key = kHashBasis ^ draw.vertex_shader_dwords;
@@ -2078,7 +2081,7 @@ uint32_t Percentile(const std::vector<uint32_t>& sorted, double share) {
 void Report(const MetalDevice& device) {
   std::vector<uint32_t> sorted = g_encode_us;
   std::sort(sorted.begin(), sorted.end());
-  uint64_t guest_frames, dropped, capture_ns, direct_draws, ring_desyncs;
+  uint64_t guest_frames, dropped, capture_ns, direct_draws, ring_desyncs, vertex_code_copied;
   {
     // Each report covers the frames since the last one, so menus and loading don't blur a run.
     std::lock_guard lock(g_mutex);
@@ -2087,6 +2090,7 @@ void Report(const MetalDevice& device) {
     capture_ns = std::exchange(g_capture_ns, 0);
     direct_draws = std::exchange(g_direct_draws, 0);
     ring_desyncs = g_ring_desyncs;
+    vertex_code_copied = std::exchange(g_vertex_code_copied, 0);
   }
   const MetalGpuTotals gpu = device.gpu_totals();
   if (!gpu.last_error.empty()) {
@@ -2109,6 +2113,10 @@ void Report(const MetalDevice& device) {
   const double sweep_mb = (sweep.hashed_bytes - last_sweep.hashed_bytes) / 1e6 / frames;
   const uint64_t sweep_checked = sweep.checked - last_sweep.checked;
   last_sweep = sweep;
+  if (g_totals.vertex_code_changed || vertex_code_copied) {
+    REXLOG_INFO("Native shadow: {} draws' vertex shaders were rewritten before Metal drew them; {} shaders copied at capture",
+                g_totals.vertex_code_changed, vertex_code_copied);
+  }
   if (sweep_repairs) {
     REXLOG_INFO("Native shadow: texture sweep reloaded {} textures whose memory changed unnoticed, over the last {} frames",
                 sweep_repairs, g_totals.frames);
@@ -2118,6 +2126,7 @@ void Report(const MetalDevice& device) {
   std::ofstream out(g_path);
   out << fmt::format(R"({{"thermal":"{}","gpu_ms_recent":{:.3f},"opening_pass_frames":{},)", thermal, window_gpu_ms,
                      g_totals.opening_pass_frames);
+  out << fmt::format(R"("vertex_code_changed":{},"vertex_code_copied":{},)", g_totals.vertex_code_changed, vertex_code_copied);
   out << fmt::format(R"("texture_sweep":{{"repairs":{},"checked":{},"mb_per_frame":{:.2f},"ms_per_frame":{:.3f},"rounds":{}}},)",
                      sweep_repairs, sweep_checked, sweep_mb, sweep_ms, sweep.rounds);
   out << fmt::format(
@@ -2746,6 +2755,33 @@ void Capture(std::shared_ptr<const std::vector<BakedList>> lists, uint32_t pass_
   run.targets = targets;
   run.vertex_code = std::move(vertex_code);
   run.list_code = std::move(list_code);
+  // Binding rewrites a vertex shader in place for each vertex format it's used with, and Metal draws a frame later, so a
+  // shader read then may have been rewritten for another format: its draws then read their vertices with the wrong
+  // stride, as huge flat-coloured wedges. Copy now any the command buffer's own copies don't cover.
+  if (!run.vertex_code && run.lists && g_guest) {
+    std::shared_ptr<VertexCode> copies;
+    for (const BakedList& list : *run.lists) {
+      for (const BakedDraw& draw : list.draws) {
+        const uint32_t dwords = draw.vertex_shader_dwords;
+        const uint32_t address = draw.vertex_shader & kGuestMask;
+        if (!dwords || dwords > kMaxShaderDwords || uint64_t(address) + dwords * 4ull > kGuestBytes) {
+          continue;
+        }
+        const uint64_t key = uint64_t(draw.vertex_shader) << 32 | dwords;
+        if ((run.list_code && run.list_code->contains(key)) || (copies && copies->contains(key))) {
+          continue;
+        }
+        if (!copies) {
+          copies = run.list_code ? std::make_shared<VertexCode>(*run.list_code) : std::make_shared<VertexCode>();
+        }
+        (*copies)[key].assign(g_guest + address, g_guest + address + size_t(dwords) * 4);
+        ++g_vertex_code_copied;
+      }
+    }
+    if (copies) {
+      run.list_code = std::move(copies);
+    }
+  }
   std::memcpy(run.constants.data(), float_constants, sizeof(run.constants));
   std::memcpy(run.loops.data(), loop_constants, sizeof(run.loops));
   g_capture_ns += Since(start);
