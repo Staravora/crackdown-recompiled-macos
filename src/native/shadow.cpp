@@ -467,6 +467,7 @@ struct Totals {
   uint64_t front_buffers_missed = 0;
   uint64_t frames_generated = 0;
   uint64_t motion_draws = 0;
+  uint64_t opening_pass_frames = 0;
 };
 
 // Each query's answers until both have arrived. Metal's come when its frame finishes and the emulator's when the game asks.
@@ -583,6 +584,39 @@ std::unique_ptr<TextureCache> g_textures;
 const PixelShader g_no_pixel_shader;
 Totals g_totals;
 uint64_t g_frame_number = 0;
+// The small pass the game draws first in play: a 128x128 effect that feeds itself, then a 320x180 copy of the scene,
+// which later draws read back. Every glitched report so far lacks it and the clean one has it, so the log says when it
+// stops and comes back, to line up with the glitch. kOpeningPassGap frames without it count as stopping.
+constexpr uint64_t kOpeningPassGap = 3;
+bool g_opening_pass_running = false;
+uint64_t g_opening_pass_since = 0;  // The frame it last started or stopped.
+uint64_t g_opening_pass_last = 0;   // The last frame it ran.
+
+bool OpeningPassTarget(const Targets& targets) {
+  return targets.color && ((targets.width == 128 && targets.height == 128) || (targets.width == 320 && targets.height == 180));
+}
+
+void NoteOpeningPass(bool ran) {
+  if (ran) {
+    ++g_totals.opening_pass_frames;
+    if (!g_opening_pass_running) {
+      if (g_opening_pass_since) {
+        REXLOG_INFO("Native shadow: the opening pass came back at frame {}, after {} frames without it", g_frame_number,
+                    g_frame_number - g_opening_pass_last - 1);
+      } else {
+        REXLOG_INFO("Native shadow: the opening pass started at frame {}", g_frame_number);
+      }
+      g_opening_pass_running = true;
+      g_opening_pass_since = g_frame_number;
+    }
+    g_opening_pass_last = g_frame_number;
+  } else if (g_opening_pass_running && g_frame_number - g_opening_pass_last >= kOpeningPassGap) {
+    REXLOG_INFO("Native shadow: the opening pass stopped after frame {}, having run for {} frames", g_opening_pass_last,
+                g_opening_pass_last - g_opening_pass_since + 1);
+    g_opening_pass_running = false;
+    g_opening_pass_since = g_opening_pass_last;
+  }
+}
 std::vector<uint32_t> g_encode_us;
 std::array<uint32_t, kAluDwords> g_constants{};
 uint32_t g_check_address = 0;
@@ -1644,6 +1678,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
   std::unordered_map<int, uint32_t> color_draws;
   std::set<int> cleared;
   int last_color_target = -1;
+  bool opening_pass = false;
   int open_query = -1;
   auto next_query = frame.queries.begin();
   const auto apply_queries = [&](size_t before_run) {
@@ -1680,6 +1715,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
           continue;
         }
         ++g_totals.draws;
+        opening_pass |= OpeningPassTarget(run.targets);
         ApplyLiterals(draw);
         // Culling both faces leaves nothing to draw, and Metal has no way to say so.
         if ((draw.mode_control & kCullBothFaces) == kCullBothFaces) {
@@ -1946,6 +1982,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
     }
   }
   apply_queries(frame.runs.size());
+  NoteOpeningPass(opening_pass);
   answers.front_width = g_front_width;
   answers.front_height = g_front_height;
   if (DrawsAlone() && frame.front_buffer && !g_debug_stopped) {
@@ -2038,9 +2075,11 @@ void Report(const MetalDevice& device) {
   last_gpu_ns = gpu.gpu_ns;
   last_gpu_frames = gpu.frames;
   const char* thermal = ThermalState();
-  REXLOG_INFO("Native shadow: GPU {:.1f} ms a frame over the last {} frames, thermal {}", window_gpu_ms, window_gpu_frames, thermal);
+  REXLOG_INFO("Native shadow: GPU {:.1f} ms a frame over the last {} frames, thermal {}, opening pass in {} of {} frames",
+              window_gpu_ms, window_gpu_frames, thermal, g_totals.opening_pass_frames, g_totals.frames);
   std::ofstream out(g_path);
-  out << fmt::format(R"({{"thermal":"{}","gpu_ms_recent":{:.3f},)", thermal, window_gpu_ms);
+  out << fmt::format(R"({{"thermal":"{}","gpu_ms_recent":{:.3f},"opening_pass_frames":{},)", thermal, window_gpu_ms,
+                     g_totals.opening_pass_frames);
   out << fmt::format(
       R"("guest_frames":{},"frames":{},"dropped":{},"draws_per_frame":{:.1f},"skipped_draws_per_frame":{:.1f},"no_room":{},)"
       R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"no_target_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},"other_index_order_draws_per_frame":{:.1f},"transparent_draws_per_frame":{:.1f},"no_color_draws_per_frame":{:.1f},"alpha_tested_draws_per_frame":{:.1f},"shaded_draws_per_frame":{:.1f},"needs_resolve_draws_per_frame":{:.1f},"native_resolves_per_frame":{:.1f},"missed_resolves_per_frame":{:.1f},"pixel_shaders_found":{},"pixel_shaders_missing":{},"textures_loaded":{},"textures_skipped":{},"textures_reloaded":{},"reloaded_mb":{:.1f},"textures_unchanged":{},"direct_draws_per_frame":{:.1f},"ring_desyncs":{},"passes_per_frame":{:.1f},"targets":{},)"
