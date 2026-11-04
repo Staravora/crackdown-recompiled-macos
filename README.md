@@ -106,7 +106,7 @@ If the system cannot mount AppImages with FUSE, the AppImage unpacks itself into
 
 ### macOS
 
-**Preview.** A native Apple silicon build. Its Metal renderer is the default: faster than the emulated one and sharp at 1920×1080 on an M1. Crackdown was made for the Xbox 360's graphics chip, never for Metal, and the Metal renderer redraws everything the game asks for in its own way, so **expect visual glitches**: missing or flat-coloured surfaces, water that looks different (see Known issues). If something looks wrong, the emulated renderer is one switch away on the **Graphics** page: slower, but it draws the game as the PC versions do.
+**Preview.** A native Apple silicon build. Its Metal renderer is the default: faster than the emulated one and sharp at 1920×1080 on an M1. Crackdown was made for the Xbox 360's graphics chip, never for Metal, and the Metal renderer redraws everything the game asks for in its own way, so **expect visual glitches**, such as water that looks different (see Known issues). If something looks wrong, the emulated renderer is one switch away on the **Graphics** page: slower, but it draws the game as the PC versions do.
 
 1. Download **Crackdown-v0.6.2-macos-arm64.zip** from the [Mac releases](https://github.com/Staravora/crackdown-recompiled-macos/releases/latest), open it, and drag **Crackdown Recompiled** to **Applications**.
 2. Open it. The launcher opens.
@@ -115,7 +115,7 @@ If the system cannot mount AppImages with FUSE, the AppImage unpacks itself into
 
 The game files, settings, saves and logs go in `~/Library/Application Support/Crackdown Recompiled`. The installer copies what the game needs out of the disc image, so the game doesn't use the `.iso` after that; keep it anyway, in case you ever reinstall. When a new release comes out the launcher offers it; **Update now** downloads it, checks it's signed by the same developer, swaps it in and restarts. Your game files, saves and settings stay where they are. Updates need the app in **Applications** (or another folder your account can write to), opened from there. **Metal resolution** on the **Graphics** page draws the game at 1280×720, 1920×1080 or 2560×1440; the M1 MacBook Air holds 30 FPS at 1920×1080.
 
-**Seen a glitch?** Press **⌘⇧R** while it's on screen. You'll hear a chime, and the game saves a report in the `logs/reports` folder: what the Metal renderer drew, every draw in that frame, and the end of the log. Zip that report's folder and attach it to an [issue](https://github.com/Staravora/crackdown-recompiled-macos/issues). It's the quickest way to get a glitch fixed.
+**Seen a glitch?** Press **⌘⇧R** while it's on screen. You'll hear a chime, and the game saves a report in the `logs/reports` folder: what the Metal renderer drew, every draw in that frame, and the end of the log. Zip that report's folder and attach it to an [issue](https://github.com/Staravora/crackdown-recompiled-macos/issues). It's the quickest way to get a glitch fixed. The game also saves one by itself, silently, when a steady frame rate suddenly drops, at most three a session.
 
 **No game files are included** in any download.
 
@@ -213,7 +213,7 @@ The launcher's **Achievements** page shows the same list without starting the ga
 ## Known issues
 
 - Background music may occasionally stop during gameplay while sound effects and voices continue.
-- **Mac, Metal renderer:** after a long session, roads, pavements and building windows can stop drawing, so the sea, the sky or a flat colour shows where they should be. Some water can look different from the Xbox, and a rare one-frame flicker has been seen. The emulated renderer on the **Graphics** page has none of these. Press **⌘⇧R** when you see one.
+- **Mac, Metal renderer:** some water can look different from the Xbox, and a rare one-frame flicker has been seen. Mac build 3 fixed, as far as we know, buildings drawing black, magenta or in flat colours after loading in or respawning, and green, blue or pink slabs across the distance. If you still see anything like that, press **⌘⇧R**.
 
 ## Screenshots
 

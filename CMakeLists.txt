@@ -323,7 +323,7 @@ endif()
 set(CRACKDOWN_MAC_UPDATE_REPOSITORY "" CACHE STRING "GitHub owner/name the Mac app's releases come from")
 # The Mac release's build number on top of the game's version: the release is tagged v<version>+macos.<build>, and a
 # higher build of the same version is offered as an update. Raise it for every Mac release.
-set(CRACKDOWN_MAC_BUILD 2)
+set(CRACKDOWN_MAC_BUILD 3)
 target_compile_definitions(crackdown PRIVATE
     CRACKDOWN_PORT_VERSION="${PROJECT_VERSION}"
     CRACKDOWN_MAC_UPDATE_REPOSITORY="${CRACKDOWN_MAC_UPDATE_REPOSITORY}"
