@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <deque>
@@ -1146,6 +1147,10 @@ bool g_debug_no_resolves = false;
 int g_debug_show = -1;
 std::set<uint32_t> g_debug_skip_ps;
 uint32_t g_debug_stop_ps = 0;
+// skip_range=<shader>:<first>-<last>: skips that pixel shader's draws numbered first to last in the frame, counting from 0
+// in the order they come. The numbers hold from frame to frame while the view doesn't change, so a range can be halved
+// live to find which of a shader's hundreds of draws is at fault.
+uint32_t g_debug_range_ps = 0, g_debug_range_first = 0, g_debug_range_last = 0, g_debug_range_seen = 0;
 bool g_debug_stopped = false;
 bool g_debug_alpha = false;
 bool g_debug_no_stencil = false;
@@ -1675,6 +1680,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
   }
   g_front_target = g_next_front_target;
   g_debug_id = 0;
+  g_debug_range_seen = 0;
   g_debug_stopped = false;
   device.CaptureAlpha(g_debug_alpha);
   g_textures->BeginFrame();
@@ -1742,6 +1748,12 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
         if (g_debug_skip_ps.contains(draw.pixel_shader) ||
             (g_skip_water && std::ranges::find(kWaterPixelShaders, draw.pixel_shader) != kWaterPixelShaders.end())) {
           continue;
+        }
+        if (g_debug_range_ps && draw.pixel_shader == g_debug_range_ps) {
+          const uint32_t number = g_debug_range_seen++;
+          if (number >= g_debug_range_first && number <= g_debug_range_last) {
+            continue;
+          }
         }
         g_debug_stopped |= g_debug_stop_ps && draw.pixel_shader == g_debug_stop_ps;
         if (g_debug_stopped) {
@@ -2256,6 +2268,7 @@ void RenderThread() {
       g_debug_show = -1;
       g_debug_skip_ps.clear();
       g_debug_stop_ps = 0;
+      g_debug_range_ps = 0;
       while (in >> word) {
         g_debug_skip_blended |= word == "skip_blended";
         g_debug_ids |= word == "ids";
@@ -2267,6 +2280,14 @@ void RenderThread() {
         g_debug_vertex_constants |= word == "vconst";
         want_report |= word == "report";
         want_reload |= word == "reload_stale";
+        if (word.rfind("skip_range=", 0) == 0) {
+          unsigned ps = 0, first = 0, last = 0;
+          if (std::sscanf(word.c_str() + 11, "%x:%u-%u", &ps, &first, &last) == 3) {
+            g_debug_range_ps = ps;
+            g_debug_range_first = first;
+            g_debug_range_last = last;
+          }
+        }
         if (word.rfind("stop_ps=", 0) == 0) {
           g_debug_stop_ps = uint32_t(std::stoul(word.substr(8), nullptr, 16));
         }
@@ -2290,7 +2311,8 @@ void RenderThread() {
                                << (g_debug_no_resolves ? "no_resolves " : "") << (g_debug_alpha ? "alpha " : "") << (g_debug_no_stencil ? "no_stencil " : "")
                                << (g_debug_mark_queries ? "mark_queries " : "")
                                << (g_debug_show >= 0 ? fmt::format("show={} ", g_debug_show) : "")
-                               << (g_debug_stop_ps ? fmt::format("stop_ps={:X} ", g_debug_stop_ps) : "");
+                               << (g_debug_stop_ps ? fmt::format("stop_ps={:X} ", g_debug_stop_ps) : "")
+                               << (g_debug_range_ps ? fmt::format("skip_range={:X}:{}-{} ", g_debug_range_ps, g_debug_range_first, g_debug_range_last) : "");
         for (const uint32_t skip : g_debug_skip_ps) {
           std::ofstream(control, std::ios::app) << fmt::format("skip_ps={:X} ", skip);
         }
