@@ -50,6 +50,9 @@ REXCVAR_DEFINE_BOOL(crackdown_native_exposure, false, "Crackdown",
 REXCVAR_DEFINE_BOOL(crackdown_native_pacing, false, "Crackdown",
                     "With shadow mode on, the game waits for Metal to catch up instead of Metal dropping frames");
 
+REXCVAR_DEFINE_BOOL(crackdown_texture_sweep, true, "Crackdown",
+                    "With the Metal renderer, check the textures drawn lately against game memory, a share each frame, and "
+                    "reload any that changed without the memory watch noticing, which otherwise draw black or in flat colours");
 REXCVAR_DEFINE_BOOL(crackdown_native_only, true, "Crackdown",
                     "Metal draws the game and the emulator draws nothing. The Mac's default renderer. Turns on shadow mode, "
                     "pacing and exposure, and Metal answers occlusion queries. Without its shaders the emulator draws instead");
@@ -1679,6 +1682,9 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
     const size_t reloaded = g_textures->ReloadStale();
     REXLOG_INFO("Native shadow: reload_stale reloaded {} textures whose memory had changed", reloaded);
   }
+  if (REXCVAR_GET(crackdown_texture_sweep)) {
+    g_textures->Sweep();
+  }
   size_t used = 0, indices_used = 0;
   int current_target = -1;
   std::unordered_map<int, uint32_t> color_draws;
@@ -2081,11 +2087,25 @@ void Report(const MetalDevice& device) {
   last_gpu_ns = gpu.gpu_ns;
   last_gpu_frames = gpu.frames;
   const char* thermal = ThermalState();
+  // The sweep's totals run from the start too.
+  static TextureCache::SweepTotals last_sweep;
+  const TextureCache::SweepTotals sweep = g_textures->sweep_totals();
+  const uint64_t sweep_repairs = sweep.repairs - last_sweep.repairs;
+  const double sweep_ms = (sweep.ns - last_sweep.ns) / 1e6 / frames;
+  const double sweep_mb = (sweep.hashed_bytes - last_sweep.hashed_bytes) / 1e6 / frames;
+  const uint64_t sweep_checked = sweep.checked - last_sweep.checked;
+  last_sweep = sweep;
+  if (sweep_repairs) {
+    REXLOG_INFO("Native shadow: texture sweep reloaded {} textures whose memory changed unnoticed, over the last {} frames",
+                sweep_repairs, g_totals.frames);
+  }
   REXLOG_INFO("Native shadow: GPU {:.1f} ms a frame over the last {} frames, thermal {}, opening pass in {} of {} frames",
               window_gpu_ms, window_gpu_frames, thermal, g_totals.opening_pass_frames, g_totals.frames);
   std::ofstream out(g_path);
   out << fmt::format(R"({{"thermal":"{}","gpu_ms_recent":{:.3f},"opening_pass_frames":{},)", thermal, window_gpu_ms,
                      g_totals.opening_pass_frames);
+  out << fmt::format(R"("texture_sweep":{{"repairs":{},"checked":{},"mb_per_frame":{:.2f},"ms_per_frame":{:.3f},"rounds":{}}},)",
+                     sweep_repairs, sweep_checked, sweep_mb, sweep_ms, sweep.rounds);
   out << fmt::format(
       R"("guest_frames":{},"frames":{},"dropped":{},"draws_per_frame":{:.1f},"skipped_draws_per_frame":{:.1f},"no_room":{},)"
       R"("recorded_draws_per_frame":{:.1f},"recorded_indices_per_frame":{:.0f},"no_shader_draws_per_frame":{:.1f},"no_target_draws_per_frame":{:.1f},"other_primitive_draws_per_frame":{:.1f},"other_index_order_draws_per_frame":{:.1f},"transparent_draws_per_frame":{:.1f},"no_color_draws_per_frame":{:.1f},"alpha_tested_draws_per_frame":{:.1f},"shaded_draws_per_frame":{:.1f},"needs_resolve_draws_per_frame":{:.1f},"native_resolves_per_frame":{:.1f},"missed_resolves_per_frame":{:.1f},"pixel_shaders_found":{},"pixel_shaders_missing":{},"textures_loaded":{},"textures_skipped":{},"textures_reloaded":{},"reloaded_mb":{:.1f},"textures_unchanged":{},"direct_draws_per_frame":{:.1f},"ring_desyncs":{},"passes_per_frame":{:.1f},"targets":{},)"

@@ -71,8 +71,26 @@ class TextureCache {
   // reported, ignoring the upload budget. For testing whether stale textures are what a glitch is. Returns how many.
   size_t ReloadStale();
 
+  // Checks the next share of the textures drawn lately against guest memory, and reloads any whose memory changed
+  // without the page watch reporting it. Some writes into guest memory get past the watch (a district's textures streamed
+  // in on load or teleport), and without this Metal draws those textures from old data, black or in flat colours, until
+  // something else bumps their pages. Call once a frame, after BeginFrame. Covers them all in about a second.
+  void Sweep();
+  struct SweepTotals {
+    uint64_t repairs = 0;        // Textures reloaded because their memory changed unreported.
+    uint64_t repaired_bytes = 0;
+    uint64_t checked = 0;        // Textures compared with memory.
+    uint64_t hashed_bytes = 0;
+    uint64_t ns = 0;             // Time spent comparing and reloading.
+    uint64_t rounds = 0;         // Times it has been through them all.
+  };
+  const SweepTotals& sweep_totals() const { return sweep_; }
+
  private:
   static constexpr size_t kUploadBytesPerFrame = 32 << 20;
+  static constexpr size_t kSweepBytesPerFrame = 8 << 20;
+  static constexpr uint64_t kSweepFrames = 30;         // How long a round takes, at most, when it's under the byte limit.
+  static constexpr uint64_t kSweepRecentFrames = 60;   // Only textures drawn within this many frames are checked.
 
   uint32_t scene_width_ = 0;
   float scene_scale_ = 1.0f;
@@ -124,6 +142,9 @@ class TextureCache {
   uint64_t textures_reloaded_ = 0;
   uint64_t reloaded_bytes_ = 0;
   uint64_t textures_unchanged_ = 0;
+  std::vector<uint64_t> sweep_keys_;
+  size_t sweep_at_ = 0;
+  SweepTotals sweep_;
 };
 
 }  // namespace crackdown::native

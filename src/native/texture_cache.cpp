@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -757,6 +758,75 @@ size_t TextureCache::ReloadStale() {
   }
   upload_budget_ = budget;
   return reloaded;
+}
+
+void TextureCache::Sweep() {
+  const auto started = std::chrono::steady_clock::now();
+  if (sweep_at_ >= sweep_keys_.size()) {
+    sweep_keys_.clear();
+    for (const auto& [key, entry] : textures_) {
+      if (entry.descriptor != int(kDummyDescriptor) && frame_ - entry.checked_frame < kSweepRecentFrames) {
+        sweep_keys_.push_back(key);
+      }
+    }
+    sweep_at_ = 0;
+    ++sweep_.rounds;
+  }
+  const size_t share = (sweep_keys_.size() + kSweepFrames - 1) / kSweepFrames;
+  size_t hashed = 0, count = 0;
+  while (sweep_at_ < sweep_keys_.size() && count < share && hashed < kSweepBytesPerFrame) {
+    const auto found = textures_.find(sweep_keys_[sweep_at_]);
+    if (found == textures_.end() || found->second.descriptor == int(kDummyDescriptor)) {
+      ++sweep_at_;
+      continue;
+    }
+    Entry& entry = found->second;
+    xenos::xe_gpu_texture_fetch_t fetch;
+    std::memcpy(&fetch, entry.fetch.data(), sizeof(fetch));
+    const std::array<Range, 2> ranges = RangesOf(fetch);
+    const uint64_t version = VersionOf(ranges[0]) + VersionOf(ranges[1]);
+    if (version != entry.version) {
+      // A reported change: FindTexture reloads it when it's next drawn.
+      ++sweep_at_;
+      continue;
+    }
+    // Each page's version before its data, as FindTexture reads them.
+    std::vector<PageCheck> pages;
+    pages.reserve(entry.pages.size());
+    bool changed = false;
+    size_t index = 0;
+    ForEachPage(ranges, [&](uint32_t page, const Range& part) {
+      const uint32_t page_version = g_page_versions[page].load(std::memory_order_relaxed);
+      const uint64_t content = ContentOf(guest_memory_, guest_bytes_, part);
+      changed |= index >= entry.pages.size() || content != entry.pages[index].content;
+      pages.push_back({page_version, content});
+      hashed += part.bytes;
+      ++index;
+    });
+    changed |= index != entry.pages.size();
+    if (changed) {
+      if (!upload_budget_) {
+        break;  // Out of upload room this frame: check it again next frame.
+      }
+      for (const Range& range : ranges) {
+        if (range.bytes) {
+          memory_->EnablePhysicalMemoryAccessCallbacks(range.start, range.bytes, true, false);
+        }
+      }
+      const size_t budget_before = upload_budget_;
+      if (Load(entry.fetch.data(), entry.descriptor) != int(kDummyDescriptor)) {
+        entry.version = version;
+        entry.pages = std::move(pages);
+        ++sweep_.repairs;
+        sweep_.repaired_bytes += budget_before - upload_budget_;
+      }
+    }
+    ++sweep_at_;
+    ++count;
+  }
+  sweep_.checked += count;
+  sweep_.hashed_bytes += hashed;
+  sweep_.ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count());
 }
 
 void TextureCache::BeginFrame() {
