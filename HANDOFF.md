@@ -1,5 +1,15 @@
 # Session handoff
 
+## 2026-11-03 (night) — Both Metal glitches look fixed
+- **Bruce, 20:13 (session 727):** "it's been a hot minute and several reloads and I haven't seen anything wrong". Before tonight the slabs or black buildings showed within a few Retreat reloads.
+- **What's in (all on by default, all committed, not pushed):**
+  - **Texture sweep** (`crackdown_texture_sweep`, 053e805): black, magenta and flat-coloured buildings, proven by `reload_stale`. About 0.15 to 0.3 ms a frame; repairs 50 to 250 textures after each load.
+  - **Whole command buffer check** (`crackdown_full_buffer_check`, 0cee27b): the decode cache only sampled the first 64 dwords of a buffer's first list. It catches 17 buffers after a respawn and a few every 10 s while moving, and the green, blue and pink slabs haven't been seen since. Likely their cause, not proven by a before-and-after at the same view. Costs 15 to 28 ms a second on the game thread (about 0.5 to 1 ms a frame); a cheaper version could check only buffers with draws, or sample more widely.
+  - **Vertex shaders with `-fpreserve-invariance`** (155cb0e, in `user_data/native-shaders`; old set in `native-shaders-before-invariance`): didn't clear the slabs alone but is right for the depth pre-pass. **The release zip ships shaders, so the next release must ship this set.**
+  - **Vertex shader copy at capture** (246cf50): never triggered (0 copied, 0 changed). Harmless, could go.
+  - Debug words added tonight: `reload_stale`, `skip_range`, `only_range`; `tools/find-slab-draws.py`.
+- **Next:** correct the README known issue and the build 2 release notes (they blame long sessions); then Mac build 3 with these fixes and the rebuilt shaders, after /ship-check.
+
 ## 2026-11-03 (evening) — CAUSE PROVEN: the Metal glitch is stale textures
 - **Proof (session 722, 18:51, `reports/report-2026-11-03-185116` and `logs/live-after-report-2026-11-03-185116.png`):** Bruce loaded in to black buildings. Report saved at 18:51:16 (black), `reload_stale` at 18:51:21 reloaded **804** textures whose guest memory no longer matched their upload, and the frame after, same spot and view, is fully and correctly textured; the live screen stayed right.
 - **What it means:** the game rewrites texture memory (streaming a district's textures on load or teleport) through some path that doesn't trip the page watch, so `g_page_versions` never moves, `FindTexture` never re-hashes, and Metal keeps drawing the old data: black, magenta or flat colours depending on what was there. It clears by itself only when something else happens to bump those pages.
