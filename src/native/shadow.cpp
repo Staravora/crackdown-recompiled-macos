@@ -1133,10 +1133,12 @@ double ClearDepthFor(const BakedDraw& draw) {
 // Live switches for examining a running game, set from metal-debug.txt: skip_blended, ids (each draw flat, in a colour
 // that gives its number), no_resolves, show=<target>, skip_ps=<address>, stop_ps=<address>, which ends the frame at that
 // shader's first draw, alpha, which puts alpha in a capture's colours, mark_queries, which paints the draws of queries
-// the two sides disagreed on, dump=<name>, which writes live-<name>.png and .txt beside it, and report, which saves a
-// problem report as ⌘⇧R does. dump and report happen once and are taken out of the file.
+// the two sides disagreed on, dump=<name>, which writes live-<name>.png and .txt beside it, report, which saves a
+// problem report as ⌘⇧R does, and reload_stale, which reloads every texture whose memory has changed, reported or not.
+// dump, report and reload_stale happen once and are taken out of the file.
 bool g_debug_skip_blended = false;
 bool g_debug_ids = false;
+bool g_debug_reload_stale = false;  // Once, at the start of the next frame drawn.
 bool g_debug_no_resolves = false;
 int g_debug_show = -1;
 std::set<uint32_t> g_debug_skip_ps;
@@ -1673,6 +1675,10 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
   g_debug_stopped = false;
   device.CaptureAlpha(g_debug_alpha);
   g_textures->BeginFrame();
+  if (std::exchange(g_debug_reload_stale, false)) {
+    const size_t reloaded = g_textures->ReloadStale();
+    REXLOG_INFO("Native shadow: reload_stale reloaded {} textures whose memory had changed", reloaded);
+  }
   size_t used = 0, indices_used = 0;
   int current_target = -1;
   std::unordered_map<int, uint32_t> color_draws;
@@ -2224,6 +2230,7 @@ void RenderThread() {
       std::string word;
       bool want_dump = false;
       bool want_report = false;
+      bool want_reload = false;
       std::string name = "live";
       g_debug_skip_blended = g_debug_ids = g_debug_no_resolves = g_debug_alpha = g_debug_no_stencil = g_debug_no_clears = g_debug_mark_queries = g_debug_vertex_constants = false;
       g_debug_show = -1;
@@ -2239,6 +2246,7 @@ void RenderThread() {
         g_debug_mark_queries |= word == "mark_queries";
         g_debug_vertex_constants |= word == "vconst";
         want_report |= word == "report";
+        want_reload |= word == "reload_stale";
         if (word.rfind("stop_ps=", 0) == 0) {
           g_debug_stop_ps = uint32_t(std::stoul(word.substr(8), nullptr, 16));
         }
@@ -2254,7 +2262,8 @@ void RenderThread() {
         }
       }
       in.close();
-      if (want_dump || want_report) {
+      g_debug_reload_stale |= want_reload;
+      if (want_dump || want_report || want_reload) {
         std::error_code ignored;
         std::filesystem::remove(control, ignored);
         std::ofstream(control) << (g_debug_skip_blended ? "skip_blended " : "") << (g_debug_ids ? "ids " : "")

@@ -67,6 +67,9 @@ class TextureCache {
   // For a problem report: every loaded texture whose guest memory no longer holds what was uploaded. "missed" means no
   // page change was reported, so it will never reload; "pending" means one was, and the reload hasn't happened yet.
   void CheckStale(std::ostream& out) const;
+  // Reloads every loaded texture whose guest memory no longer holds what was uploaded, whether or not a change was
+  // reported, ignoring the upload budget. For testing whether stale textures are what a glitch is. Returns how many.
+  size_t ReloadStale();
 
  private:
   static constexpr size_t kUploadBytesPerFrame = 32 << 20;

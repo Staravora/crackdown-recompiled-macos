@@ -720,6 +720,45 @@ void TextureCache::CheckStale(std::ostream& out) const {
       << lines;
 }
 
+size_t TextureCache::ReloadStale() {
+  size_t reloaded = 0;
+  const size_t budget = upload_budget_;
+  for (auto& [key, entry] : textures_) {
+    if (entry.descriptor == int(kDummyDescriptor)) {
+      continue;
+    }
+    xenos::xe_gpu_texture_fetch_t fetch;
+    std::memcpy(&fetch, entry.fetch.data(), sizeof(fetch));
+    const std::array<Range, 2> ranges = RangesOf(fetch);
+    size_t index = 0;
+    bool changed = false;
+    ForEachPage(ranges, [&](uint32_t, const Range& part) {
+      changed |= index >= entry.pages.size() || ContentOf(guest_memory_, guest_bytes_, part) != entry.pages[index].content;
+      ++index;
+    });
+    if (!changed) {
+      continue;
+    }
+    for (const Range& range : ranges) {
+      if (range.bytes) {
+        memory_->EnablePhysicalMemoryAccessCallbacks(range.start, range.bytes, true, false);
+      }
+    }
+    std::vector<PageCheck> pages;
+    ForEachPage(ranges, [&](uint32_t page, const Range& part) {
+      pages.push_back({g_page_versions[page].load(std::memory_order_relaxed), ContentOf(guest_memory_, guest_bytes_, part)});
+    });
+    upload_budget_ = SIZE_MAX / 2;
+    if (Load(entry.fetch.data(), entry.descriptor) != int(kDummyDescriptor)) {
+      entry.version = VersionOf(ranges[0]) + VersionOf(ranges[1]);
+      entry.pages = std::move(pages);
+      ++reloaded;
+    }
+  }
+  upload_budget_ = budget;
+  return reloaded;
+}
+
 void TextureCache::BeginFrame() {
   upload_budget_ = kUploadBytesPerFrame;
   ++frame_;
