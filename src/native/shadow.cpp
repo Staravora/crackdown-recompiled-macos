@@ -1149,8 +1149,10 @@ std::set<uint32_t> g_debug_skip_ps;
 uint32_t g_debug_stop_ps = 0;
 // skip_range=<shader>:<first>-<last>: skips that pixel shader's draws numbered first to last in the frame, counting from 0
 // in the order they come. The numbers hold from frame to frame while the view doesn't change, so a range can be halved
-// live to find which of a shader's hundreds of draws is at fault.
+// live to find which of a shader's hundreds of draws is at fault. only_range=<shader>:<first>-<last> is the other way
+// round: it skips all that shader's draws but those, which finds draws that overlap, where skipping some leaves the rest.
 uint32_t g_debug_range_ps = 0, g_debug_range_first = 0, g_debug_range_last = 0, g_debug_range_seen = 0;
+bool g_debug_range_keep = false;
 bool g_debug_stopped = false;
 bool g_debug_alpha = false;
 bool g_debug_no_stencil = false;
@@ -1751,7 +1753,7 @@ void Encode(const Frame& frame, MetalDevice& device, uint8_t* memory, FrameAnswe
         }
         if (g_debug_range_ps && draw.pixel_shader == g_debug_range_ps) {
           const uint32_t number = g_debug_range_seen++;
-          if (number >= g_debug_range_first && number <= g_debug_range_last) {
+          if ((number >= g_debug_range_first && number <= g_debug_range_last) != g_debug_range_keep) {
             continue;
           }
         }
@@ -2280,12 +2282,14 @@ void RenderThread() {
         g_debug_vertex_constants |= word == "vconst";
         want_report |= word == "report";
         want_reload |= word == "reload_stale";
-        if (word.rfind("skip_range=", 0) == 0) {
+        const bool keep = word.rfind("only_range=", 0) == 0;
+        if (keep || word.rfind("skip_range=", 0) == 0) {
           unsigned ps = 0, first = 0, last = 0;
           if (std::sscanf(word.c_str() + 11, "%x:%u-%u", &ps, &first, &last) == 3) {
             g_debug_range_ps = ps;
             g_debug_range_first = first;
             g_debug_range_last = last;
+            g_debug_range_keep = keep;
           }
         }
         if (word.rfind("stop_ps=", 0) == 0) {
@@ -2312,7 +2316,7 @@ void RenderThread() {
                                << (g_debug_mark_queries ? "mark_queries " : "")
                                << (g_debug_show >= 0 ? fmt::format("show={} ", g_debug_show) : "")
                                << (g_debug_stop_ps ? fmt::format("stop_ps={:X} ", g_debug_stop_ps) : "")
-                               << (g_debug_range_ps ? fmt::format("skip_range={:X}:{}-{} ", g_debug_range_ps, g_debug_range_first, g_debug_range_last) : "");
+                               << (g_debug_range_ps ? fmt::format("{}={:X}:{}-{} ", g_debug_range_keep ? "only_range" : "skip_range", g_debug_range_ps, g_debug_range_first, g_debug_range_last) : "");
         for (const uint32_t skip : g_debug_skip_ps) {
           std::ofstream(control, std::ios::app) << fmt::format("skip_ps={:X} ", skip);
         }

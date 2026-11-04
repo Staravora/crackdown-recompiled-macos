@@ -2,9 +2,10 @@
 """Find which draws of one pixel shader paint something wrong, while the game shows it and the view holds still.
 
 Captures the frame as it is, then with the whole shader skipped; the pixels that differ are what the shader paints. Then
-skips ranges of its draws (skip_range=<shader>:<first>-<last>), halving any range whose skipping clears a share of those
-pixels, until single draws are left. Prints each culprit's line from the draw list, and saves the base capture's vertex
-constants (vconst) beside it in the logs folder for comparing with a clean frame.
+keeps only a range of its draws (only_range=<shader>:<first>-<last>, every other draw of it skipped), halving any range
+that still paints a share of those pixels, until single draws are left. Keeping rather than skipping finds draws that
+overlap, where skipping some leaves the rest painting the same place. Prints each culprit's line from the draw list,
+and saves the base capture's vertex constants (vconst) beside it in the logs folder for comparing with a clean frame.
 
 Usage: tools/find-slab-draws.py [shader, default 1CCAE300]. Needs ImageMagick. Uses metal-debug.txt and removes it after.
 """
@@ -17,7 +18,8 @@ import time
 LOGS = os.path.expanduser("~/Developer/crackdown/work/Crackdown Data/logs")
 CONTROL = os.path.join(LOGS, "metal-debug.txt")
 SHADER = (sys.argv[1] if len(sys.argv) > 1 else "1CCAE300").upper()
-MIN_SHARE = 0.03  # A range that clears less than this share of the shader's pixels is left alone.
+MIN_SHARE = 0.03  # A range that paints less than this share of the shader's pixels is left alone.
+MAX_STEPS = 80
 
 
 def capture(words, name):
@@ -45,11 +47,10 @@ def painted_share(base, without):
     return mean(base, without, "-resize", "320x180!", "-fx", f"{DIFF}>0.3?1:0")
 
 
-def cleared_share(base, without, trial):
-    # Of the pixels the shader paints, how many look like the shader-skipped frame when only this range is skipped.
-    both = mean(base, without, trial, "-resize", "320x180!", "-fx",
-                f"({DIFF}>0.3 && (abs(u[2].r-v.r)+abs(u[2].g-v.g)+abs(u[2].b-v.b))<0.15)?1:0")
-    return both
+def kept_share(base, without, trial):
+    # Of the pixels the shader paints, how many still look as they do with all of it when only this range is kept.
+    return mean(base, without, trial, "-resize", "320x180!", "-fx",
+                f"({DIFF}>0.3 && (abs(u[2].r-u.r)+abs(u[2].g-u.g)+abs(u[2].b-u.b))<0.15)?1:0")
 
 
 def main():
@@ -63,12 +64,12 @@ def main():
         print("nothing to find: the shader paints nothing that changes")
         return
     found, pending, step = [], [(0, count - 1)], 0
-    while pending:
+    while pending and step < MAX_STEPS:
         first, last = pending.pop()
         step += 1
-        trial = capture([f"skip_range={SHADER}:{first}-{last}"], f"slab-{step}")
-        share = cleared_share(base, without, trial) / painted
-        print(f"draws {first}-{last}: clears {share * 100:.0f}%", flush=True)
+        trial = capture([f"only_range={SHADER}:{first}-{last}"], f"slab-{step}")
+        share = kept_share(base, without, trial) / painted
+        print(f"draws {first}-{last} alone: paint {share * 100:.0f}%", flush=True)
         if share < MIN_SHARE:
             continue
         if first == last:
@@ -78,7 +79,9 @@ def main():
         pending += [(middle + 1, last), (first, middle)]
     print("culprits:", flush=True)
     for number, share in sorted(found):
-        print(f"  #{number} clears {share * 100:.0f}%: {lines[number].strip()[:260]}", flush=True)
+        print(f"  #{number} paints {share * 100:.0f}% alone: {lines[number].strip()[:260]}", flush=True)
+    if pending:
+        print(f"stopped after {MAX_STEPS} captures with {len(pending)} ranges unsearched", flush=True)
 
 
 try:
